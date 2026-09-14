@@ -32,6 +32,10 @@ cp .env.example .env
 
 [Настройка HTTPS, cookies и reverse proxy](docs/domains.md). Для этой схемы фронтенд раздаётся отдельно, а `xx` проксирует только API портала.
 
+## Timeweb Cloud Apps
+
+[Настройки запуска на Timeweb](docs/timeweb.md): команда `python -m app.serve`, `PORT=8000`, проверка состояния `/api/health`. Для Docker-деплоя добавлен готовый `Dockerfile` с `EXPOSE 8000`. Рабочие параметры Supabase задаются в панели приложения.
+
 ## Локальный запуск сайта
 
 Сначала соберите соседний фронтенд:
@@ -61,14 +65,14 @@ npm --prefix ../team_front run build -- --mode development
 
 ```sh
 .venv/bin/python -m pytest -q
-.venv/bin/python -m ruff check app tests tools
+.venv/bin/python -m ruff check app tests tools main.py
 ```
 
 Без `CHAIKA_TEST_DATABASE_URL` проверки PostgreSQL пропускаются. В CI создаётся отдельный PostgreSQL 17 на `127.0.0.1:15438`, применяются все миграции, затем запускается полный набор тестов. `tools/prepare_test_database.py` предназначен только для новой пустой тестовой базы; он отказывается работать на другом адресе или в существующей схеме.
 
 ## CI/CD
 
-`.github/workflows/ci.yml` запускает Ruff и pytest при push в `chaikaiiko`, при pull request и вручную. Результаты pytest сохраняются артефактом. Задание использует только временную тестовую базу и не подключается к рабочему Supabase/iiko.
+`.github/workflows/ci.yml` запускает Ruff и pytest при push в `chaikaiiko`, при pull request и вручную. Результаты pytest сохраняются артефактом. Отдельное задание собирает Docker-образ и проверяет запуск на двух портах с временной базой. Задание использует только временную тестовую базу и не подключается к рабочему Supabase/iiko.
 
 Фронтенд имеет свой CI в отдельном репозитории. Автоматическое развёртывание пока не включено: после выбора сервера можно добавить отдельное CD-задание и GitHub Environment с параметрами доступа. Миграции рабочей базы не запускаются текущим CI.
 

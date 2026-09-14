@@ -123,6 +123,11 @@ def create_portal(
         if start > end or (end - start).days > 30:
             raise HTTPException(422, "Выберите период от одного до 31 дня.")
 
+    @app.get("/api/health")
+    async def health():
+        # Liveness only; this does not certify Supabase, data freshness or permissions.
+        return {"status": "ok"}
+
     @app.post("/api/auth/login")
     async def login(payload: Login, request: Request, response: Response):
         auth = request.app.state.auth
@@ -348,6 +353,9 @@ def create_portal(
             raise HTTPException(404)
         target = candidate if candidate.is_file() else root / "index.html"
         if not target.is_file():
+            if path == "":
+                # A standalone API image has no React build. Platform probes still need HTTP.
+                return JSONResponse({"service": "Chaika Team API", "health": "/api/health"})
             raise HTTPException(503, "Интерфейс ещё собирается.")
         return FileResponse(
             target, headers={"Cache-Control": "no-store"} if target.suffix == ".html" else None

@@ -127,6 +127,19 @@ def test_no_anonymous_or_forged_access(client):
     assert client.get("/api/me").status_code == 401
 
 
+def test_health_and_api_root_work_without_a_frontend_build(client):
+    response = client.get("/api/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert response.headers["Cache-Control"] == "no-store"
+    assert client.get("/").json() == {
+        "service": "Chaika Team API",
+        "health": "/api/health",
+    }
+    assert client.get("/api/me").status_code == 401
+    assert client.get("/api/not-an-endpoint").status_code == 404
+
+
 def test_latest_purchase_prices_require_scope_but_no_period(client):
     url = "/api/purchase-prices"
     assert client.get(url).status_code == 401

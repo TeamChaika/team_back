@@ -1,0 +1,15 @@
+# Only runtime source and migrations enter the build context.
+**
+!Dockerfile
+!.dockerignore
+!requirements.txt
+!main.py
+!app/
+!app/**
+!supabase/
+!supabase/migrations/
+!supabase/migrations/**
+**/__pycache__/
+**/*.pyc
+**/.env*
+**/*.log
