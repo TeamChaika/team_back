@@ -1,0 +1,13 @@
+services:
+  studio:
+    ports:
+      - "127.0.0.1:8300:3000"
+  api-gw:
+    ports: !override
+      - "127.0.0.1:8000:8000"
+  supavisor:
+    ports: !override
+      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:6543:6543"
+  caddy:
+    image: caddy@sha256:13ba145cba2f3e28fa801994876e4c086d1b95d5aa2a520a734765ffb6b12017

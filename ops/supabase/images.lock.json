@@ -1,0 +1,99 @@
+[
+  {
+    "tags": [
+      "caddy:2",
+      "caddy@sha256:13ba145cba2f3e28fa801994876e4c086d1b95d5aa2a520a734765ffb6b12017"
+    ],
+    "digests": [
+      "caddy@sha256:13ba145cba2f3e28fa801994876e4c086d1b95d5aa2a520a734765ffb6b12017"
+    ]
+  },
+  {
+    "tags": [
+      "supabase/postgres-meta:v0.99.0"
+    ],
+    "digests": [
+      "supabase/postgres-meta@sha256:9a079ac1c94d89629262822a4bd1902d5b1be4adb464e5a0a8fd078aaed72158"
+    ]
+  },
+  {
+    "tags": [
+      "envoyproxy/envoy:v1.39.1"
+    ],
+    "digests": [
+      "envoyproxy/envoy@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4"
+    ]
+  },
+  {
+    "tags": [
+      "supabase/gotrue:v2.196.0"
+    ],
+    "digests": [
+      "supabase/gotrue@sha256:c0c25187a6b835e65a6f6e6c6b39d090e832d40e6de5186f2c038e0411944232"
+    ]
+  },
+  {
+    "tags": [
+      "darthsim/imgproxy:v3.31.4"
+    ],
+    "digests": [
+      "darthsim/imgproxy@sha256:73c5dda13199745b0d2d00e4149d4a589c5b2e205dbf335ca05eca8276b54712"
+    ]
+  },
+  {
+    "tags": [
+      "supabase/edge-runtime:v1.76.2"
+    ],
+    "digests": [
+      "supabase/edge-runtime@sha256:edd22bef4477b900d5c300e287ce9b18bff9b81a0291bee14ee0b7c7b71a2899"
+    ]
+  },
+  {
+    "tags": [
+      "supabase/postgres:17.6.1.136"
+    ],
+    "digests": [
+      "supabase/postgres@sha256:f371b5f3f2ac0a05703f33d6e6134515fb2498cab708fb948a0aeb7481467c00"
+    ]
+  },
+  {
+    "tags": [
+      "supabase/storage-api:v1.74.0"
+    ],
+    "digests": [
+      "supabase/storage-api@sha256:f1546fac6d1c7e345428ac904bfaa7be7cecd50a1f549fe1cf38c628a7b15c85"
+    ]
+  },
+  {
+    "tags": [
+      "postgrest/postgrest:v14.17"
+    ],
+    "digests": [
+      "postgrest/postgrest@sha256:c9dc201e555f5d8e37e7f39cdd4df0229774996e213bfd7de8d10ac609030f2c"
+    ]
+  },
+  {
+    "tags": [
+      "supabase/supavisor:2.9.12"
+    ],
+    "digests": [
+      "supabase/supavisor@sha256:464b93a60ba8c96bc06dad7f241562d6613b2a994922307717b05f432ae415c2"
+    ]
+  },
+  {
+    "tags": [
+      "supabase/studio:2026.09.07-sha-7996410"
+    ],
+    "digests": [
+      "supabase/studio@sha256:94a2a9d2906e8b4109e55159a62e241c3044709a492913ea8edd34b14973d288"
+    ]
+  },
+  {
+    "tags": [
+      "supabase/realtime:v2.134.10"
+    ],
+    "digests": [
+      "supabase/realtime@sha256:cbcc6a7986fc28b6dcffa798b077d5fb9c69cd25500371ab49147a86d7edbb03"
+    ]
+  }
+]

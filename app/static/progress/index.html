@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#141414">
+  <title>Синхронизация · Chaika Team</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="topbar"><div class="brand"><span class="brandmark" aria-hidden="true">▂▅▇</span> Chaika Team</div><span class="service">Статус данных</span></header>
+    <section class="heading">
+      <div><div class="eyebrow">IIKO → БАЗА ДАННЫХ</div><h1>Синхронизация</h1><p id="scope">Загрузка истории документов</p></div>
+      <button id="refresh" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 6.1A8 8 0 0 1 19.7 11M4.3 13A8 8 0 0 0 17.9 17.9"/></svg>Обновить</button>
+    </section>
+    <div class="connection"><span class="dot" aria-hidden="true"></span><span id="connection" role="status">Получаем прогресс…</span></div>
+    <div id="failure" role="alert" hidden></div>
+    <section id="jobs" class="jobs" aria-label="Загрузки данных"></section>
+    <footer><p>Запросы выполняются последовательно. Прогресс сохраняется после каждого дня.</p><span id="checked">Автообновление каждые 5 секунд</span></footer>
+  </main>
+  <template id="job-template">
+    <article class="card">
+      <div class="card-top"><span class="step"></span><span class="badge"></span></div>
+      <h2></h2><p class="period"></p>
+      <div class="percentage"><strong></strong><span class="days"></span></div>
+      <div class="track" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="fill"></div></div>
+      <div class="metrics"><div><span class="documents-label">Документов</span><strong class="documents"></strong></div><div><span class="items-label">Строк товаров</span><strong class="items"></strong></div></div>
+      <div class="dates"><div><span>Загружено по</span><b class="through"></b></div><div><span>Следующий день</span><b class="next"></b></div></div>
+      <p class="note"></p><p class="last-update"></p>
+    </article>
+  </template>
+</body>
+</html>

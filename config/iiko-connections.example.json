@@ -1,0 +1,12 @@
+{
+  "connections": [
+    {
+      "id": "rms-example",
+      "label": "Пример RMS",
+      "base_url": "https://your-rms.example/resto/api",
+      "use_primary_credentials": false,
+      "login": "",
+      "password": ""
+    }
+  ]
+}
