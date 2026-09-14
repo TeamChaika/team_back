@@ -10,6 +10,7 @@ from uuid import UUID
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.gzip import GZipMiddleware
@@ -58,6 +59,13 @@ def create_portal(
         title="Chaika Team", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
     )
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=4)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[web.origin],
+        allow_credentials=True,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):

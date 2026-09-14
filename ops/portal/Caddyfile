@@ -1,0 +1,13 @@
+xx.chaika.team {
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000"
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8013
+	}
+
+	# The integration API (app.main on 8010) remains private.
+	handle {
+		respond "Not found" 404
+	}
+}

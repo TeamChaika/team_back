@@ -25,13 +25,20 @@ cp .env.example .env
 
 Заполните локальный `.env`: реквизиты iiko, `CHAIKA_DATABASE_URL`, `CHAIKA_SYNC_API_KEY`, параметры `CHAIKA_WEB_*`. Для помощника добавьте параметры из `.env.assistant.example`. Рабочие секреты и выгрузки данных в репозитории не хранятся.
 
-## Запуск сайта
+## Домены production
+
+- Сайт: `https://dashboard.chaika.team`
+- API сайта: `https://xx.chaika.team/api`
+
+[Настройка HTTPS, cookies и reverse proxy](docs/domains.md). Для этой схемы фронтенд раздаётся отдельно, а `xx` проксирует только API портала.
+
+## Локальный запуск сайта
 
 Сначала соберите соседний фронтенд:
 
 ```sh
 npm --prefix ../team_front ci
-npm --prefix ../team_front run build
+npm --prefix ../team_front run build -- --mode development
 ```
 
 В `.env` укажите `CHAIKA_WEB_FRONTEND_DIR=../team_front/dist`. Путь можно заменить абсолютным. Запуск из корня backend:

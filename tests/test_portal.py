@@ -233,6 +233,99 @@ def test_cross_origin_login_and_refresh_rejected(client):
         assert response.status_code == 403
 
 
+@pytest.fixture
+def split_domain_client():
+    app = create_portal(
+        Settings(),
+        WebSettings(
+            _env_file=None,
+            anon_key="test",
+            origin="https://dashboard.chaika.team",
+            secure_cookie=True,
+        ),
+        auth_transport=httpx.MockTransport(provider),
+        repository=FakeRepository(),
+    )
+    with TestClient(app, base_url="https://xx.chaika.team") as client:
+        yield client
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_dashboard_preflight_allows_credentialed_api_calls(split_domain_client, method):
+    response = split_domain_client.options(
+        "/api/auth/login",
+        headers={
+            "Origin": "https://dashboard.chaika.team",
+            "Access-Control-Request-Method": method,
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://dashboard.chaika.team"
+    assert response.headers["access-control-allow-credentials"] == "true"
+    assert "Origin" in response.headers["vary"]
+
+
+def test_dashboard_login_refresh_and_logout_across_domains(split_domain_client):
+    client = split_domain_client
+    headers = {"Origin": "https://dashboard.chaika.team"}
+    unauthenticated = client.get("/api/me", headers=headers)
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.headers["access-control-allow-origin"] == headers["Origin"]
+    login_response = client.post(
+        "/api/auth/login",
+        headers=headers,
+        json={"email": "test@example.invalid", "password": "private-password"},
+    )
+    assert login_response.status_code == 200
+    for cookie in login_response.headers.get_list("set-cookie"):
+        assert all(flag in cookie for flag in ("HttpOnly", "Secure", "SameSite=strict"))
+        assert "Domain=" not in cookie
+    assert client.get("/api/me", headers=headers).json() == {"role": "manager"}
+    assert client.post("/api/auth/refresh", headers=headers).status_code == 200
+    assert client.post("/api/auth/logout", headers=headers).status_code == 200
+    assert client.get("/api/me", headers=headers).status_code == 401
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://evil.invalid",
+        "https://another.chaika.team",
+        "https://dashboard.chaika.team.evil.invalid",
+        "http://dashboard.chaika.team",
+    ],
+)
+def test_split_domain_auth_rejects_unapproved_origins(split_domain_client, origin):
+    client = split_domain_client
+    headers = {"Origin": origin}
+    preflight = client.options(
+        "/api/auth/login",
+        headers={**headers, "Access-Control-Request-Method": "POST"},
+    )
+    assert preflight.status_code == 400
+    assert "access-control-allow-origin" not in preflight.headers
+    for path in ("/api/auth/login", "/api/auth/refresh", "/api/auth/logout"):
+        response = client.post(
+            path,
+            headers=headers,
+            json={"email": "test@example.invalid", "password": "private-password"},
+        )
+        assert response.status_code == 403
+        assert "access-control-allow-origin" not in response.headers
+
+
+def test_split_domain_preflight_rejects_unsupported_method(split_domain_client):
+    response = split_domain_client.options(
+        "/api/me",
+        headers={
+            "Origin": "https://dashboard.chaika.team",
+            "Access-Control-Request-Method": "DELETE",
+        },
+    )
+    assert response.status_code == 400
+
+
 def test_disabled_user_and_department_tampering(client):
     login(client)
     assert client.get(f"/api/resources/invoices?department_id={OTHER}").status_code == 403
