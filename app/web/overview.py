@@ -31,6 +31,11 @@ def totals(rows, days, *, complete=True):
             cost / revenue * 100 if cost is not None and revenue and revenue > 0 else None
         )
         result["margin"] = 100 - result["cost_share"] if result["cost_share"] is not None else None
+        result["markup"] = (
+            result["gross_profit"] / cost * 100
+            if result["gross_profit"] is not None and cost is not None and cost > 0
+            else None
+        )
         result["guests_per_day"] = guests / days if guests is not None else None
         return result
 

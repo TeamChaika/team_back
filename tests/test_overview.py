@@ -102,6 +102,32 @@ def test_weighted_averages_and_precise_changes():
     unknown = totals([{"revenue": Decimal(100), "cost": None, "checks": 0, "guests": 1}], 1)
     assert unknown["cost"] is None and unknown["gross_profit"] is None
     assert unknown["margin"] is None and unknown["average_check"] is None
+    assert unknown["markup"] is None
+
+
+def test_markup_uses_total_cost_and_is_distinct_from_margin():
+    result = totals(
+        [
+            {"revenue": Decimal(300), "cost": Decimal(100), "checks": 1, "guests": 1},
+            {"revenue": Decimal(300), "cost": Decimal(200), "checks": 1, "guests": 1},
+        ],
+        2,
+    )
+    # Ratio of totals, not the average of row percentages (200% and 50%).
+    assert result["markup"] == 100
+    assert result["margin"] == 50
+
+
+@pytest.mark.parametrize("cost", [None, Decimal(0), Decimal(-100)])
+def test_markup_requires_positive_known_cost(cost):
+    rows = [{"revenue": Decimal(300), "cost": cost, "checks": 1, "guests": 1}]
+    assert totals(rows, 1)["markup"] is None
+
+
+def test_markup_preserves_losses_and_missing_periods():
+    rows = [{"revenue": Decimal(50), "cost": Decimal(100), "checks": 1, "guests": 1}]
+    assert totals(rows, 1)["markup"] == -50
+    assert totals(rows, 2, complete=False)["markup"] is None
 
 
 def test_periods_and_restaurants_use_same_scope_and_never_merge_names(db):
