@@ -194,6 +194,8 @@ def test_complete_tool_cycle_history_sources_and_csrf(ai_provider):
             assert "max_tokens" not in body
             assert body["max_completion_tokens"] == 1800
             assert body["stream"] is False
+            # Required on both the initial tool call and the follow-up with its result.
+            assert body["reasoning_effort"] == "none"
         else:
             assert request.url.host == "openrouter.ai"
             assert body["model"] == "openai/gpt-5.4-mini"

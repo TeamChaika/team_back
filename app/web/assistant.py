@@ -384,6 +384,9 @@ class ModelClient:
                 body.pop("model")
                 body["max_completion_tokens"] = config.max_output_tokens
                 body["stream"] = False
+                # GPT tool calls require an explicit value on every request; the
+                # agent's saved reasoning setting is not reliably applied here.
+                body["reasoning_effort"] = "none"
             else:
                 url = "https://openrouter.ai/api/v1/chat/completions"
                 body["max_tokens"] = config.max_output_tokens
