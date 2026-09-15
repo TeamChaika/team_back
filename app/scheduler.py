@@ -63,6 +63,20 @@ JOBS = (
 )
 
 
+class CaptureStop:
+    """Allow a capture to cancel its prefetch without stopping the cron worker."""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.local = Event()
+
+    def is_set(self):
+        return self.local.is_set() or self.parent.is_set()
+
+    def set(self):
+        self.local.set()
+
+
 def run_job(job, slot, settings, stop):
     # All existing loaders take the same database advisory lock and release iiko tokens.
     from app.services.sync_jobs import ROOT
@@ -85,7 +99,7 @@ def run_job(job, slot, settings, stop):
                 settings,
                 first,
                 end,
-                stop,
+                CaptureStop(stop),
                 directory=root / first.isoformat(),
                 reports=root / "raw",
                 refresh=True,
@@ -221,8 +235,12 @@ def main():
     settings = Settings()
     if not settings.sync_enabled:
         return
-    if not settings.iiko_configured or not settings.database_url.get_secret_value():
-        raise SystemExit("Scheduler requires iiko and database configuration")
+    if (
+        not settings.iiko_configured
+        or not settings.database_url.get_secret_value()
+        or not settings.sync_api_key.get_secret_value()
+    ):
+        raise SystemExit("Scheduler requires iiko, database and sync API key configuration")
     stop = Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())

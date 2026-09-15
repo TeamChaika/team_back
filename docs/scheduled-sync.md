@@ -2,7 +2,9 @@
 
 Перед включением примените миграцию `20260915123000_scheduled_sync.sql`.
 В окружении backend задайте `CHAIKA_SYNC_ENABLED=true`, реквизиты `CHAIKA_IIKO_*`
-и `CHAIKA_IIKO_CONNECTIONS_JSON` с шестью RMS. JSON имеет тот же формат, что и
+и `CHAIKA_IIKO_CONNECTIONS_JSON` с шестью RMS. Также нужен `CHAIKA_SYNC_API_KEY`:
+служебный ключ доступа к выгрузке событий и справочников через внутренний API.
+JSON имеет тот же формат, что и
 `config/iiko-connections.example.json`; имеет приоритет над файлом. Рабочие значения
 хранятся только в защищённых переменных Timeweb.
 
