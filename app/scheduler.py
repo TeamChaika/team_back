@@ -215,6 +215,9 @@ def run_due(db, settings, stop, *, now=None, execute=run_job):
 
 def main():
     logging.basicConfig(level=logging.INFO)
+    # iiko authentication uses a password hash in the URL. Never log HTTP request URLs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     settings = Settings()
     if not settings.sync_enabled:
         return
