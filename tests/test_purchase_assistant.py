@@ -251,6 +251,47 @@ def test_provider_failure_is_redacted_and_recorded(status, ai_provider):
         assert list(store.results.values()) == [None]
 
 
+@pytest.mark.parametrize("ai_provider", ["openrouter", "timeweb"])
+def test_unselected_product_is_resolved_before_history_and_impact(ai_provider):
+    requests = []
+
+    def model(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        names = {t["function"]["name"] for t in body["tools"]}
+        if len(requests) == 1:
+            assert names == {"search_products"}
+            return tool_response(
+                "search_products", {"query": "Мясо Бедро куриное", "sort": "percent_desc"}
+            )
+        assert names == {"search_products", "product_history", "product_impact"}
+        result = json.loads(body["messages"][-1]["content"])
+        assert "error" not in result
+        if len(requests) == 2:
+            assert result["rows"][0]["product_id"] == str(PRODUCT)
+            return tool_response("product_history")
+        if len(requests) == 3:
+            assert result["receipts"][0]["documents"][0]["document_number"] == "123"
+            return tool_response("product_impact")
+        assert result["totals"]["weekly_delta"] is None
+        return text_response()
+
+    client, _, _ = app_client(model, ai_provider=ai_provider)
+    with client:
+        login(client)
+        p = payload() | {
+            "question": "Мясо Бедро куриное: последняя накладная и влияние за неделю",
+            "context": {"product": None},
+        }
+        response = client.post(
+            "/api/assistant/messages", json=p, headers={"Origin": "http://127.0.0.1:8013"}
+        )
+        assert response.status_code == 200, response.text
+        result = response.json()["turns"][0]
+        assert {s["kind"] for s in result["sources"]} == {"history", "invoice", "impact"}
+        assert result["usage"]["calls"] == 4
+
+
 def test_unconfigured_malformed_body_and_revoked_user():
     def forbidden(_):
         pytest.fail("No provider calls expected")
