@@ -105,7 +105,7 @@ def test_load_pages_links_raw_and_restore_without_iiko(tmp_path):
         metadata = tmp_path / "current.json"
         assert metadata.stat().st_mode & 0o777 == 0o600
         assert TOKEN not in response.text
-        for private in ["private-password", "private-pin", "private-phone", "private-key"]:
+        for private in ["private-password", "private-pin", "private-key"]:
             assert private not in page.text and private not in metadata.read_text()
         assert client.post("/api/v1/iiko/logout").json()["state"] == "logged_out"
     with TestClient(app(source, tmp_path)) as client:
@@ -321,6 +321,6 @@ def test_openapi_exposes_only_reading_and_omits_credential_fields(tmp_path):
         assert set(schema["paths"][BASE]) == {"get"}
         fields = schema["components"]["schemas"]["IikoEmployee"]["properties"]
         assert {"main_role_id", "role_ids", "main_role_code", "role_codes"} <= set(fields)
-        assert not {"password", "pinCode", "pin_code", "cardNumber", "login", "phone"} & set(fields)
+        assert not {"password", "pinCode", "pin_code", "cardNumber", "login"} & set(fields)
         assert not any("egais" in path.lower() for path in schema["paths"])
         assert not source.requests

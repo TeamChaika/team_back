@@ -17,6 +17,9 @@ class IikoEmployee(BaseModel):
     first_name: str | None = Field(default=None, validation_alias="firstName")
     middle_name: str | None = Field(default=None, validation_alias="middleName")
     last_name: str | None = Field(default=None, validation_alias="lastName")
+    phone: str | None = None
+    cell_phone: str | None = Field(default=None, validation_alias="cellPhone")
+    email: str | None = None
     main_role_id: UUID | None = Field(default=None, validation_alias="mainRoleId")
     role_ids: list[UUID | None] | None = Field(default=None, validation_alias="rolesIds")
     main_role_code: str | None = Field(default=None, validation_alias="mainRoleCode")

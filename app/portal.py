@@ -25,6 +25,7 @@ from app.web.assistant import AssistantSettings, Message, answer_question
 from app.web.assistant_store import AssistantStore
 from app.web.auth import ACCESS_COOKIE, REFRESH_COOKIE, Auth, Login, LoginLimiter
 from app.web.coverage import ZONE
+from app.web.employees import EmployeeCommand, EmployeeEditor, owner
 from app.web.live_sales import LiveSales
 from app.web.repository import Repository, Scope
 from app.web.settings import WebSettings
@@ -39,12 +40,14 @@ def create_portal(
     assistant_store=None,
     assistant_settings=None,
     assistant_transport=None,
+    employee_editor=None,
 ):
     settings = settings or Settings()
     web = web_settings or WebSettings()
     repo = repository or Repository(settings)
     limiter = LoginLimiter(web.max_login_attempts)
     chats = assistant_store or AssistantStore(repo)
+    employees = employee_editor or EmployeeEditor(settings, repo)
     live_sales = LiveSales(settings) if settings.live_sales_enabled else None
 
     @asynccontextmanager
@@ -360,6 +363,41 @@ def create_portal(
         store_id: UUID | None = None,
     ):
         return repo.balance_products(scope, q, store_id)
+
+    @app.get("/api/employees/options")
+    def employee_options(scope: Access):
+        owner(scope)
+        return employees.options(scope)
+
+    @app.get("/api/employees/{employee_id}/edit")
+    def employee_edit(employee_id: UUID, scope: Access):
+        owner(scope)
+        return employees.read(scope, employee_id)
+
+    @app.get("/api/employees/pending")
+    def employee_pending(scope: Access):
+        owner(scope)
+        return employees.pending(scope)
+
+    @app.post("/api/employees/changes/{request_id}/refresh")
+    def employee_reconcile(request_id: UUID, request: Request, scope: Access):
+        request.app.state.auth.check_origin(request)
+        owner(scope)
+        return employees.reconcile(scope, request_id)
+
+    @app.post("/api/employees")
+    def employee_create(payload: EmployeeCommand, request: Request, scope: Access):
+        request.app.state.auth.check_origin(request)
+        owner(scope)
+        return employees.save(scope, payload)
+
+    @app.post("/api/employees/{employee_id}")
+    def employee_update(
+        employee_id: UUID, payload: EmployeeCommand, request: Request, scope: Access
+    ):
+        request.app.state.auth.check_origin(request)
+        owner(scope)
+        return employees.save(scope, payload, employee_id)
 
     @app.get("/api/resources/{resource}")
     def resources(

@@ -555,7 +555,7 @@ class Repository:
             )
             fields = (
                 "t.id,t.source_id,t.name AS title,t.code,r.name AS role,t.deleted,"
-                "t.present_in_latest,t.last_seen_at"
+                "t.present_in_latest,t.last_seen_at,t.phone,t.cell_phone,t.email"
             )
             columns = [
                 ("title", "Сотрудник"),
