@@ -56,14 +56,18 @@ def _unique_fields(pairs: list[tuple[str, object]]) -> dict:
 
 
 def read_connections(settings: Settings) -> list[tuple[ConnectionDefinition, Settings]]:
-    if settings.iiko_connections_file is None:
+    inline = settings.iiko_connections_json.get_secret_value()
+    if settings.iiko_connections_file is None and not inline:
         return []
-    path = Path(settings.iiko_connections_file)
-    if not path.is_absolute():
-        path = BACKEND_DIR / path
     try:
-        with path.open("rb") as stream:
-            raw = stream.read(256 * 1024 + 1)
+        if inline:
+            raw = inline.encode()
+        else:
+            path = Path(settings.iiko_connections_file)
+            if not path.is_absolute():
+                path = BACKEND_DIR / path
+            with path.open("rb") as stream:
+                raw = stream.read(256 * 1024 + 1)
         if len(raw) > 256 * 1024:
             raise ValueError("Connections configuration too large")
         config = ConnectionsConfig.model_validate(json.loads(raw, object_pairs_hook=_unique_fields))
@@ -77,7 +81,11 @@ def read_connections(settings: Settings) -> list[tuple[ConnectionDefinition, Set
             ids.add(definition.id)
             urls.add(url)
             values = settings.model_dump()
-            values.update(iiko_base_url=definition.base_url, iiko_connections_file=None)
+            values.update(
+                iiko_base_url=definition.base_url,
+                iiko_connections_file=None,
+                iiko_connections_json=SecretStr(""),
+            )
             if not definition.use_primary_credentials:
                 values.update(iiko_login=definition.login, iiko_password=definition.password)
             connections.append((definition, Settings(_env_file=None, **values)))

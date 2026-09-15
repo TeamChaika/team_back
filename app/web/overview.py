@@ -184,7 +184,7 @@ def build_overview(scope, start, end, grain, coverage, daily, dishes):
     }
 
 
-def read_overview(db, scope, start: date, end: date, grain: str):
+def read_overview(db, scope, start: date, end: date, grain: str, *, live_bundle=None):
     previous_start = start - timedelta(days=(end - start).days + 1)
     base = (
         " FROM chaika.sales_report_days d "
@@ -192,13 +192,15 @@ def read_overview(db, scope, start: date, end: date, grain: str):
         "JOIN chaika.sales_reports r ON r.set_id=s.id "
     )
     bounds = "d.source_id='primary' AND d.business_date BETWEEN %s AND %s"
+    live_day = date.fromisoformat(live_bundle["manifest"]["business_date"]) if live_bundle else None
+    bounds += " AND (%s::date IS NULL OR d.business_date<>%s)"
     coverage = db.execute(
         "SELECT d.business_date,r.kind,s.reviewed,s.checks,r.observed_at"
         + base
         + "WHERE "
         + bounds
         + " AND r.kind IN ('daily','dishes') ORDER BY d.business_date",
-        (previous_start, end),
+        (previous_start, end, live_day, live_day),
     )
     daily = db.execute(
         "SELECT d.business_date,x.department_id,x.revenue,x.cost,x.checks,x.guests"
@@ -206,10 +208,18 @@ def read_overview(db, scope, start: date, end: date, grain: str):
         + "JOIN chaika.sales_report_rows x ON x.report_id=r.id WHERE "
         + bounds
         + " AND r.kind='daily' AND x.department_id=ANY(%s::uuid[]) ORDER BY d.business_date",
-        (previous_start, end, scope.ids),
+        (previous_start, end, live_day, live_day, scope.ids),
     )
     # Group in PostgreSQL: a monthly dish report can exceed the ordinary row endpoint limit.
     # Dish UUID is stable across renames; a missing UUID is grouped only by its exact source name.
+    top_filter = (
+        " SELECT * FROM grouped"
+        if live_bundle is not None
+        else ", top AS (SELECT dish_id,fallback_name FROM grouped WHERE is_current "
+        "ORDER BY revenue DESC,dish_name,dish_id LIMIT 5) "
+        "SELECT g.* FROM grouped g JOIN top t ON g.dish_id IS NOT DISTINCT FROM t.dish_id "
+        "AND g.fallback_name IS NOT DISTINCT FROM t.fallback_name"
+    )
     dishes = db.execute(
         "WITH scoped AS (SELECT d.business_date >= %s AS is_current,d.business_date,x.ordinal,"
         "NULLIF(x.dimensions->>'DishId','') AS dish_id,x.dimensions->>'DishName' AS dish_name,"
@@ -224,13 +234,40 @@ def read_overview(db, scope, start: date, end: date, grain: str):
         "SUM(revenue) AS revenue,"
         "CASE WHEN COUNT(quantity)=COUNT(*) THEN SUM(quantity) END AS quantity "
         "FROM scoped GROUP BY is_current,dish_id,"
-        "CASE WHEN dish_id IS NULL THEN COALESCE(dish_name,'') END), "
-        "top AS (SELECT dish_id,fallback_name FROM grouped WHERE is_current "
-        "ORDER BY revenue DESC,dish_name,dish_id LIMIT 5) "
-        "SELECT g.* FROM grouped g JOIN top t ON g.dish_id IS NOT DISTINCT FROM t.dish_id "
-        "AND g.fallback_name IS NOT DISTINCT FROM t.fallback_name",
-        (start, previous_start, end, scope.ids),
+        "CASE WHEN dish_id IS NULL THEN COALESCE(dish_name,'') END) " + top_filter,
+        (start, previous_start, end, live_day, live_day, scope.ids),
     )
-    return build_overview(
-        scope, start, end, grain, coverage.fetchall(), daily.fetchall(), dishes.fetchall()
-    )
+    coverage, daily, dishes = coverage.fetchall(), daily.fetchall(), dishes.fetchall()
+    if live_bundle is not None:
+        from app.web.live_sales import report_coverage, report_rows
+
+        coverage += report_coverage(live_bundle, ("daily", "dishes"))
+        daily += report_rows(live_bundle, "daily", scope)
+        grouped = {(r["is_current"], r["dish_id"], r["fallback_name"]): r for r in dishes}
+        with localcontext() as ctx:
+            ctx.prec = 70
+            for row in report_rows(live_bundle, "dishes", scope):
+                dish_id = row["dimensions"].get("DishId") or None
+                name = row["dimensions"].get("DishName")
+                fallback = (name or "") if dish_id is None else None
+                key = (True, dish_id, fallback)
+                if key not in grouped:
+                    grouped[key] = {
+                        "is_current": True,
+                        "dish_id": dish_id,
+                        "dish_name": name,
+                        "fallback_name": fallback,
+                        "revenue": row["revenue"],
+                        "quantity": row["quantity"],
+                    }
+                else:
+                    target = grouped[key]
+                    target["dish_name"] = name
+                    target["revenue"] += row["revenue"]
+                    target["quantity"] = (
+                        target["quantity"] + row["quantity"]
+                        if target["quantity"] is not None and row["quantity"] is not None
+                        else None
+                    )
+        dishes = list(grouped.values())
+    return build_overview(scope, start, end, grain, coverage, daily, dishes)

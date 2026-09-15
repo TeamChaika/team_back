@@ -1,5 +1,6 @@
 """Website security contracts, without real accounts or upstream iiko requests."""
 
+from datetime import datetime
 from uuid import UUID
 
 import httpx
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.core.config import Settings
 from app.portal import create_portal
 from app.web.auth import ACCESS_COOKIE
+from app.web.coverage import ZONE
 from app.web.repository import Scope, has_store_scope
 from app.web.settings import WebSettings
 
@@ -206,7 +208,11 @@ def test_login_uses_database_role_and_safe_cookies(client):
     cookies = response.headers.get_list("set-cookie")
     assert len(cookies) == 2
     assert all("HttpOnly" in c and "SameSite=strict" in c for c in cookies)
-    assert client.get("/api/me").json() == {"role": "manager"}
+    assert client.get("/api/me").json() == {
+        "role": "manager",
+        "live_sales_enabled": False,
+        "today": datetime.now(ZONE).date().isoformat(),
+    }
     assert "access_token" not in response.text
     assert response.headers["Cache-Control"] == "no-store"
     timing = client.get("/api/me").headers["Server-Timing"]
@@ -294,7 +300,11 @@ def test_dashboard_login_refresh_and_logout_across_domains(split_domain_client):
     for cookie in login_response.headers.get_list("set-cookie"):
         assert all(flag in cookie for flag in ("HttpOnly", "Secure", "SameSite=strict"))
         assert "Domain=" not in cookie
-    assert client.get("/api/me", headers=headers).json() == {"role": "manager"}
+    assert client.get("/api/me", headers=headers).json() == {
+        "role": "manager",
+        "live_sales_enabled": False,
+        "today": datetime.now(ZONE).date().isoformat(),
+    }
     assert client.post("/api/auth/refresh", headers=headers).status_code == 200
     assert client.post("/api/auth/logout", headers=headers).status_code == 200
     assert client.get("/api/me", headers=headers).status_code == 401

@@ -1,8 +1,9 @@
-"""Website API and built frontend, without iiko credentials or integration routes."""
+"""Public website API; integration routes stay on the private collector."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 from time import perf_counter
 from typing import Annotated, Literal
 from uuid import UUID
@@ -23,6 +24,8 @@ from app.services.sync_jobs import SyncJobError
 from app.web.assistant import AssistantSettings, Message, answer_question
 from app.web.assistant_store import AssistantStore
 from app.web.auth import ACCESS_COOKIE, REFRESH_COOKIE, Auth, Login, LoginLimiter
+from app.web.coverage import ZONE
+from app.web.live_sales import LiveSales
 from app.web.repository import Repository, Scope
 from app.web.settings import WebSettings
 
@@ -42,15 +45,39 @@ def create_portal(
     repo = repository or Repository(settings)
     limiter = LoginLimiter(web.max_login_attempts)
     chats = assistant_store or AssistantStore(repo)
+    live_sales = LiveSales(settings) if settings.live_sales_enabled else None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.auth = Auth(web, transport=auth_transport)
+        scheduler = None
+
+        async def start_background():
+            nonlocal scheduler
+            # Warm the shared intraday cache before long-running background syncs start.
+            if live_sales:
+                try:
+                    await run_in_threadpool(live_sales.get)
+                except HTTPException:
+                    pass  # LiveSales logs the fixed error code; requests can retry later.
+            if settings.sync_enabled:
+                from app.scheduler import start_process
+
+                scheduler = start_process()
+
+        background = None
         try:
             if repository is None:
                 await run_in_threadpool(repo.open)
+            background = asyncio.create_task(start_background())
             yield
         finally:
+            if background is not None:
+                await background
+            if scheduler is not None:
+                from app.scheduler import stop_process
+
+                await run_in_threadpool(stop_process, scheduler)
             await app.state.auth.client.aclose()
             if repository is None:
                 await run_in_threadpool(repo.close)
@@ -120,7 +147,7 @@ def create_portal(
     Access = Annotated[Scope, Depends(access)]
 
     def check_period(start, end):
-        if start > end or (end - start).days > 30:
+        if start > end or (end - start).days > 30 or end > datetime.now(ZONE).date():
             raise HTTPException(422, "Выберите период от одного до 31 дня.")
 
     @app.get("/api/health")
@@ -185,7 +212,11 @@ def create_portal(
 
     @app.get("/api/me")
     def me(scope: Access):
-        return repo.metadata(scope)
+        return {
+            **repo.metadata(scope),
+            "today": datetime.now(ZONE).date().isoformat(),
+            "live_sales_enabled": bool(live_sales),
+        }
 
     @app.get("/api/sales/{kind}")
     def sales(
@@ -197,6 +228,26 @@ def create_portal(
         dish_name: Annotated[str | None, Query(max_length=500)] = None,
     ):
         check_period(start, end)
+        if kind not in {"daily", "dishes", "payments", "discounts", "returns", "waiters", "hours"}:
+            raise HTTPException(404, "Отчёт не найден.")
+        if (dish_id is not None or dish_name is not None) and (
+            kind != "dishes" or (dish_id is not None and dish_name is not None)
+        ):
+            raise HTTPException(422, "Фильтр блюда доступен только в отчёте по блюдам.")
+        if live_sales and start <= datetime.now(ZONE).date() <= end:
+            bundle, metadata = live_sales.get()
+            return {
+                **repo.sales(
+                    scope,
+                    kind,
+                    start,
+                    end,
+                    dish_id=dish_id,
+                    dish_name=dish_name,
+                    live_bundle=bundle,
+                ),
+                "live": metadata,
+            }
         if dish_id is not None or dish_name is not None:
             if kind != "dishes" or (dish_id is not None and dish_name is not None):
                 raise HTTPException(422, "Фильтр блюда доступен только в отчёте по блюдам.")
@@ -213,6 +264,12 @@ def create_portal(
         check_period(start, end)
         if start.toordinal() <= (end - start).days + 1:
             raise HTTPException(422, "Для выбранной даты невозможно определить предыдущий период.")
+        if live_sales and start <= datetime.now(ZONE).date() <= end:
+            bundle, metadata = live_sales.get()
+            return {
+                **repo.overview(scope, start, end, granularity, live_bundle=bundle),
+                "live": metadata,
+            }
         return repo.overview(scope, start, end, granularity)
 
     @app.get("/api/purchase-prices")

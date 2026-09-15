@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     iiko_login: str = ""
     iiko_password: SecretStr = SecretStr("")
     iiko_connections_file: Path | None = None
+    iiko_connections_json: SecretStr = SecretStr("")
+    sync_enabled: bool = False
+    live_sales_enabled: bool = False
+    live_sales_cache_seconds: int = Field(default=300, ge=300, le=600)
     iiko_timeout_seconds: float = Field(default=15, gt=0, le=120)
     iiko_products_timeout_seconds: float = Field(default=180, gt=0, le=180)
     iiko_products_max_response_bytes: int = Field(

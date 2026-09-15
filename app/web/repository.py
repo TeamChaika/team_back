@@ -168,11 +168,23 @@ class Repository:
             }
         )
 
-    def overview(self, scope, start: date, end: date, granularity: str):
+    def overview(self, scope, start: date, end: date, granularity: str, *, live_bundle=None):
         with self.connection(repeatable=True) as db:
-            return serial(read_overview(db, scope, start, end, granularity))
+            return serial(
+                read_overview(db, scope, start, end, granularity, live_bundle=live_bundle)
+            )
 
-    def sales(self, scope, kind: str, start: date, end: date, *, dish_id=None, dish_name=None):
+    def sales(
+        self,
+        scope,
+        kind: str,
+        start: date,
+        end: date,
+        *,
+        dish_id=None,
+        dish_name=None,
+        live_bundle=None,
+    ):
         if kind not in {"daily", "dishes", "payments", "discounts", "returns", "waiters", "hours"}:
             raise HTTPException(404, "Отчёт не найден.")
         with self.connection() as db:
@@ -207,6 +219,21 @@ class Repository:
                 "LIMIT 20001",
                 (start, end, kind, scope.ids, dish_id, dish_id, dish_name, dish_name),
             ).fetchall()
+            if len(result) > 20000:
+                raise HTTPException(
+                    413, "Слишком много строк. Выберите меньший период или один ресторан."
+                )
+        if live_bundle is not None:
+            from app.web.live_sales import report_coverage, report_rows
+
+            day = date.fromisoformat(live_bundle["manifest"]["business_date"])
+            coverage = [r for r in coverage if r["business_date"] != day] + report_coverage(
+                live_bundle, [kind]
+            )
+            loaded_dates = sorted({r["business_date"] for r in coverage})
+            result = [r for r in result if r["business_date"] != day] + report_rows(
+                live_bundle, kind, scope, dish_id=dish_id, dish_name=dish_name
+            )
             if len(result) > 20000:
                 raise HTTPException(
                     413, "Слишком много строк. Выберите меньший период или один ресторан."
@@ -766,12 +793,32 @@ class Repository:
                 (list(scope.rms_ids),),
             ).fetchall()
             runs = []
+            scheduled = []
             if scope.user["role"] == "owner":
                 runs = db.execute(
                     "SELECT job,status,started_at,finished_at,error_code,counts->>'resource' "
                     "AS resource,counts->>'completed_through' AS completed_through FROM "
                     "chaika.sync_runs ORDER BY started_at DESC LIMIT 20"
                 ).fetchall()
+                if self.settings.sync_enabled:
+                    from app.scheduler import JOBS
+
+                    latest = db.execute(
+                        "SELECT DISTINCT ON (job) job,status,slot,started_at,finished_at,"
+                        "error_code,"
+                        "next_retry_at,attempts FROM chaika.scheduled_sync_runs "
+                        "ORDER BY job,slot DESC"
+                    ).fetchall()
+                    by_key = {r["job"]: r for r in latest}
+                    scheduled = [
+                        {
+                            "job": j.key,
+                            "label": j.label,
+                            "schedule": j.schedule,
+                            **by_key.get(j.key, {"status": "waiting"}),
+                        }
+                        for j in JOBS
+                    ]
             observations = (
                 db.execute(
                     "SELECT resource,max(observed_at) AS observed_at FROM "
@@ -802,5 +849,6 @@ class Repository:
                 "runs": runs,
                 "observations": observations,
                 "cash_shift_days": cash_days,
+                "scheduled": scheduled,
             }
         )

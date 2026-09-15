@@ -277,7 +277,15 @@ def run_prefetched_history(days, coverage, collect_window, publish_day, checkpoi
 
 
 def synchronize_history(
-    settings, start, end, stop, directory=DIRECTORY, reports=REPORTS, *, include_today=False
+    settings,
+    start,
+    end,
+    stop,
+    directory=DIRECTORY,
+    reports=REPORTS,
+    *,
+    include_today=False,
+    refresh=False,
 ):
     days = history_days(start, end, include_today=include_today)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -308,6 +316,8 @@ def synchronize_history(
                 (source.id, start, end),
             ).fetchall()
             coverage = {day: counts for day, counts in rows if set(counts) == KINDS}
+            if refresh:
+                coverage = {}
             warning_days = {
                 row[0]
                 for row in db.execute(
