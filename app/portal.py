@@ -133,11 +133,16 @@ def create_portal(
     async def topology_error(request, exc):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
 
-    async def access(request: Request, department_id: UUID | None = None):
+    async def access(
+        request: Request,
+        department_id: Annotated[list[UUID] | None, Query(max_length=100)] = None,
+    ):
         started = perf_counter()
         user_id = await request.app.state.auth.user(request.cookies.get(ACCESS_COOKIE))
         authenticated = perf_counter()
-        scope = await run_in_threadpool(repo.scope, user_id, department_id)
+        selection = tuple(sorted(set(department_id or []), key=str))
+        selected = selection[0] if len(selection) == 1 else selection or None
+        scope = await run_in_threadpool(repo.scope, user_id, selected)
         request.state.timings = [
             ("auth", (authenticated - started) * 1000),
             ("permissions", (perf_counter() - authenticated) * 1000),

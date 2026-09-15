@@ -377,15 +377,16 @@ def read_purchase_impact(
             (start, end, [d["id"] for d in scope.departments]),
         ).fetchall()
     ]
-    if (
+    selected_group = (
         store_id is None
-        and scope.selected
+        and bool(scope.selection_ids)
         and analysis_department_id is None
         and not all_departments
-    ):
-        analysis_department_id = scope.selected
-    analysis_ids = analysis_scope(
-        scope, department, selling_ids, analysis_department_id, all_departments
+    )
+    analysis_ids = (
+        list(scope.selection_ids)
+        if selected_group
+        else analysis_scope(scope, department, selling_ids, analysis_department_id, all_departments)
     )
     coverage = db.execute(
         "SELECT d.business_date,r.observed_at,s.checks FROM chaika.sales_report_days d "

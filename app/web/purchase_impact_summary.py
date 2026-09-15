@@ -109,7 +109,7 @@ def add_weekly_impacts(db, scope, report):
     products = {p["id"]: p for p in product_query.fetchall()}
     coverage, sales = coverage_query.fetchall(), sales_query.fetchall()
     selling_ids = {s["department_id"] for s in sales}
-    departments = [scope.selected] if scope.selected else sorted(selling_ids, key=str)
+    departments = list(scope.selection_ids) if scope.selection_ids else sorted(selling_ids, key=str)
     summaries = summarize_prices(
         prices,
         graph,

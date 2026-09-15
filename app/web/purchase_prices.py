@@ -300,8 +300,10 @@ def enrich(db, scope, changes):
     supplier_map = {r["id"]: r["name"] for r in suppliers.fetchall()}
     departments = {r["id"]: r.get("name") for r in scope.departments}
     scope_label = (
-        departments.get(scope.selected, "Выбранное заведение")
-        if scope.selected
+        departments.get(scope.selection_ids[0], "Выбранное заведение")
+        if len(scope.selection_ids) == 1
+        else f"Выбрано заведений: {len(scope.selection_ids)}"
+        if scope.selection_ids
         else "Вся сеть"
         if scope.user["role"] == "owner"
         else "Доступные заведения"

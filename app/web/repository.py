@@ -28,17 +28,25 @@ def serial(value):
 class Scope:
     user: dict
     departments: tuple[dict, ...]
-    selected: UUID | None
+    selected: UUID | tuple[UUID, ...] | None
     store_ids: tuple[UUID, ...]
     rms_ids: tuple[str, ...]
 
     @property
     def unrestricted(self):
-        return self.user["role"] == "owner" and self.selected is None
+        return self.user["role"] == "owner" and not self.selection_ids
+
+    @property
+    def selection_ids(self):
+        if isinstance(self.selected, UUID):
+            return (self.selected,)
+        return self.selected or ()
 
     @property
     def ids(self):
-        return [self.selected] if self.selected else [d["id"] for d in self.departments]
+        return (
+            list(self.selection_ids) if self.selection_ids else [d["id"] for d in self.departments]
+        )
 
     @property
     def codes(self):
@@ -100,7 +108,10 @@ class Repository:
             yield db
             db.execute("COMMIT")
 
-    def scope(self, user_id: UUID, selected: UUID | None = None) -> Scope:
+    def scope(self, user_id: UUID, selected: UUID | tuple[UUID, ...] | None = None) -> Scope:
+        selection = tuple(
+            sorted(set((selected,) if isinstance(selected, UUID) else selected or ()), key=str)
+        )
         with self.connection() as db:
             # Queue independent reads before fetching: one network round trip, fresh permissions.
             users = db.execute(
@@ -135,18 +146,24 @@ class Repository:
                 }
             else:
                 allowed = {r["department_id"] for r in grants.fetchall()}
-            if not allowed or (selected and selected not in allowed):
+            if not allowed or not set(selection).issubset(allowed):
                 raise HTTPException(403, "Нет доступа к выбранному ресторану.")
             departments = tuple(
                 sorted((n for n in nodes if n["id"] in allowed), key=lambda n: n["name"] or "")
             )
             stores = store_rows.fetchall()
             parents = {n["id"]: n["parent_id"] for n in nodes + stores}
-            visible = {selected} if selected else allowed
+            visible = set(selection) if selection else allowed
             store_ids = tuple(s["id"] for s in stores if has_store_scope(s["id"], parents, visible))
             rms = rms_rows.fetchall()
             rms_ids = tuple(r["source_id"] for r in rms if r["department_id"] in visible)
-            return Scope(user, departments, selected, store_ids, rms_ids)
+            return Scope(
+                user,
+                departments,
+                selection[0] if len(selection) == 1 else selection or None,
+                store_ids,
+                rms_ids,
+            )
 
     def metadata(self, scope):
         with self.connection() as db:
