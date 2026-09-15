@@ -3,7 +3,7 @@
 from fastapi import HTTPException
 
 LATEST = """WITH latest AS (
-    SELECT source_id,last_snapshot_id,accounting_timestamp
+    SELECT source_id,last_snapshot_id,accounting_timestamp,last_seen_at
     FROM chaika.store_balance_reports WHERE source_id='primary'
     ORDER BY accounting_timestamp DESC LIMIT 1
 ) """
@@ -80,12 +80,22 @@ def summarize(scope, stats, stores, nodes):
     return sorted(result, key=lambda s: (s["department"] or "", s["name"] or ""))
 
 
-def read_balances(db, scope, q="", offset=0, store_id=None, product_id=None):
+def read_balances(
+    db, scope, q="", offset=0, store_id=None, product_id=None, sort="sum", direction="desc"
+):
+    order_columns = {"amount": "i.amount", "sum": "i.sum"}
+    order_directions = {"asc": "ASC", "desc": "DESC"}
+    if sort not in order_columns or direction not in order_directions:
+        raise HTTPException(422, "Выберите сортировку по количеству или стоимости.")
     where, params = filters(scope, store_id, product_id, q)
     # Caller pins all reads to one repeatable-read snapshot. Queue independent
     # queries before fetching so the website's pipeline shares a network round trip.
     totals = db.execute(
-        LATEST + "SELECT count(*) AS total,sum(i.sum) AS value FROM " + BASE + " WHERE " + where,
+        LATEST + "SELECT count(*) AS total,sum(i.sum) AS value,"
+        "CASE WHEN count(u.id)=count(*) AND count(DISTINCT u.id)=1 "
+        "THEN sum(i.amount) END AS amount,"
+        "CASE WHEN count(u.id)=count(*) AND count(DISTINCT u.id)=1 "
+        "THEN min(u.name) END AS unit FROM " + BASE + " WHERE " + where,
         params,
     )
     rows = db.execute(
@@ -96,10 +106,11 @@ def read_balances(db, scope, q="", offset=0, store_id=None, product_id=None):
         + BASE
         + " WHERE "
         + where
-        + " ORDER BY s.name NULLS LAST,p.name NULLS LAST,i.line_num LIMIT 50 OFFSET %s",
+        + f" ORDER BY {order_columns[sort]} {order_directions[direction]},"
+        "s.name NULLS LAST,p.name NULLS LAST,i.line_num LIMIT 50 OFFSET %s",
         [*params, offset],
     )
-    stamp = db.execute(LATEST + "SELECT accounting_timestamp FROM latest")
+    stamp = db.execute(LATEST + "SELECT accounting_timestamp,last_seen_at FROM latest")
     stats, stores, nodes = summary_queries(db, scope)
     totals, rows, stamp = totals.fetchone(), rows.fetchall(), stamp.fetchone()
     warehouses = summarize(scope, stats.fetchall(), stores.fetchall(), nodes.fetchall())
@@ -107,9 +118,14 @@ def read_balances(db, scope, q="", offset=0, store_id=None, product_id=None):
         "rows": rows,
         "total": totals["total"],
         "filtered_value": totals["value"],
+        "filtered_amount": totals["amount"],
+        "filtered_unit": totals["unit"],
+        "sort": sort,
+        "direction": direction,
         "offset": offset,
         "limit": 50,
         "accounting_timestamp": stamp["accounting_timestamp"] if stamp else None,
+        "last_synced_at": stamp["last_seen_at"] if stamp else None,
         "stores": warehouses,
         "columns": [
             {"key": k, "label": label}
@@ -119,7 +135,6 @@ def read_balances(db, scope, q="", offset=0, store_id=None, product_id=None):
                 ("unit", "Ед."),
                 ("amount", "Количество"),
                 ("sum", "Стоимость, ₽"),
-                ("accounting_timestamp", "На момент"),
             ]
         ],
     }

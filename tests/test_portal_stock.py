@@ -68,9 +68,16 @@ def stock(db, bundle, inventory):
             payload={},
         ),
     )
+    unit = uuid4()
+    db.execute(
+        "INSERT INTO chaika.measure_units VALUES"
+        "('primary',%s,'MeasureUnit',NULL,'кг',false,true,%s,%s,%s,'{}')",
+        (unit, now, now, snapshot),
+    )
+    db.execute("UPDATE chaika.products SET main_unit_id=%s", (unit,))
     lines = [(store, product, Decimal("1"), Decimal("1.123456789123456789"))] * 51
     lines += [
-        (store, similar, Decimal("2"), Decimal("-10")),
+        (store, similar, Decimal("-2"), Decimal("-10")),
         (other, hidden, Decimal("3"), Decimal("9999")),
     ]
     db.execute(
@@ -98,6 +105,14 @@ def test_summary_is_whole_warehouse_not_filtered_page(db, stock):
     result = read_balances(db, scope, offset=50, product_id=product)
     assert result["total"] == 51 and len(result["rows"]) == 1
     assert result["filtered_value"] == Decimal("57.296296245296296239")
+    assert result["filtered_amount"] == 51 and result["filtered_unit"] == "кг"
+    assert "accounting_timestamp" not in {c["key"] for c in result["columns"]}
+    assert (
+        result["last_synced_at"]
+        == db.execute("SELECT last_seen_at FROM chaika.store_balance_reports").fetchone()[
+            "last_seen_at"
+        ]
+    )
     by_id = {s["id"]: s for s in result["stores"]}
     assert set(by_id) == {store, empty}
     assert by_id[store]["value"] == Decimal("47.296296245296296239")
@@ -105,6 +120,39 @@ def test_summary_is_whole_warehouse_not_filtered_page(db, stock):
     assert by_id[store]["department"] == "Restaurant"
     assert by_id[empty]["value"] is None
     assert read_balances(db, scope, offset=999, product_id=product)["total"] == 51
+
+
+@pytest.mark.parametrize("sort", ["amount", "sum"])
+@pytest.mark.parametrize("direction", ["asc", "desc"])
+def test_numeric_sort_covers_all_pages_and_respects_scope(db, stock, sort, direction):
+    scope, *_ = stock
+    first = read_balances(db, scope, sort=sort, direction=direction)
+    second = read_balances(db, scope, offset=50, sort=sort, direction=direction)
+    rows = first["rows"] + second["rows"]
+    assert len(rows) == first["total"] == 52
+    values = [row[sort] for row in rows]
+    assert values == sorted(values, reverse=direction == "desc")
+    assert first["filtered_amount"] == second["filtered_amount"] == 49
+    assert first["filtered_value"] == second["filtered_value"] == sum(r["sum"] for r in rows)
+    assert not any(r["title"] == "Секретное мясо" for r in rows)
+
+
+def test_quantity_total_requires_a_shared_known_unit(db, stock):
+    scope, _, _, _, product, similar, _ = stock
+    assert read_balances(db, scope)["filtered_amount"] == 49
+    db.execute("UPDATE chaika.products SET main_unit_id=%s WHERE id=%s", (uuid4(), similar))
+    assert read_balances(db, scope)["filtered_amount"] is None
+    assert read_balances(db, scope, product_id=product)["filtered_amount"] == 51
+    unit = uuid4()
+    db.execute(
+        "INSERT INTO chaika.measure_units SELECT source_id,%s,root_type,code,'шт',deleted,"
+        "present_in_latest,first_seen_at,last_seen_at,last_snapshot_id,details "
+        "FROM chaika.measure_units LIMIT 1",
+        (unit,),
+    )
+    db.execute("UPDATE chaika.products SET main_unit_id=%s WHERE id=%s", (unit, similar))
+    assert read_balances(db, scope)["filtered_amount"] is None
+    assert read_balances(db, scope, product_id=similar)["filtered_unit"] == "шт"
 
 
 def test_suggestions_search_catalog_and_keep_ids_and_scope(db, stock):

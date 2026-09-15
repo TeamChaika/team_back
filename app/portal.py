@@ -367,13 +367,15 @@ def create_portal(
         status: Literal["NEW", "PROCESSED", "DELETED"] | None = None,
         store_id: UUID | None = None,
         product_id: UUID | None = None,
+        sort: Literal["amount", "sum"] = "sum",
+        direction: Literal["asc", "desc"] = "desc",
     ):
         if bool(start) != bool(end):
             raise HTTPException(422, "Укажите обе даты.")
         if start:
             check_period(start, end)
         if resource == "balances":
-            return repo.balances(scope, q, offset, store_id, product_id)
+            return repo.balances(scope, q, offset, store_id, product_id, sort, direction)
         if resource == "events":
             if not start:
                 raise HTTPException(422, "Для событий нужен период.")

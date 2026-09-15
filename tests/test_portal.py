@@ -462,12 +462,26 @@ def test_stock_suggestions_and_selection_use_authenticated_scope(client):
     )
     assert response.status_code == 200 and response.json()["stores"] == [str(UUID(int=4))]
     assert client.get("/api/balance-products?store_id=invalid").status_code == 422
-    client.repo.balances = lambda scope, q, offset, store_id, product_id: {
+    client.repo.balances = lambda scope, q, offset, store_id, product_id, sort, direction: {
         "store": str(store_id),
         "product": str(product_id),
+        "sort": sort,
+        "direction": direction,
     }
     response = client.get(
         "/api/resources/balances",
-        params={"store_id": str(UUID(int=4)), "product_id": str(UUID(int=5))},
+        params={
+            "store_id": str(UUID(int=4)),
+            "product_id": str(UUID(int=5)),
+            "sort": "amount",
+            "direction": "asc",
+        },
     )
-    assert response.json() == {"store": str(UUID(int=4)), "product": str(UUID(int=5))}
+    assert response.json() == {
+        "store": str(UUID(int=4)),
+        "product": str(UUID(int=5)),
+        "sort": "amount",
+        "direction": "asc",
+    }
+    assert client.get("/api/resources/balances?sort=invalid").status_code == 422
+    assert client.get("/api/resources/balances?direction=invalid").status_code == 422

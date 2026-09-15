@@ -727,9 +727,13 @@ class Repository:
             }
         )
 
-    def balances(self, scope, q="", offset=0, store_id=None, product_id=None):
+    def balances(
+        self, scope, q="", offset=0, store_id=None, product_id=None, sort="sum", direction="desc"
+    ):
         with self.connection(repeatable=True) as db:
-            return serial(read_balances(db, scope, q, offset, store_id, product_id))
+            return serial(
+                read_balances(db, scope, q, offset, store_id, product_id, sort, direction)
+            )
 
     def balance_products(self, scope, q="", store_id=None):
         with self.connection() as db:
