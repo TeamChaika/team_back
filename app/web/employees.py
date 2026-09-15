@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import hmac
 import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -18,10 +19,11 @@ from fastapi import HTTPException
 from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from app.integrations.iiko.employee_write import EmployeeGateway
 from app.integrations.iiko.errors import IikoError
+from app.schemas.iiko_employees import IikoEmployee
 from app.services.iiko_employees import read_employees
 from app.sync_references import SyncError, append_snapshot, reference_lock
 from app.web.repository import serial
@@ -41,11 +43,12 @@ ALIASES = {
     "role_codes": "roleCodes",
     "preferred_department_code": "preferredDepartmentCode",
     "department_codes": "departmentCodes",
+    "card_number": "cardNumber",
 }
 
 
 class EmployeeFields(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, hide_input_in_errors=True)
     name: Annotated[str, Field(min_length=1, max_length=200)] | None = None
     code: Code | None = None
     first_name: Text | None = None
@@ -58,6 +61,22 @@ class EmployeeFields(BaseModel):
     role_codes: Annotated[list[Code], Field(min_length=1, max_length=100)] | None = None
     preferred_department_code: Text | None = None
     department_codes: Annotated[list[Code], Field(min_length=1, max_length=100)] | None = None
+    card_number: Annotated[str, Field(max_length=200)] | None = None
+    pin_code: SecretStr | None = None
+
+    @field_validator("pin_code", mode="before")
+    @classmethod
+    def validate_pin(cls, value):
+        pin = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if (
+            not isinstance(pin, str)
+            or not pin
+            or len(pin) > 32
+            or not pin.isascii()
+            or not pin.isdigit()
+        ):
+            raise ValueError("PIN must contain 1 to 32 digits")
+        return value
 
     @model_validator(mode="after")
     def validate_values(self):
@@ -65,6 +84,8 @@ class EmployeeFields(BaseModel):
         if not values or any(v is None for v in values.values()):
             raise ValueError("Provide changed values, not nulls")
         for value in values.values():
+            if isinstance(value, SecretStr):
+                continue
             for text in value if isinstance(value, list) else [value]:
                 if any(ord(c) < 32 for c in text):
                     raise ValueError("Control characters are not allowed")
@@ -74,10 +95,16 @@ class EmployeeFields(BaseModel):
 
 
 class EmployeeCommand(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     request_id: UUID
     version: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
     fields: EmployeeFields
+
+
+class EmployeeCard(IikoEmployee):
+    """Card number is available only in the owner editor, not the public catalog."""
+
+    card_number: str = ""
 
 
 def owner(scope):
@@ -108,7 +135,9 @@ def parse_card(raw, employee_id):
             path = Path(directory) / "employee.xml"
             path.write_bytes(tostring(wrapper))
             item = read_employees(path, 1024 * 1024)[0]
-        return item
+        return EmployeeCard.model_construct(
+            **item.model_dump(), card_number=root.findtext("cardNumber") or ""
+        )
     except (ParseError, DefusedXmlException, ValueError):
         raise IikoError(
             "employee_invalid_response", "iiko вернул некорректную карточку сотрудника."
@@ -129,12 +158,20 @@ def matches(item, fields):
     return all(
         sorted(data.get(k) or []) == sorted(v) if isinstance(v, list) else (data.get(k) or "") == v
         for k, v in fields.items()
+        if k != "pin_code"
     )
 
 
 def publish_one(db, raw, item):
     """Single-card observation never marks other employees absent."""
     run_id, snapshot_id, observed = uuid4(), uuid4(), datetime.now(UTC)
+    # Credentials must not appear in catalog details or saved RAW responses.
+    root = fromstring(raw, forbid_dtd=True, forbid_entities=True, forbid_external=True)
+    for tag in ("password", "pinCode", "cardNumber"):
+        for node in root.findall(tag):
+            root.remove(node)
+    raw = tostring(root)
+    item = IikoEmployee.model_validate(item.model_dump(), by_name=True)
     data = item.model_dump(mode="json")
     with db.transaction():
         db.execute(
@@ -152,7 +189,11 @@ def publish_one(db, raw, item):
                 observed_at=observed,
                 sha256=hashlib.sha256(raw).hexdigest(),
                 raw=raw,
-                payload={"scope": "single_employee", "items": [data]},
+                payload={
+                    "scope": "single_employee",
+                    "items": [data],
+                    "redacted_fields": ["password", "pinCode", "cardNumber"],
+                },
             ),
         )
         row = dict(
@@ -227,7 +268,12 @@ class EmployeeEditor:
                 async with self.gateway(self.settings) as gateway:
                     raw = await gateway.get(row["employee_id"])
                     item = parse_card(raw, row["employee_id"])
-                    status = "confirmed" if matches(item, row["fields"]) else "reconciled"
+                    pin_unknown = "pin_code" in row["fields"] and not row["pin_accepted"]
+                    status = (
+                        "confirmed"
+                        if matches(item, row["fields"]) and not pin_unknown
+                        else "reconciled"
+                    )
                     with db.transaction():
                         snapshot_id = publish_one(db, raw, item)
                         db.execute(
@@ -235,7 +281,7 @@ class EmployeeEditor:
                             "finished_at=now() WHERE id=%s",
                             (status, snapshot_id, request_id),
                         )
-                    return {"id": str(item.id), "status": status}
+                    return {"id": str(item.id), "status": status, "pin_unknown": pin_unknown}
 
             return asyncio.run(collect())
 
@@ -293,12 +339,21 @@ class EmployeeEditor:
         if employee_id:
             self.repo.detail(scope, "employees", employee_id)
         fields = payload.fields.model_dump(exclude_unset=True)
-        signature = hashlib.sha256(
-            json.dumps(
-                {"id": str(employee_id), "fields": fields, "version": payload.version},
-                sort_keys=True,
-            ).encode()
-        ).hexdigest()
+        pin = fields.pop("pin_code", None)
+        if pin is not None:
+            fields["pin_code"] = True  # Audit marker only; never persist the PIN.
+        signature_data = json.dumps(
+            {"id": str(employee_id), "fields": fields, "version": payload.version},
+            sort_keys=True,
+        ).encode()
+        if pin is not None:
+            signature = hmac.new(
+                self.settings.iiko_password.get_secret_value().encode(),
+                signature_data + b"\x00" + pin.get_secret_value().encode(),
+                hashlib.sha256,
+            ).hexdigest()
+        else:
+            signature = hashlib.sha256(signature_data).hexdigest()
         with self.connection(scope) as db:
             with db.cursor(row_factory=dict_row) as cursor:
                 old = cursor.execute(
@@ -320,11 +375,17 @@ class EmployeeEditor:
                 async with self.gateway(self.settings) as gateway:
                     raw = await gateway.get(target)
                     current = parse_card(raw, target) if raw else None
+                    pin_accepted = bool(old and old["pin_accepted"])
                     if old:
-                        if not current or not matches(current, fields):
+                        if (
+                            not current
+                            or not matches(current, fields)
+                            or (pin and not pin_accepted)
+                        ):
                             raise pending_error(
                                 "Результат сохранения ещё не подтверждён в iiko. "
-                                "Повторная запись не отправлена. Проверьте карточку в iiko.",
+                                "Повторная запись не отправлена. "
+                                "Если меняли PIN, проверьте вход в iikoFront.",
                             )
                     else:
                         if employee_id and (not current or version(current) != payload.version):
@@ -361,13 +422,22 @@ class EmployeeEditor:
                                 Jsonb(form_card(current)["fields"]) if current else None,
                             ),
                         )
-                        wire = {ALIASES[k]: v for k, v in fields.items()}
+                        wire = {ALIASES[k]: v for k, v in fields.items() if k != "pin_code"}
+                        if pin is not None:
+                            wire["pinCode"] = pin.get_secret_value()
                         if not employee_id:
                             wire.update(
                                 employee="true", deleted="false", supplier="false", client="false"
                             )
                         try:
                             await gateway.save(target, wire)
+                            if pin is not None:
+                                db.execute(
+                                    "UPDATE chaika.employee_changes SET pin_accepted=true "
+                                    "WHERE id=%s",
+                                    (payload.request_id,),
+                                )
+                                pin_accepted = True
                         except IikoError as exc:
                             if not exc.outcome_unknown and exc.upstream_status_code in {
                                 400,
@@ -386,10 +456,15 @@ class EmployeeEditor:
                             # A write may already have succeeded. Only GET is allowed below.
                         raw = await gateway.get(target)
                         current = parse_card(raw, target) if raw else None
-                        if not current or not matches(current, fields):
+                        if (
+                            not current
+                            or not matches(current, fields)
+                            or (pin and not pin_accepted)
+                        ):
                             raise pending_error(
                                 "iiko пока не подтвердил все изменения. "
-                                "Нажмите «Проверить сохранение»; повторной записи не будет.",
+                                "Нажмите «Проверить сохранение»; повторной записи не будет. "
+                                + ("PIN проверьте при входе в iikoFront." if pin else ""),
                             )
                     with db.transaction():
                         snapshot_id = publish_one(db, raw, current)

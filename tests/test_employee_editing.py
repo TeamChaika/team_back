@@ -39,6 +39,12 @@ class Upstream:
         self.reject = False
         self.ignore_name = False
 
+    def visible_card(self, key):
+        root = fromstring(self.cards[key])
+        for node in root.findall("pinCode"):
+            root.remove(node)
+        return tostring(root)
+
     def __call__(self, request):
         self.requests.append(request)
         if request.url.path.endswith("/auth"):
@@ -50,7 +56,7 @@ class Upstream:
             if self.no_response and self.posts:
                 raise httpx.ReadTimeout("test", request=request)
             return (
-                httpx.Response(200, content=self.cards[key])
+                httpx.Response(200, content=self.visible_card(key))
                 if key in self.cards
                 else httpx.Response(404)
             )
@@ -73,7 +79,7 @@ class Upstream:
         self.cards[key] = tostring(root)
         if self.timeout_after_save:
             raise httpx.ReadTimeout("private timeout", request=request)
-        return httpx.Response(200, content=self.cards[key])
+        return httpx.Response(200, content=self.visible_card(key))
 
 
 @pytest.fixture
@@ -246,6 +252,84 @@ def test_gateway_login_failure_closes_and_never_writes():
                 pytest.fail("Should not enter")
 
     asyncio.run(run())
+
+
+def test_card_and_write_only_pin_are_sent_exactly_and_not_published(editing):
+    db, scope, upstream, editor = editing
+    payload = command(upstream, pin_code="001237", card_number="000987654")
+    result = editor.save(scope, payload, UUID(int=1))
+    assert result["status"] == "confirmed"
+    assert upstream.posts[0][1] == {"pinCode": ["001237"], "cardNumber": ["000987654"]}
+    assert editor.save(scope, payload, UUID(int=1)) == result
+    assert len(upstream.posts) == 1
+    card = editor.read(scope, UUID(int=1))
+    assert card["fields"]["card_number"] == "000987654"
+    assert "pin_code" not in card["fields"]
+    row = db.execute(
+        "SELECT fields,pin_accepted,request_hash FROM chaika.employee_changes WHERE id=%s",
+        (payload.request_id,),
+    ).fetchone()
+    assert row[0]["pin_code"] is True and row[1]
+    assert "001237" not in str(row) and "001237" not in repr(payload)
+    assert (
+        "card_number"
+        not in db.execute(
+            "SELECT details FROM chaika.employees WHERE id=%s", (UUID(int=1),)
+        ).fetchone()[0]
+    )
+    raw = db.execute(
+        "SELECT raw FROM chaika.raw_snapshots WHERE id=(SELECT snapshot_id "
+        "FROM chaika.employee_changes WHERE id=%s)",
+        (payload.request_id,),
+    ).fetchone()[0]
+    assert b"pinCode" not in bytes(raw) and b"cardNumber" not in bytes(raw)
+
+
+def test_pin_timeout_cannot_be_confirmed_by_readback_and_never_resends(editing):
+    db, scope, upstream, editor = editing
+    upstream.timeout_after_save = True
+    payload = command(upstream, pin_code="001237")
+    for _ in range(2):
+        with pytest.raises(HTTPException) as err:
+            editor.save(scope, payload, UUID(int=1))
+        assert err.value.detail["employee_pending"]
+    assert len(upstream.posts) == 1
+    assert not db.execute("SELECT pin_accepted FROM chaika.employee_changes").fetchone()[0]
+    result = editor.reconcile(scope, payload.request_id)
+    assert result["status"] == "reconciled" and result["pin_unknown"]
+
+
+def test_pin_ack_survives_read_failure_and_retries_reject_different_pin(editing):
+    _, scope, upstream, editor = editing
+    upstream.no_response = True
+    payload = command(upstream, pin_code="001237")
+    with pytest.raises(IikoError):
+        editor.save(scope, payload, UUID(int=1))
+    different = payload.model_copy(update={"fields": EmployeeFields(pin_code="001238")})
+    with pytest.raises(HTTPException, match="уже использован"):
+        editor.save(scope, different, UUID(int=1))
+    upstream.no_response = False
+    assert editor.save(scope, payload, UUID(int=1))["status"] == "confirmed"
+    assert len(upstream.posts) == 1
+
+
+def test_card_clear_and_external_card_change_are_checked(editing):
+    _, scope, upstream, editor = editing
+    original = command(upstream, name="Updated")
+    root = fromstring(upstream.cards[UUID(int=1)])
+    SubElement(root, "cardNumber").text = "000123"
+    upstream.cards[UUID(int=1)] = tostring(root)
+    with pytest.raises(HTTPException, match="Карточка изменилась"):
+        editor.save(scope, original, UUID(int=1))
+    editor.save(scope, command(upstream, card_number=""), UUID(int=1))
+    assert upstream.posts[0][1] == {"cardNumber": [""]}
+
+
+@pytest.mark.parametrize("pin", ["", "12a4", "１２３４", "1234\n", "1" * 33, None])
+def test_invalid_pin_rejected_without_exposing_input(pin):
+    with pytest.raises(ValidationError) as err:
+        EmployeeFields(pin_code=pin)
+    assert "input_value" not in str(err.value)
 
 
 @pytest.mark.parametrize(
