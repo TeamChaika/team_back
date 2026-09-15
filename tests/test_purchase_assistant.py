@@ -14,6 +14,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from psycopg.rows import dict_row
+from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.portal import create_portal
@@ -23,6 +24,7 @@ from app.web.settings import WebSettings
 from tests.test_portal import USER, FakeRepository, login, provider
 
 PRODUCT, UNIT = UUID(int=31), UUID(int=32)
+TIMEWEB_AGENT = UUID(int=99)
 SELECTION = {"product_id": str(PRODUCT), "unit_id": str(UNIT), "linked": False}
 
 
@@ -105,7 +107,7 @@ class MemoryStore:
         return deepcopy(self.chats[cid])
 
 
-def app_client(model_handler, *, configured=True):
+def app_client(model_handler, *, configured=True, ai_provider="openrouter"):
     repo, store = Reports(), MemoryStore()
     app = create_portal(
         Settings(),
@@ -114,7 +116,10 @@ def app_client(model_handler, *, configured=True):
         repository=repo,
         assistant_store=store,
         assistant_settings=AssistantSettings(
-            _env_file=None, provider="openrouter", api_key="private-ai-key" if configured else ""
+            _env_file=None,
+            provider=ai_provider,
+            api_key="private-ai-key" if configured else "",
+            timeweb_agent_id=TIMEWEB_AGENT if ai_provider == "timeweb" else None,
         ),
         assistant_transport=httpx.MockTransport(model_handler),
     )
@@ -171,26 +176,40 @@ def text_response():
     )
 
 
-def test_complete_tool_cycle_history_sources_and_csrf():
+@pytest.mark.parametrize("ai_provider", ["openrouter", "timeweb"])
+def test_complete_tool_cycle_history_sources_and_csrf(ai_provider):
     requests = []
 
     def model(request):
         body = json.loads(request.content)
         requests.append(body)
-        assert request.url.host == "openrouter.ai"
         assert request.headers["authorization"] == "Bearer private-ai-key"
-        assert body["model"] == "openai/gpt-5.4-mini"
-        assert body["provider"]["require_parameters"]
+        if ai_provider == "timeweb":
+            assert str(request.url) == (
+                "https://agent.timeweb.cloud/api/v1/cloud-ai/agents/"
+                f"{TIMEWEB_AGENT}/v1/chat/completions"
+            )
+            assert "model" not in body
+            assert "provider" not in body
+            assert "max_tokens" not in body
+            assert body["max_completion_tokens"] == 1800
+            assert body["stream"] is False
+        else:
+            assert request.url.host == "openrouter.ai"
+            assert body["model"] == "openai/gpt-5.4-mini"
+            assert body["provider"]["require_parameters"]
         if len(requests) == 1:
             assert body["tool_choice"] == "required"
             return tool_response()
         data = json.loads(body["messages"][-1]["content"])
+        assert body["messages"][-1]["role"] == "tool"
+        assert body["messages"][-1]["tool_call_id"] == "c1"
         assert data["latest"]["price"] == "585"
         assert data["baseline"]["count"] == 6
         assert "private-ai-key" not in request.content.decode()
         return text_response()
 
-    client, repo, store = app_client(model)
+    client, repo, store = app_client(model, ai_provider=ai_provider)
     with client:
         assert client.post("/api/assistant/messages", json=payload()).status_code == 401
         login(client)
@@ -216,9 +235,11 @@ def test_complete_tool_cycle_history_sources_and_csrf():
 
 
 @pytest.mark.parametrize("status", [401, 402, 429, 500])
-def test_provider_failure_is_redacted_and_recorded(status):
+@pytest.mark.parametrize("ai_provider", ["openrouter", "timeweb"])
+def test_provider_failure_is_redacted_and_recorded(status, ai_provider):
     client, _, store = app_client(
-        lambda _: httpx.Response(status, json={"error": "secret-key-123"})
+        lambda _: httpx.Response(status, json={"error": "secret-key-123"}),
+        ai_provider=ai_provider,
     )
     with client:
         login(client)
@@ -345,6 +366,37 @@ def test_openai_responses_adapter_preserves_tool_call_identity():
             await client.client.aclose()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("agent_id", ["https://evil.invalid", "../other-agent", "12345"])
+def test_timeweb_access_id_cannot_change_provider_url(agent_id):
+    with pytest.raises(ValidationError):
+        AssistantSettings(_env_file=None, provider="timeweb", timeweb_agent_id=agent_id)
+
+
+def test_timeweb_missing_access_id_is_unconfigured():
+    config = AssistantSettings(_env_file=None, provider="timeweb", api_key="private-ai-key")
+    assert not config.configured
+    assert config.model_copy(update={"timeweb_agent_id": TIMEWEB_AGENT}).configured
+    assert not config.model_copy(update={"api_key": config.api_key.__class__(" ")}).configured
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+def test_timeweb_answer_without_source_data_is_not_saved(finish_reason):
+    response = text_response().json()
+    response["choices"][0]["finish_reason"] = finish_reason
+    client, _, store = app_client(
+        lambda _: httpx.Response(200, json=response), ai_provider="timeweb"
+    )
+    with client:
+        login(client)
+        result = client.post(
+            "/api/assistant/messages",
+            json=payload(),
+            headers={"Origin": "http://127.0.0.1:8013"},
+        )
+        assert result.status_code == 502
+        assert list(store.results.values()) == [None]
 
 
 @pytest.fixture

@@ -28,11 +28,18 @@ class AssistantSettings(BaseSettings):
         extra="ignore",
         hide_input_in_errors=True,
     )
-    provider: Literal["openai", "openrouter"] = "openai"
+    provider: Literal["openai", "openrouter", "timeweb"] = "openai"
     api_key: SecretStr = SecretStr("")
+    timeweb_agent_id: UUID | None = None
     model: str = Field(default="gpt-5.4-mini", min_length=1, max_length=100)
     requests_per_hour: int = Field(default=20, ge=1, le=100)
     max_output_tokens: int = Field(default=1800, ge=500, le=4000)
+
+    @property
+    def configured(self):
+        return bool(self.api_key.get_secret_value().strip()) and (
+            self.provider != "timeweb" or self.timeweb_agent_id is not None
+        )
 
     @property
     def model_name(self):
@@ -328,7 +335,7 @@ class DataTools:
 
 
 class ModelClient:
-    """Two fixed HTTPS hosts; model/provider selection is server configuration only."""
+    """Fixed provider hosts; Timeweb uses a validated agent access UUID."""
 
     def __init__(self, settings, *, transport=None):
         self.settings = settings
@@ -350,16 +357,28 @@ class ModelClient:
                 "reasoning": {"effort": "none"},
             }
         else:
-            url = "https://openrouter.ai/api/v1/chat/completions"
             body = common | {
                 "messages": [{"role": "system", "content": INSTRUCTIONS}, *inputs],
                 "tools": [
                     {"type": "function", "function": {k: v for k, v in t.items() if k != "type"}}
                     for t in TOOLS
                 ],
-                "max_tokens": config.max_output_tokens,
-                "provider": {"require_parameters": True, "data_collection": "deny"},
             }
+            if config.provider == "timeweb":
+                if config.timeweb_agent_id is None:
+                    raise HTTPException(503, "Укажите Access ID агента Timeweb на сервере.")
+                url = (
+                    "https://agent.timeweb.cloud/api/v1/cloud-ai/agents/"
+                    f"{config.timeweb_agent_id}/v1/chat/completions"
+                )
+                # The model is selected in Timeweb's agent settings, not per request.
+                body.pop("model")
+                body["max_completion_tokens"] = config.max_output_tokens
+                body["stream"] = False
+            else:
+                url = "https://openrouter.ai/api/v1/chat/completions"
+                body["max_tokens"] = config.max_output_tokens
+                body["provider"] = {"require_parameters": True, "data_collection": "deny"}
         if len(json.dumps(body, ensure_ascii=False, default=str)) > 110000:
             raise HTTPException(
                 422, "Слишком большой контекст. Начните новый диалог об одном товаре."
@@ -438,8 +457,8 @@ class ModelClient:
 
 
 async def answer_question(repo, store, scope, payload, settings, *, transport=None):
-    if not settings.api_key.get_secret_value().strip():
-        raise HTTPException(503, "Помощник ещё не подключён. Добавьте API-ключ на сервере.")
+    if not settings.configured:
+        raise HTTPException(503, "Помощник ещё не подключён. Проверьте настройки ИИ на сервере.")
     conversation_id, replay = await run_in_threadpool(
         store.reserve,
         scope,

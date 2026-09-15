@@ -1,6 +1,6 @@
 # Chaika Team — Backend
 
-Python 3.12 + FastAPI: интеграция с iiko, сохранение истории в PostgreSQL/Supabase, API аналитического сайта и помощник по закупкам через OpenRouter.
+Python 3.12 + FastAPI: интеграция с iiko, сохранение истории в PostgreSQL/Supabase, API аналитического сайта и помощник по закупкам через OpenRouter, OpenAI или Timeweb.
 
 Фронтенд React находится в отдельном репозитории `TeamChaika/team_front`. Для совместного запуска клонируйте оба репозитория в соседние папки.
 
@@ -35,6 +35,8 @@ cp .env.example .env
 ## Timeweb Cloud Apps
 
 [Настройки запуска на Timeweb](docs/timeweb.md): команда `python -m app.serve`, `PORT=8000`, проверка состояния `/api/health`. Для Docker-деплоя добавлен готовый `Dockerfile` с `EXPOSE 8000`. Рабочие параметры Supabase задаются в панели приложения.
+
+[Подключение агента Timeweb к чату](docs/timeweb-ai.md): параметры провайдера, Access ID, ключ и проверка ответа с источниками.
 
 ## Локальный запуск сайта
 

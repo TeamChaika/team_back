@@ -260,7 +260,7 @@ def create_portal(
     def assistant_status(scope: Access):
         config = assistant_settings or AssistantSettings()
         return {
-            "configured": bool(config.api_key.get_secret_value().strip()),
+            "configured": config.configured,
             "provider": config.provider,
             "model": config.model_name,
             "requests_per_hour": config.requests_per_hour,
