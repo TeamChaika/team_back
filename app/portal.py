@@ -26,8 +26,9 @@ from app.web.assistant_store import AssistantStore
 from app.web.auth import ACCESS_COOKIE, REFRESH_COOKIE, Auth, Login, LoginLimiter
 from app.web.coverage import ZONE
 from app.web.employees import EmployeeCommand, EmployeeEditor, owner
+from app.web.indicators import IndicatorQuery, IndicatorService, catalog
 from app.web.live_sales import LiveSales
-from app.web.repository import Repository, Scope
+from app.web.repository import Repository, Scope, serial
 from app.web.settings import WebSettings
 
 
@@ -41,6 +42,7 @@ def create_portal(
     assistant_settings=None,
     assistant_transport=None,
     employee_editor=None,
+    indicator_service=None,
 ):
     settings = settings or Settings()
     web = web_settings or WebSettings()
@@ -49,6 +51,7 @@ def create_portal(
     chats = assistant_store or AssistantStore(repo)
     employees = employee_editor or EmployeeEditor(settings, repo)
     live_sales = LiveSales(settings) if settings.live_sales_enabled else None
+    indicators = indicator_service or IndicatorService(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -261,6 +264,34 @@ def create_portal(
                 raise HTTPException(422, "Фильтр блюда доступен только в отчёте по блюдам.")
             return repo.sales(scope, kind, start, end, dish_id=dish_id, dish_name=dish_name)
         return repo.sales(scope, kind, start, end)
+
+    @app.get("/api/indicators/filters")
+    def indicator_filters(scope: Access):
+        return {"filters": catalog()}
+
+    @app.post("/api/indicators/query")
+    def indicator_query(payload: IndicatorQuery, request: Request, scope: Access):
+        request.app.state.auth.check_origin(request)
+        if payload.needs_iiko:
+            return serial(indicators.get(scope, payload))
+        bundle, metadata, warning = None, None, None
+        if live_sales and payload.day == datetime.now(ZONE).date():
+            try:
+                bundle, metadata = live_sales.get()
+            except HTTPException:
+                warning = (
+                    "iiko не ответила. Показана последняя сохранённая выгрузка за выбранную дату."
+                )
+        return {
+            **repo.indicators(scope, payload.day, live_bundle=bundle),
+            "live": metadata,
+            "warning": warning,
+        }
+
+    @app.post("/api/indicators/options/{field}")
+    def indicator_options(field: str, payload: IndicatorQuery, request: Request, scope: Access):
+        request.app.state.auth.check_origin(request)
+        return indicators.get(scope, payload, option=field)
 
     @app.get("/api/overview")
     def overview(

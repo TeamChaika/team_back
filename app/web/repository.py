@@ -14,6 +14,7 @@ from psycopg_pool import ConnectionPool
 from app.core.config import Settings
 from app.web.balances import product_suggestions, read_balances
 from app.web.coverage import partial_days
+from app.web.indicators import read_stored
 from app.web.overview import read_overview
 from app.web.purchase_impact import read_purchase_impact
 from app.web.purchase_impact_summary import add_weekly_impacts
@@ -64,6 +65,10 @@ def has_store_scope(store_id, parents, allowed):
 
 
 class Repository:
+    def indicators(self, scope, day, *, live_bundle=None):
+        with self.connection(repeatable=True) as db:
+            return serial(read_stored(db, scope, day, live_bundle))
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self._pool = ConnectionPool(
