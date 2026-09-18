@@ -56,6 +56,7 @@ JOBS = (
     Job("balances", "Остатки на складах", minute=30),
     Job("document_history", "Документы · открытые 60 дней", 3, 0),
     Job("references", "Структура, сотрудники, должности и справочники", 4, 30),
+    Job("indicator_filters", "Фильтры показателей", 7, 30),
     Job("inventory", "Номенклатура и техкарты", 5, 0),
     Job("cash_shifts", "Кассовые смены · открытые 60 дней", 6, 30),
     Job("money_balances", "Денежные балансы", 7, 0),
@@ -108,6 +109,10 @@ def run_job(job, slot, settings, stop):
                 raise SyncError("scheduled_sales_incomplete")
             first = end + timedelta(days=1)
             stop.wait(1)
+    elif job.key == "indicator_filters":
+        from app.sync_indicator_filters import synchronize_filters
+
+        synchronize_filters(settings, stop)
     elif job.key in {"documents", "document_history"}:
         start = day - timedelta(days=59) if job.key == "document_history" else yesterday
         # Release the source lock between days so live reports can run too.

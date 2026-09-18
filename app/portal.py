@@ -85,6 +85,8 @@ def create_portal(
 
                 await run_in_threadpool(stop_process, scheduler)
             await app.state.auth.client.aclose()
+            if hasattr(indicators, "close"):
+                await run_in_threadpool(indicators.close)
             if repository is None:
                 await run_in_threadpool(repo.close)
 
@@ -267,31 +269,26 @@ def create_portal(
 
     @app.get("/api/indicators/filters")
     def indicator_filters(scope: Access):
-        return {"filters": catalog()}
+        return {"filters": catalog(), **repo.indicator_filters(scope)}
 
     @app.post("/api/indicators/query")
     def indicator_query(payload: IndicatorQuery, request: Request, scope: Access):
         request.app.state.auth.check_origin(request)
-        if payload.needs_iiko:
-            return serial(indicators.get(scope, payload))
-        bundle, metadata, warning = None, None, None
-        if live_sales and payload.day == datetime.now(ZONE).date():
-            try:
-                bundle, metadata = live_sales.get()
-            except HTTPException:
-                warning = (
-                    "iiko не ответила. Показана последняя сохранённая выгрузка за выбранную дату."
-                )
-        return {
-            **repo.indicators(scope, payload.day, live_bundle=bundle),
-            "live": metadata,
-            "warning": warning,
-        }
+        return serial(indicators.get(scope, payload))
+
+    @app.post("/api/indicators/metric/{metric}")
+    def indicator_metric(metric: str, payload: IndicatorQuery, request: Request, scope: Access):
+        request.app.state.auth.check_origin(request)
+        result = serial(indicators.get(scope, payload, metric))
+        return JSONResponse(result, status_code=202 if result["status"] == "loading" else 200)
 
     @app.post("/api/indicators/options/{field}")
     def indicator_options(field: str, payload: IndicatorQuery, request: Request, scope: Access):
         request.app.state.auth.check_origin(request)
-        return indicators.get(scope, payload, option=field)
+        data = repo.indicator_filters(scope)
+        if field not in data["options"]:
+            raise HTTPException(422, "Неизвестный фильтр.")
+        return {"values": data["options"][field], "sync": data["sync"].get(field)}
 
     @app.get("/api/overview")
     def overview(

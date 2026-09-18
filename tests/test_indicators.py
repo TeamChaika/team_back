@@ -1,5 +1,8 @@
+"""Direct KPI aggregation, bounded cache and authorization contracts."""
+
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from threading import Event
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -16,21 +19,50 @@ from app.portal import create_portal
 from app.web.indicators import (
     BASE,
     DEFAULTS,
-    EXTRA,
     IndicatorQuery,
     IndicatorService,
     calculate,
-    parse_direct,
+    fetch_values,
+    parse_totals,
     request_body,
-    stored_result,
 )
 from app.web.settings import WebSettings
 
 DAY = date(2026, 9, 13)
+SCOPE = SimpleNamespace(ids=[UUID(int=1)])
+
+
+@pytest.fixture
+def services():
+    active = []
+
+    def create(**kwargs):
+        service = IndicatorService(None, **kwargs)
+        active.append(service)
+        return service
+
+    yield create
+    for service in active:
+        service.close()
+
+
+def result(*_):
+    return {
+        "values": [
+            calculate({"revenue": Decimal(900), "cost": Decimal(300)}),
+            calculate({"revenue": Decimal(400), "cost": Decimal(200)}),
+        ],
+        "observed_at": datetime.now(UTC),
+    }
+
+
+def finish(service, scope, query, metric):
+    service._job(scope, query, metric).result(timeout=5)
+    return service.get(scope, query, metric)
 
 
 def test_ratios_use_amounts_and_missing_is_not_zero():
-    result = calculate(
+    totals = calculate(
         dict(
             revenue=Decimal(900),
             cost=Decimal(300),
@@ -40,135 +72,173 @@ def test_ratios_use_amounts_and_missing_is_not_zero():
             gross_revenue=Decimal(1000),
         )
     )
-    assert result["markup"] == 200
-    assert result["discount_percent"] == 10
-    assert result["average_check"] == 300
-    assert result["guests_per_check"] == 2
+    assert totals["markup"] == 200
+    assert totals["discount_percent"] == 10
+    assert totals["average_check"] == 300
+    assert totals["guests_per_check"] == 2
     assert calculate({"revenue": Decimal(100), "cost": Decimal(0)})["markup"] is None
     assert all(v is None for v in calculate({}).values())
 
 
-def test_defaults_and_explicit_all_are_different():
+def test_period_validation_and_default_comparison():
+    q = IndicatorQuery(start="2025-01-01", end="2025-12-31")
+    assert (q.previous_start, q.previous_end) == (date(2024, 1, 2), date(2024, 12, 31))
+    assert IndicatorQuery(day=DAY).start == DAY
+    for values in [
+        dict(start=DAY),
+        dict(start="2025-02-01", end="2025-01-01"),
+        dict(day=DAY, start=DAY),
+        dict(start="2099-01-01", end="2099-01-02"),
+        dict(day=DAY, previous_start=DAY),
+        dict(day=DAY, previous_start=DAY, previous_end=DAY),
+        dict(start="2001-01-01", end=DAY),
+    ]:
+        with pytest.raises(ValidationError):
+            IndicatorQuery(**values)
+
+
+def test_defaults_allowlist_and_no_daily_grouping():
     plain = IndicatorQuery(day=DAY)
     assert plain.effective_filters() == DEFAULTS
-    assert not plain.needs_iiko
-    assert IndicatorQuery(day=DAY, filters={"dish_deleted": []}).needs_iiko
-    with pytest.raises(ValidationError):
-        IndicatorQuery(day=DAY, filters={"Department.Id": ["foreign"]})
-    with pytest.raises(ValidationError):
-        IndicatorQuery(day=DAY, filters={"product": ["x"] * 101})
-
-
-def test_scoped_olap_request_and_option_self_filter_removal():
-    q = IndicatorQuery(day=DAY, filters={"waiter": ["A"], "dish_deleted": []})
-    body = request_body(q, ["allowed"], fields=list(BASE.values()))
+    for filters in [{"Department.Id": ["foreign"]}, {"product": ["x"] * 101}]:
+        with pytest.raises(ValidationError):
+            IndicatorQuery(day=DAY, filters=filters)
+    q = IndicatorQuery(
+        start="2025-01-01", end="2025-12-31", filters={"waiter": ["A"], "dish_deleted": []}
+    )
+    body = request_body(q, ["allowed"], list(BASE.values()), q.start, q.end)
     assert body["filters"]["Department.Id"]["values"] == ["allowed"]
     assert "DeletedWithWriteoff" not in body["filters"]
-    assert body["filters"]["OpenDate.Typed"]["from"] == "2026-09-12T00:00:00"
-    assert body["filters"]["OpenDate.Typed"]["to"] == "2026-09-14T00:00:00"
-    assert len(body["aggregateFields"]) + len(body["groupByRowFields"]) <= 7
-    choices = request_body(
-        q, ["allowed"], fields=["UniqOrderId"], group="OrderWaiter.Name", omit="waiter"
+    assert body["filters"]["OpenDate.Typed"]["from"] == "2025-01-01T00:00:00"
+    assert body["filters"]["OpenDate.Typed"]["to"] == "2026-01-01T00:00:00"
+    assert body["groupByRowFields"] == []
+
+
+def test_native_average_missing_and_empty():
+    assert parse_totals(
+        [{"OrderTime.AveragePrechequeTime": "18.1166666667"}], ["precheck_minutes"]
+    )["precheck_minutes"] == Decimal("18.1166666667")
+    assert parse_totals([{}], ["revenue"])["revenue"] is None
+    assert parse_totals([], ["revenue", "precheck_minutes"]) == {
+        "revenue": 0,
+        "precheck_minutes": None,
+    }
+    for rows in [[{}, {}], [{"DishDiscountSumInt": "NaN"}]]:
+        with pytest.raises(ValueError):
+            parse_totals(rows, ["revenue"])
+
+
+def test_periods_are_aggregated_by_iiko_without_database_sales(monkeypatch):
+    from app.web import indicators
+
+    captured = []
+
+    def collect(_, bodies):
+        captured.extend(bodies)
+        return [
+            [{"OrderTime.AveragePrechequeTime": "20.5"}],
+            [{"OrderTime.AveragePrechequeTime": "14"}],
+        ]
+
+    monkeypatch.setattr(indicators, "collect_reports", collect)
+    value = fetch_values(
+        None,
+        IndicatorQuery(start="2025-01-01", end="2025-12-31"),
+        ["allowed"],
+        ["precheck_minutes"],
     )
-    assert "OrderWaiter.Name" not in choices["filters"]
-    assert "Department.Id" in choices["filters"]
+    assert value["values"][0]["precheck_minutes"] == Decimal("20.5")
+    assert len(captured) == 2
+    assert all(b["groupByRowFields"] == [] for b in captured)
+    assert captured[0]["aggregateFields"] == ["OrderTime.AveragePrechequeTime"]
 
 
-def test_missing_day_and_empty_published_day():
-    observed = datetime(2026, 9, 14, 6, tzinfo=UTC)
-    coverage = [
-        {"business_date": DAY, "kind": kind, "observed_at": observed}
-        for kind in ["daily", "dishes", "returns"]
-    ]
-    result = stored_result(DAY, coverage, [])
-    assert result["current"]["totals"]["revenue"] == 0
-    assert result["current"]["totals"]["precheck_minutes"] is None
-    assert result["previous"]["totals"]["revenue"] is None
-    assert result["previous"]["available"] is False
+def test_cache_separates_scope_filters_periods_and_reuses_related_metrics(services):
+    calls = []
+    now = [10]
 
+    def fetch(*args):
+        calls.append(args)
+        return result()
 
-def test_stored_uses_correct_reports_not_sum_of_duplicate_sales_views():
-    observed = datetime(2026, 9, 13, 12, tzinfo=UTC)
-    coverage = [
-        {"business_date": DAY, "kind": kind, "observed_at": observed}
-        for kind in ["daily", "dishes", "returns"]
-    ]
-    rows = [
-        dict(
-            business_date=DAY,
-            kind="daily",
-            revenue=Decimal(90),
-            cost=Decimal(30),
-            checks=Decimal(1),
-            guests=Decimal(2),
-        ),
-        dict(business_date=DAY, kind="dishes", quantity=Decimal("1.5"), revenue=Decimal(90)),
-        dict(
-            business_date=DAY,
-            kind="returns",
-            discount=Decimal(10),
-            return_sum=Decimal(0),
-            revenue=Decimal(90),
-        ),
-    ]
-    report = stored_result(DAY, coverage, rows)
-    assert report["current"]["totals"]["revenue"] == 90
-    assert report["current"]["totals"]["gross_revenue"] == 100
-    assert report["current"]["totals"]["discount_percent"] == 10
-    assert report["current"]["totals"]["quantity"] == Decimal("1.5")
-    assert report["current"]["partial"]
-
-
-def test_direct_preserves_iiko_average_and_nulls():
-    a = {"OpenDate.Typed": DAY.isoformat(), **{v: 1 for v in BASE.values()}}
-    b = {"OpenDate.Typed": DAY.isoformat(), **{v: None for v in EXTRA.values()}}
-    b["OrderTime.AveragePrechequeTime"] = "18.1166666667"
-    result = parse_direct(IndicatorQuery(day=DAY), [[a], [b]], datetime.now(UTC))
-    assert result["current"]["totals"]["precheck_minutes"] == Decimal("18.1166666667")
-    assert result["current"]["totals"]["return_sum"] is None
-    assert result["previous"]["totals"]["revenue"] == 0
-    with pytest.raises(ValueError):
-        parse_direct(IndicatorQuery(day=DAY), [[a, a], [b]], datetime.now(UTC))
-
-
-def test_cache_is_scoped_to_restaurants_filters_date_and_options():
-    calls, now = [], [10]
-
-    def fetch(_, query, ids, option):
-        calls.append((query.day, ids, option))
-        return {"value": len(calls)}
-
-    service = IndicatorService(None, fetch=fetch, clock=lambda: now[0])
+    service = services(fetch=fetch, clock=lambda: now[0])
     q = IndicatorQuery(day=DAY)
-    scope = SimpleNamespace(ids=[UUID(int=1)])
-    assert service.get(scope, q) == service.get(scope, q)
+    assert finish(service, SCOPE, q, "markup")["current"]["value"] == 200
+    assert finish(service, SCOPE, q, "gross_profit")["current"]["value"] == 600
+    finish(service, SCOPE, IndicatorQuery(day=DAY, filters=DEFAULTS), "markup")
     assert len(calls) == 1
-    service.get(SimpleNamespace(ids=[UUID(int=2)]), q)
-    service.get(scope, IndicatorQuery(day=DAY, filters={"product": ["x"]}))
-    service.get(scope, q, option="product")
+    finish(service, SimpleNamespace(ids=[UUID(int=2)]), q, "markup")
+    finish(service, SCOPE, IndicatorQuery(day=DAY, filters={"product": ["x"]}), "markup")
+    finish(service, SCOPE, IndicatorQuery(day=date(2026, 9, 12)), "markup")
     assert len(calls) == 4
     now[0] += 301
-    service.get(scope, q)
+    finish(service, SCOPE, q, "markup")
     assert len(calls) == 5
     with pytest.raises(HTTPException):
-        service.get(SimpleNamespace(ids=[]), q)
+        service.get(SimpleNamespace(ids=[]), q, "markup")
     with pytest.raises(HTTPException):
-        service.get(scope, q, option="arbitrary")
+        service.get(SCOPE, q, "arbitrary")
 
 
-def test_unknown_session_does_not_trigger_new_logins():
+def test_concurrent_requests_share_one_inflight_job(services):
+    entered, release = Event(), Event()
     calls = []
 
     def fetch(*_):
+        entered.set()
+        release.wait(5)
         calls.append(1)
-        raise IikoError("iiko_session_unknown", "secret must not reach client")
+        return result()
 
-    service = IndicatorService(None, fetch=fetch)
+    service = services(fetch=fetch)
+    q = IndicatorQuery(day=DAY)
+    try:
+        assert service.get(SCOPE, q, "revenue")["status"] == "loading"
+        assert entered.wait(2)
+        for _ in range(10):
+            assert service.get(SCOPE, q, "revenue")["status"] == "loading"
+    finally:
+        release.set()
+    assert finish(service, SCOPE, q, "revenue")["current"]["value"] == 900
+    assert calls == [1]
+
+
+def test_error_cooldown_starts_after_slow_failure(services):
+    now = [0]
+    calls = []
+
+    def fail(*_):
+        calls.append(1)
+        now[0] += 90
+        raise ValueError("private")
+
+    service = services(fetch=fail, clock=lambda: now[0])
+    q = IndicatorQuery(day=DAY)
+    with pytest.raises(ValueError):
+        service._job(SCOPE, q, "revenue").result(2)
     for _ in range(2):
         with pytest.raises(HTTPException) as error:
-            service.get(SimpleNamespace(ids=["a"]), IndicatorQuery(day=DAY))
-        assert "secret" not in error.value.detail
+            service.get(SCOPE, q, "revenue")
+        assert "private" not in error.value.detail
     assert len(calls) == 1
+    now[0] += 31
+    with pytest.raises(ValueError):
+        service._job(SCOPE, q, "revenue").result(2)
+    assert len(calls) == 2
+
+
+def test_unknown_session_does_not_trigger_new_logins(services):
+    calls = []
+
+    def fail(*_):
+        calls.append(1)
+        raise IikoError("iiko_session_unknown", "private")
+
+    service = services(fetch=fail)
+    for _ in range(2):
+        with pytest.raises(HTTPException):
+            service.get(SCOPE, IndicatorQuery(day=DAY))
+    assert calls == [1]
 
 
 def test_unconfirmed_logout_quarantines_the_direct_service(monkeypatch):
@@ -213,60 +283,77 @@ def test_unconfirmed_logout_quarantines_the_direct_service(monkeypatch):
     assert events == ["client", "closed"]
 
 
-def test_routes_enforce_auth_scope_origin_and_allowlist():
+def test_routes_enforce_auth_scope_origin_and_never_query_stored_kpis():
     class Repo(FakeRepository):
-        def indicators(self, scope, day, *, live_bundle=None):
-            return {"ids": [str(i) for i in scope.ids], "day": day.isoformat()}
+        def indicators(self, *_):
+            raise AssertionError("No stored KPI reads")
+
+        def indicator_filters(self, scope):
+            assert list(scope.ids) == [DEPARTMENT]
+            return {"options": {"order_type": ["Обычный"]}, "sync": {}}
 
     seen = []
 
-    def fetch(_, query, ids, option):
+    def fetch(_, query, ids, inputs):
         seen.append(ids)
-        return {"ids": ids}
+        return result()
 
+    service = IndicatorService(None, fetch=fetch)
     app = create_portal(
         settings=Settings(_env_file=None),
         web_settings=WebSettings(_env_file=None),
         repository=Repo(),
         auth_transport=httpx.MockTransport(provider),
-        indicator_service=IndicatorService(None, fetch=fetch),
+        indicator_service=service,
     )
     body = {"day": str(DAY)}
     headers = {"Origin": "http://127.0.0.1:8013"}
     with TestClient(app) as client:
-        assert client.post("/api/indicators/query", json=body, headers=headers).status_code == 401
+        assert (
+            client.post("/api/indicators/metric/revenue", json=body, headers=headers).status_code
+            == 401
+        )
+        assert client.get("/api/indicators/filters").status_code == 401
         login(client)
-        assert client.post("/api/indicators/query", json=body, headers=headers).json()["ids"] == [
-            str(DEPARTMENT)
-        ]
+        for path in ["/api/indicators/filters", "/api/indicators/options/order_type"]:
+            r = (
+                client.get(path)
+                if path.endswith("filters")
+                else client.post(path, json=body, headers=headers)
+            )
+            assert r.status_code == 200
+        assert seen == []
+        assert client.get(f"/api/indicators/filters?department_id={OTHER}").status_code == 403
         assert (
             client.post(
-                "/api/indicators/query", json=body, headers={"Origin": "https://evil.invalid"}
+                "/api/indicators/metric/revenue",
+                json=body,
+                headers={"Origin": "https://evil.invalid"},
             ).status_code
             == 403
         )
         assert (
             client.post(
-                f"/api/indicators/query?department_id={OTHER}", json=body, headers=headers
+                f"/api/indicators/metric/revenue?department_id={OTHER}", json=body, headers=headers
             ).status_code
             == 403
         )
         assert (
+            client.post("/api/indicators/metric/arbitrary", json=body, headers=headers).status_code
+            == 422
+        )
+        assert (
             client.post(
-                "/api/indicators/query",
-                json={**body, "filters": {"arbitrary": ["x"]}},
+                "/api/indicators/metric/revenue",
+                json={**body, "filters": {"sql": ["x"]}},
                 headers=headers,
             ).status_code
             == 422
         )
-        result = client.post(
-            "/api/indicators/query", json={**body, "filters": {"product": ["x"]}}, headers=headers
-        )
-        assert result.status_code == 200
+        r = client.post("/api/indicators/metric/revenue", json=body, headers=headers)
+        assert r.status_code in (200, 202)
+        service._job(SimpleNamespace(ids=[DEPARTMENT]), IndicatorQuery(**body), "revenue").result(2)
+        r = client.post("/api/indicators/metric/revenue", json=body, headers=headers)
+        assert r.status_code == 200 and r.json()["source"] == "iiko_api"
+        assert r.json()["current"]["value"] == "900"
         assert seen == [[str(DEPARTMENT)]]
-        assert (
-            client.post(
-                "/api/indicators/options/Department.Id", json=body, headers=headers
-            ).status_code
-            == 422
-        )
