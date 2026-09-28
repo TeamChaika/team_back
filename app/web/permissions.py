@@ -21,6 +21,8 @@ SECTIONS = {
     "status": "Статус данных",
 }
 IIKO_SECTIONS = set(SECTIONS) - {"deposits"}
+DOCUMENT_SECTIONS = {"transfers", "writeoffs"}
+ANALYTICS_SECTIONS = IIKO_SECTIONS - DOCUMENT_SECTIONS
 
 
 def sections_for(user):
