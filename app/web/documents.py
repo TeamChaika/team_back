@@ -62,6 +62,8 @@ class DocumentsClient:
                     try:
                         payload = json.loads(data)
                         code = payload.get("code") if isinstance(payload, dict) else None
+                        if not isinstance(code, str):
+                            code = None
                     except ValueError:
                         code = None
                     raise HTTPException(

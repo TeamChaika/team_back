@@ -1,18 +1,18 @@
 """The BFF never widens a menu grant or retries an uncertain document write."""
 
-from dataclasses import replace
 import asyncio
+from dataclasses import replace
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.portal import create_portal
+from app.web.documents import DocumentsClient
 from app.web.settings import WebSettings
 from tests.test_portal import FakeRepository, login, provider
-from app.web.documents import DocumentsClient
-from fastapi import HTTPException
 
 
 class DocumentRepository(FakeRepository):
@@ -123,9 +123,15 @@ def test_arbitrary_upstream_path_is_not_forwarded(documents):
 @pytest.mark.parametrize("code", [{"unexpected": "value"}, ["version"]])
 def test_malformed_upstream_error_code_still_returns_safe_error(code):
     async def scenario():
-        service = DocumentsClient("https://documents.invalid", True, httpx.MockTransport(
-            lambda request: httpx.Response(409, json={"code": code, "detail": "private upstream data"})
-        ))
+        service = DocumentsClient(
+            "https://documents.invalid",
+            True,
+            httpx.MockTransport(
+                lambda request: httpx.Response(
+                    409, json={"code": code, "detail": "private upstream data"}
+                )
+            ),
+        )
         try:
             with pytest.raises(HTTPException) as error:
                 await service.call("test-token", "POST", "waybill/1/confirm")
@@ -133,4 +139,5 @@ def test_malformed_upstream_error_code_still_returns_safe_error(code):
             assert "private" not in error.value.detail
         finally:
             await service.client.aclose()
+
     asyncio.run(scenario())
