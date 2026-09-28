@@ -27,6 +27,7 @@ from app.web.assistant_store import AssistantStore
 from app.web.auth import ACCESS_COOKIE, REFRESH_COOKIE, Auth, Login, LoginLimiter
 from app.web.coverage import ZONE
 from app.web.deposits import DepositsClient, create_deposits_router
+from app.web.documents import DocumentsClient, create_documents_router
 from app.web.employees import EmployeeCommand, EmployeeEditor, owner
 from app.web.indicators import IndicatorQuery, IndicatorService, catalog
 from app.web.live_sales import LiveSales
@@ -47,6 +48,7 @@ def create_portal(
     employee_editor=None,
     indicator_service=None,
     deposits_transport=None,
+    documents_transport=None,
 ):
     settings = settings or Settings()
     web = web_settings or WebSettings()
@@ -61,6 +63,9 @@ def create_portal(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.auth = Auth(web, transport=auth_transport)
         app.state.deposits = DepositsClient(web.deposits_api_url, transport=deposits_transport)
+        app.state.documents = DocumentsClient(
+            web.documents_api_url, web.documents_enabled, transport=documents_transport
+        )
         scheduler = None
 
         async def start_background():
@@ -91,6 +96,7 @@ def create_portal(
                 await run_in_threadpool(stop_process, scheduler)
             await app.state.auth.client.aclose()
             await app.state.deposits.client.aclose()
+            await app.state.documents.client.aclose()
             if hasattr(indicators, "close"):
                 await run_in_threadpool(indicators.close)
             if repository is None:
@@ -185,6 +191,7 @@ def create_portal(
         return scope
 
     app.include_router(create_deposits_router(deposit_access, repo))
+    app.include_router(create_documents_router(portal_access))
     app.include_router(create_admin_router(portal_access, repo, web))
 
     def check_period(start, end):
@@ -260,6 +267,7 @@ def create_portal(
             and bool(IIKO_SECTIONS.intersection(sections_for(scope.user))),
             "sections": sections_for(scope.user),
             "can_manage": bool(scope.user.get("is_portal_admin")),
+            "documents_enabled": web.documents_enabled,
             "modules": (["iiko"] if IIKO_SECTIONS.intersection(sections_for(scope.user)) else [])
             + (["deposits"] if "deposits" in sections_for(scope.user) else []),
         }
