@@ -108,7 +108,7 @@ class EmployeeCard(IikoEmployee):
 
 
 def owner(scope):
-    if scope.user["role"] != "owner":
+    if scope.user["role"] != "owner" or not scope.user.get("all_departments", True):
         raise HTTPException(403, "Добавление и редактирование сотрудников доступно владельцу.")
 
 
@@ -300,7 +300,8 @@ class EmployeeEditor:
                 with reference_lock(db):
                     # Recheck privileges after acquiring the shared collector lock.
                     row = db.execute(
-                        "SELECT role FROM chaika.web_users WHERE id=%s AND active",
+                        "SELECT role FROM chaika.web_users WHERE id=%s AND active "
+                        "AND all_departments AND 'employees'=ANY(sections)",
                         (scope.user["id"],),
                     ).fetchone()
                     if not row or row[0] != "owner":

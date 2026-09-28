@@ -117,6 +117,12 @@ def test_batched_scope_rechecks_user_grants_and_active_state(db, bundle):
     db.execute("SET LOCAL ROLE postgres")
     db.execute("UPDATE chaika.web_users SET role='owner' WHERE id=%s", (user_id,))
     db.execute("SET LOCAL ROLE chaika_backend")
+    # The old owner label alone no longer expands restaurant access.
+    with pytest.raises(HTTPException):
+        repo.scope(user_id)
+    db.execute("SET LOCAL ROLE postgres")
+    db.execute("UPDATE chaika.web_users SET all_departments=true WHERE id=%s", (user_id,))
+    db.execute("SET LOCAL ROLE chaika_backend")
     assert repo.scope(user_id).unrestricted
     db.execute("SET LOCAL ROLE postgres")
     db.execute("UPDATE chaika.web_users SET active=false WHERE id=%s", (user_id,))

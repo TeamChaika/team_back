@@ -305,7 +305,7 @@ def enrich(db, scope, changes):
         else f"Выбрано заведений: {len(scope.selection_ids)}"
         if scope.selection_ids
         else "Вся сеть"
-        if scope.user["role"] == "owner"
+        if scope.unrestricted
         else "Доступные заведения"
     )
 

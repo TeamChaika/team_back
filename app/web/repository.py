@@ -859,7 +859,7 @@ class Repository:
             ).fetchall()
             runs = []
             scheduled = []
-            if scope.user["role"] == "owner":
+            if scope.unrestricted:
                 runs = db.execute(
                     "SELECT job,status,started_at,finished_at,error_code,counts->>'resource' "
                     "AS resource,counts->>'completed_through' AS completed_through FROM "
@@ -890,7 +890,7 @@ class Repository:
                     "chaika.raw_snapshots WHERE source_id='primary' GROUP BY resource ORDER "
                     "BY resource"
                 ).fetchall()
-                if scope.user["role"] == "owner"
+                if scope.unrestricted
                 else []
             )
             cash_days = (

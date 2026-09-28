@@ -137,3 +137,16 @@ def test_password_and_provider_key_not_represented_in_models():
 def test_inactive_terminal_cannot_be_selected_for_payments():
     with pytest.raises(ValidationError):
         Terminal(name="Test", active=False, make_default=True)
+
+
+def test_existing_owner_loses_iiko_editor_when_restaurant_scope_is_restricted():
+    from fastapi import HTTPException
+
+    from app.web.employees import owner
+    from tests.test_portal import USER
+
+    scope = FakeRepository().scope(USER)
+    scope = replace(scope, user={**scope.user, "role": "owner", "all_departments": False})
+    with pytest.raises(HTTPException) as denied:
+        owner(scope)
+    assert denied.value.status_code == 403
