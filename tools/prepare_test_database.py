@@ -27,7 +27,10 @@ def main():
         db.execute("CREATE ROLE authenticated NOLOGIN")
         # Only the FK target is needed. Supabase Auth HTTP calls are mocked in tests.
         db.execute("CREATE SCHEMA auth")
-        db.execute("CREATE TABLE auth.users (id uuid PRIMARY KEY)")
+        db.execute(
+            "CREATE TABLE auth.users (id uuid PRIMARY KEY, email text, raw_app_meta_data "
+            "jsonb DEFAULT '{}')"
+        )
         for migration in sorted(migrations.glob("*.sql")):
             db.execute(migration.read_text())
             print(migration.name, flush=True)

@@ -82,7 +82,8 @@ def test_batched_scope_rechecks_user_grants_and_active_state(db, bundle):
     db.execute("SET LOCAL ROLE postgres")
     db.execute("INSERT INTO auth.users(id) VALUES(%s)", (user_id,))
     db.execute(
-        "INSERT INTO chaika.web_users(id,display_name,role) VALUES(%s,'Test','manager')",
+        "INSERT INTO chaika.web_users(id,display_name,role,sections) "
+        "VALUES(%s,'Test','manager',ARRAY['sales'])",
         (user_id,),
     )
     db.execute(

@@ -12,6 +12,7 @@ from app.core.config import Settings
 from app.portal import create_portal
 from app.web.auth import ACCESS_COOKIE
 from app.web.coverage import ZONE
+from app.web.permissions import SECTIONS
 from app.web.repository import Scope, has_store_scope
 from app.web.settings import WebSettings
 
@@ -214,6 +215,8 @@ def test_login_uses_database_role_and_safe_cookies(client):
     assert client.get("/api/me").json() == {
         "role": "manager",
         "modules": ["iiko", "deposits"],
+        "sections": list(SECTIONS),
+        "can_manage": False,
         "live_sales_enabled": False,
         "today": datetime.now(ZONE).date().isoformat(),
     }
@@ -307,6 +310,8 @@ def test_dashboard_login_refresh_and_logout_across_domains(split_domain_client):
     assert client.get("/api/me", headers=headers).json() == {
         "role": "manager",
         "modules": ["iiko", "deposits"],
+        "sections": list(SECTIONS),
+        "can_manage": False,
         "live_sales_enabled": False,
         "today": datetime.now(ZONE).date().isoformat(),
     }

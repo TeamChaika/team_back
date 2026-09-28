@@ -14,6 +14,7 @@ class WebSettings(BaseSettings):
         hide_input_in_errors=True,
     )
     supabase_url: str = "https://your-supabase.example"
+    auth_admin_key: SecretStr = SecretStr("")
     anon_key: SecretStr = SecretStr("")
     origin: str = "http://127.0.0.1:8013"
     secure_cookie: bool = False

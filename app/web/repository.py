@@ -16,6 +16,7 @@ from app.sync_indicator_filters import read_filters
 from app.web.balances import product_suggestions, read_balances
 from app.web.coverage import partial_days
 from app.web.overview import read_overview
+from app.web.permissions import IIKO_SECTIONS, sections_for
 from app.web.purchase_impact import read_purchase_impact
 from app.web.purchase_impact_summary import add_weekly_impacts
 from app.web.purchase_prices import read_purchase_prices
@@ -35,7 +36,10 @@ class Scope:
 
     @property
     def unrestricted(self):
-        return self.user["role"] == "owner" and not self.selection_ids
+        return (
+            self.user.get("all_departments", self.user["role"] == "owner")
+            and not self.selection_ids
+        )
 
     @property
     def selection_ids(self):
@@ -120,7 +124,8 @@ class Repository:
         with self.connection() as db:
             # Queue independent reads before fetching: one network round trip, fresh permissions.
             users = db.execute(
-                "SELECT id,display_name,role FROM chaika.web_users WHERE id=%s AND active",
+                "SELECT id,display_name,role,sections,is_portal_admin,all_departments FROM "
+                "chaika.web_users WHERE id=%s AND active",
                 (user_id,),
             )
             node_rows = db.execute(
@@ -142,10 +147,10 @@ class Repository:
             user = users.fetchone()
             if not user:
                 raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
-            if user["role"] == "deposits":
+            if not IIKO_SECTIONS.intersection(sections_for(user)):
                 raise HTTPException(403, "Этой учётной записи доступны только депозиты.")
             nodes = node_rows.fetchall()
-            if user["role"] == "owner":
+            if user.get("all_departments", user["role"] == "owner"):
                 allowed = {
                     n["id"]
                     for n in nodes
@@ -176,12 +181,13 @@ class Repository:
         """Allow deposit-only users into the shell without granting an iiko scope."""
         with self.connection() as db:
             user = db.execute(
-                "SELECT id,display_name,role FROM chaika.web_users WHERE id=%s AND active",
+                "SELECT id,display_name,role,sections,is_portal_admin,all_departments FROM "
+                "chaika.web_users WHERE id=%s AND active",
                 (user_id,),
             ).fetchone()
         if not user:
             raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
-        if user["role"] == "deposits":
+        if not IIKO_SECTIONS.intersection(sections_for(user)):
             return Scope(user, (), None, (), ())
         return self.scope(user_id)
 
@@ -189,13 +195,13 @@ class Repository:
         with self.connection() as db:
             return serial(
                 db.execute(
-                    "SELECT id,display_name FROM chaika.web_users WHERE active "
-                    "ORDER BY display_name,id"
+                    "SELECT id,display_name FROM chaika.web_users WHERE active ORDER BY "
+                    "display_name,id"
                 ).fetchall()
             )
 
     def metadata(self, scope):
-        if scope.user["role"] == "deposits":
+        if not IIKO_SECTIONS.intersection(sections_for(scope.user)):
             return serial(
                 {
                     "user": scope.user,

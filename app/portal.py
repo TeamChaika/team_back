@@ -21,6 +21,7 @@ from app.schemas.sales_drilldown import DiscountDetailsQuery
 from app.services.order_topology import read_topology
 from app.services.sales_drilldown import discount_details
 from app.services.sync_jobs import SyncJobError
+from app.web.administration import create_admin_router
 from app.web.assistant import AssistantSettings, Message, answer_question
 from app.web.assistant_store import AssistantStore
 from app.web.auth import ACCESS_COOKIE, REFRESH_COOKIE, Auth, Login, LoginLimiter
@@ -29,6 +30,7 @@ from app.web.deposits import DepositsClient, create_deposits_router
 from app.web.employees import EmployeeCommand, EmployeeEditor, owner
 from app.web.indicators import IndicatorQuery, IndicatorService, catalog
 from app.web.live_sales import LiveSales
+from app.web.permissions import IIKO_SECTIONS, require_section, section_for_path, sections_for
 from app.web.repository import Repository, Scope, serial
 from app.web.settings import WebSettings
 
@@ -155,6 +157,7 @@ def create_portal(
         selection = tuple(sorted(set(department_id or []), key=str))
         selected = selection[0] if len(selection) == 1 else selection or None
         scope = await run_in_threadpool(repo.scope, user_id, selected)
+        require_section(scope.user, section_for_path(request.url.path))
         request.state.timings = [
             ("auth", (authenticated - started) * 1000),
             ("permissions", (perf_counter() - authenticated) * 1000),
@@ -175,7 +178,14 @@ def create_portal(
         return scope
 
     PortalAccess = Annotated[Scope, Depends(portal_access)]
-    app.include_router(create_deposits_router(portal_access, repo))
+
+    async def deposit_access(request: Request):
+        scope = await portal_access(request)
+        require_section(scope.user, "deposits")
+        return scope
+
+    app.include_router(create_deposits_router(deposit_access, repo))
+    app.include_router(create_admin_router(portal_access, repo, web))
 
     def check_period(start, end):
         if start > end or (end - start).days > 30 or end > datetime.now(ZONE).date():
@@ -246,8 +256,12 @@ def create_portal(
         return {
             **repo.metadata(scope),
             "today": datetime.now(ZONE).date().isoformat(),
-            "live_sales_enabled": bool(live_sales) and scope.user["role"] != "deposits",
-            "modules": ["deposits"] if scope.user["role"] == "deposits" else ["iiko", "deposits"],
+            "live_sales_enabled": bool(live_sales)
+            and bool(IIKO_SECTIONS.intersection(sections_for(scope.user))),
+            "sections": sections_for(scope.user),
+            "can_manage": bool(scope.user.get("is_portal_admin")),
+            "modules": (["iiko"] if IIKO_SECTIONS.intersection(sections_for(scope.user)) else [])
+            + (["deposits"] if "deposits" in sections_for(scope.user) else []),
         }
 
     @app.get("/api/sales/{kind}")
