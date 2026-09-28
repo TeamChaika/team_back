@@ -32,7 +32,9 @@ def test_invalid_port_stops_with_actionable_message(monkeypatch, value):
 def test_timeweb_default_import_exposes_portal_only():
     from main import app
 
-    paths = {route.path for route in app.routes}
-    assert {"/api/health", "/api/me", "/api/auth/login"} <= paths
+    # FastAPI may retain included routers as lazy route groups. OpenAPI
+    # resolves them and checks the exposed contract rather than internals.
+    paths = set(app.openapi()["paths"])
+    assert {"/api/health", "/api/me", "/api/auth/login", "/api/deposits"} <= paths
     assert "/api/v1/sync/invoices" not in paths
     assert "/api/v1/iiko/auth" not in paths
