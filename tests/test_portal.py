@@ -217,6 +217,7 @@ def test_login_uses_database_role_and_safe_cookies(client):
         "modules": ["iiko", "deposits"],
         "sections": list(SECTIONS),
         "can_manage": False,
+        "documents_enabled": False,
         "live_sales_enabled": False,
         "today": datetime.now(ZONE).date().isoformat(),
     }
@@ -312,6 +313,7 @@ def test_dashboard_login_refresh_and_logout_across_domains(split_domain_client):
         "modules": ["iiko", "deposits"],
         "sections": list(SECTIONS),
         "can_manage": False,
+        "documents_enabled": False,
         "live_sales_enabled": False,
         "today": datetime.now(ZONE).date().isoformat(),
     }

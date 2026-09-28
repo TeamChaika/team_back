@@ -21,3 +21,5 @@ class WebSettings(BaseSettings):
     frontend_dir: Path = BACKEND_DIR / "frontend/dist"
     max_login_attempts: int = Field(default=10, ge=1, le=100)
     deposits_api_url: str = "https://pay.chaika.team/api/v1"
+    documents_api_url: str = "https://iiko.chaika.team/api/portal-documents"
+    documents_enabled: bool = False
