@@ -23,6 +23,9 @@ OTHER = UUID(int=3)
 class FakeRepository:
     active = True
 
+    def portal_scope(self, user_id):
+        return self.scope(user_id)
+
     def scope(self, user_id, selected=None):
         if not self.active or user_id != USER or selected not in (None, DEPARTMENT):
             raise HTTPException(403, "Нет доступа")
@@ -210,6 +213,7 @@ def test_login_uses_database_role_and_safe_cookies(client):
     assert all("HttpOnly" in c and "SameSite=strict" in c for c in cookies)
     assert client.get("/api/me").json() == {
         "role": "manager",
+        "modules": ["iiko", "deposits"],
         "live_sales_enabled": False,
         "today": datetime.now(ZONE).date().isoformat(),
     }
@@ -302,6 +306,7 @@ def test_dashboard_login_refresh_and_logout_across_domains(split_domain_client):
         assert "Domain=" not in cookie
     assert client.get("/api/me", headers=headers).json() == {
         "role": "manager",
+        "modules": ["iiko", "deposits"],
         "live_sales_enabled": False,
         "today": datetime.now(ZONE).date().isoformat(),
     }

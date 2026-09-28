@@ -25,6 +25,7 @@ from app.web.assistant import AssistantSettings, Message, answer_question
 from app.web.assistant_store import AssistantStore
 from app.web.auth import ACCESS_COOKIE, REFRESH_COOKIE, Auth, Login, LoginLimiter
 from app.web.coverage import ZONE
+from app.web.deposits import DepositsClient, create_deposits_router
 from app.web.employees import EmployeeCommand, EmployeeEditor, owner
 from app.web.indicators import IndicatorQuery, IndicatorService, catalog
 from app.web.live_sales import LiveSales
@@ -43,6 +44,7 @@ def create_portal(
     assistant_transport=None,
     employee_editor=None,
     indicator_service=None,
+    deposits_transport=None,
 ):
     settings = settings or Settings()
     web = web_settings or WebSettings()
@@ -56,6 +58,7 @@ def create_portal(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.auth = Auth(web, transport=auth_transport)
+        app.state.deposits = DepositsClient(web.deposits_api_url, transport=deposits_transport)
         scheduler = None
 
         async def start_background():
@@ -85,6 +88,7 @@ def create_portal(
 
                 await run_in_threadpool(stop_process, scheduler)
             await app.state.auth.client.aclose()
+            await app.state.deposits.client.aclose()
             if hasattr(indicators, "close"):
                 await run_in_threadpool(indicators.close)
             if repository is None:
@@ -159,6 +163,20 @@ def create_portal(
 
     Access = Annotated[Scope, Depends(access)]
 
+    async def portal_access(request: Request):
+        started = perf_counter()
+        user_id = await request.app.state.auth.user(request.cookies.get(ACCESS_COOKIE))
+        authenticated = perf_counter()
+        scope = await run_in_threadpool(repo.portal_scope, user_id)
+        request.state.timings = [
+            ("auth", (authenticated - started) * 1000),
+            ("permissions", (perf_counter() - authenticated) * 1000),
+        ]
+        return scope
+
+    PortalAccess = Annotated[Scope, Depends(portal_access)]
+    app.include_router(create_deposits_router(portal_access, repo))
+
     def check_period(start, end):
         if start > end or (end - start).days > 30 or end > datetime.now(ZONE).date():
             raise HTTPException(422, "Выберите период от одного до 31 дня.")
@@ -179,7 +197,7 @@ def create_portal(
             json={"email": payload.email, "password": payload.password.get_secret_value()},
         )
         user_id = await auth.user(result["access_token"])
-        scope = await run_in_threadpool(repo.scope, user_id)
+        scope = await run_in_threadpool(repo.portal_scope, user_id)
         auth.cookies(response, result)
         return {"name": scope.user["display_name"]}
 
@@ -194,7 +212,7 @@ def create_portal(
             "POST", "token?grant_type=refresh_token", json={"refresh_token": token}
         )
         user_id = await auth.user(result["access_token"])
-        await run_in_threadpool(repo.scope, user_id)
+        await run_in_threadpool(repo.portal_scope, user_id)
         auth.cookies(response, result)
         return {"status": "ok"}
 
@@ -224,11 +242,12 @@ def create_portal(
         return response
 
     @app.get("/api/me")
-    def me(scope: Access):
+    def me(scope: PortalAccess):
         return {
             **repo.metadata(scope),
             "today": datetime.now(ZONE).date().isoformat(),
-            "live_sales_enabled": bool(live_sales),
+            "live_sales_enabled": bool(live_sales) and scope.user["role"] != "deposits",
+            "modules": ["deposits"] if scope.user["role"] == "deposits" else ["iiko", "deposits"],
         }
 
     @app.get("/api/sales/{kind}")

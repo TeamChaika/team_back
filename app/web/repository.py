@@ -142,6 +142,8 @@ class Repository:
             user = users.fetchone()
             if not user:
                 raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
+            if user["role"] == "deposits":
+                raise HTTPException(403, "Этой учётной записи доступны только депозиты.")
             nodes = node_rows.fetchall()
             if user["role"] == "owner":
                 allowed = {
@@ -170,7 +172,38 @@ class Repository:
                 rms_ids,
             )
 
+    def portal_scope(self, user_id: UUID) -> Scope:
+        """Allow deposit-only users into the shell without granting an iiko scope."""
+        with self.connection() as db:
+            user = db.execute(
+                "SELECT id,display_name,role FROM chaika.web_users WHERE id=%s AND active",
+                (user_id,),
+            ).fetchone()
+        if not user:
+            raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
+        if user["role"] == "deposits":
+            return Scope(user, (), None, (), ())
+        return self.scope(user_id)
+
+    def deposit_users(self):
+        with self.connection() as db:
+            return serial(
+                db.execute(
+                    "SELECT id,display_name FROM chaika.web_users WHERE active "
+                    "ORDER BY display_name,id"
+                ).fetchall()
+            )
+
     def metadata(self, scope):
+        if scope.user["role"] == "deposits":
+            return serial(
+                {
+                    "user": scope.user,
+                    "departments": [],
+                    "sales_dates": [],
+                    "balance_dates": [],
+                }
+            )
         with self.connection() as db:
             dates = db.execute(
                 "SELECT business_date FROM chaika.sales_report_days WHERE "

@@ -19,3 +19,4 @@ class WebSettings(BaseSettings):
     secure_cookie: bool = False
     frontend_dir: Path = BACKEND_DIR / "frontend/dist"
     max_login_attempts: int = Field(default=10, ge=1, le=100)
+    deposits_api_url: str = "https://pay.chaika.team/api/v1"
