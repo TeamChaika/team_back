@@ -16,7 +16,7 @@ from app.sync_indicator_filters import read_filters
 from app.web.balances import product_suggestions, read_balances
 from app.web.coverage import partial_days
 from app.web.overview import read_overview
-from app.web.permissions import IIKO_SECTIONS, sections_for
+from app.web.permissions import ANALYTICS_SECTIONS, IIKO_SECTIONS, sections_for
 from app.web.purchase_impact import read_purchase_impact
 from app.web.purchase_impact_summary import add_weekly_impacts
 from app.web.purchase_prices import read_purchase_prices
@@ -178,7 +178,7 @@ class Repository:
             )
 
     def portal_scope(self, user_id: UUID) -> Scope:
-        """Allow deposit-only users into the shell without granting an iiko scope."""
+        """Document store permissions are independent of restaurant analytics."""
         with self.connection() as db:
             user = db.execute(
                 "SELECT id,display_name,role,sections,is_portal_admin,all_departments FROM "
@@ -189,6 +189,17 @@ class Repository:
             raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
         if not IIKO_SECTIONS.intersection(sections_for(user)):
             return Scope(user, (), None, (), ())
+        if not ANALYTICS_SECTIONS.intersection(sections_for(user)) and not user.get(
+            "all_departments", user["role"] == "owner"
+        ):
+            with self.connection() as db:
+                analytics_grant = db.execute(
+                    "SELECT department_id FROM chaika.web_department_access WHERE user_id=%s "
+                    "AND source_id='primary' LIMIT 1",
+                    (user_id,),
+                ).fetchone()
+            if not analytics_grant:
+                return Scope(user, (), None, (), ())
         return self.scope(user_id)
 
     def deposit_users(self):
@@ -201,7 +212,7 @@ class Repository:
             )
 
     def metadata(self, scope):
-        if not IIKO_SECTIONS.intersection(sections_for(scope.user)):
+        if not scope.departments:
             return serial(
                 {
                     "user": scope.user,

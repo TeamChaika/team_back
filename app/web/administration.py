@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
-from app.web.permissions import IIKO_SECTIONS, SECTIONS, require_admin
+from app.web.permissions import ANALYTICS_SECTIONS, SECTIONS, require_admin
 from app.web.repository import Scope, serial
 
 
@@ -38,7 +38,7 @@ class Account(Input):
     def permissions(self):
         if len(set(self.sections)) != len(self.sections) or set(self.sections) - set(SECTIONS):
             raise ValueError("Unknown or duplicate section")
-        if IIKO_SECTIONS.intersection(self.sections) and not (
+        if ANALYTICS_SECTIONS.intersection(self.sections) and not (
             self.all_departments or self.department_ids
         ):
             raise ValueError("Select iiko restaurants")
