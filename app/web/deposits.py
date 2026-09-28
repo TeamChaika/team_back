@@ -1,12 +1,14 @@
 """Fixed deposit API routes using the existing HttpOnly session and per-user RLS."""
 
+import re
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from app.web.auth import ACCESS_COOKIE
@@ -16,9 +18,9 @@ XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 ERRORS = {
     400: "Проверьте параметры запроса депозитов.",
     401: "Войдите в систему.",
-    403: "Недостаточно прав для управления доступом к депозитам.",
+    403: "Недостаточно прав для этой операции с депозитами.",
     404: "Депозит или назначение доступа не найдено.",
-    409: "Такой доступ уже назначен.",
+    409: "Запись или запрос уже существует. Проверьте список перед повторным созданием.",
     422: "Проверьте поля запроса депозитов.",
     429: "Слишком много запросов. Повторите позже.",
 }
@@ -65,6 +67,32 @@ class VenueGrant(BaseModel):
     user_id: UUID
     venue: str = Field(min_length=1, max_length=100)
     is_all: bool = False
+    can_create: bool | None = None
+
+
+class NewDeposit(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    request_id: UUID
+    customer_name: str = Field(min_length=1, max_length=100)
+    phone: str = Field(min_length=10, max_length=15, pattern=r"^[0-9]+$")
+    amount: Decimal = Field(gt=0, le=2147483647, decimal_places=0)
+    restaurant: str = Field(min_length=1, max_length=100)
+    reservation_date: datetime | None = None
+    notes: str | None = Field(default=None, max_length=500)
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def normalize_phone(cls, value):
+        if not isinstance(value, str) or not re.fullmatch(r"[+\d ()-]+", value, flags=re.ASCII):
+            raise ValueError("Invalid phone")
+        return re.sub(r"\D", "", value)
+
+    @field_validator("reservation_date")
+    @classmethod
+    def explicit_timezone(cls, value):
+        if value is not None and value.tzinfo is None:
+            raise ValueError("Explicit timezone required")
+        return value
 
 
 class VenueRevoke(BaseModel):
@@ -141,6 +169,15 @@ def create_deposits_router(access, repo):
             },
         )
 
+    @router.get("/creation-venues")
+    async def creation_venues(request: Request, scope: Access):
+        return await call(request, "GET", "deposits/creation-venues")
+
+    @router.post("", status_code=201)
+    async def create(request: Request, scope: Access, payload: NewDeposit):
+        request.app.state.auth.check_origin(request)
+        return await call(request, "POST", "deposits/", json=payload.model_dump(mode="json"))
+
     @router.get("/permissions")
     async def permissions(request: Request, scope: Access):
         return await call(request, "GET", "deposits/permissions")
@@ -160,7 +197,10 @@ def create_deposits_router(access, repo):
     async def grant(request: Request, scope: Access, payload: VenueGrant):
         request.app.state.auth.check_origin(request)
         return await call(
-            request, "POST", "deposits/user-venues", json=payload.model_dump(mode="json")
+            request,
+            "POST",
+            "deposits/user-venues",
+            json=payload.model_dump(mode="json", exclude_none=True),
         )
 
     @router.post("/access/update")
@@ -174,7 +214,10 @@ def create_deposits_router(access, repo):
                 "user_id": str(payload.user_id),
                 "venue": payload.venue,
             },
-            json={"is_all": payload.is_all},
+            json={
+                "is_all": payload.is_all,
+                **({"can_create": payload.can_create} if payload.can_create is not None else {}),
+            },
         )
 
     @router.post("/access/revoke", status_code=204)

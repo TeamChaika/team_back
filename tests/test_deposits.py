@@ -19,7 +19,17 @@ from tests.test_restaurant_selection import permission_repo as permission_repo_f
 permission_repo = permission_repo_fixture
 
 DEPOSIT = UUID(int=20)
+CREATE = {
+    "request_id": str(DEPOSIT),
+    "customer_name": "Test",
+    "phone": "79990000001",
+    "amount": 1234,
+    "restaurant": "A",
+    "reservation_date": "2026-10-02T18:30:00+03:00",
+}
 ROUTES = [
+    ("POST", "/api/deposits", {"json": CREATE}),
+    ("GET", "/api/deposits/creation-venues", {}),
     ("GET", "/api/deposits", {}),
     ("GET", "/api/deposits/export", {}),
     ("GET", "/api/deposits/permissions", {}),
@@ -228,3 +238,59 @@ def test_real_repository_denies_iiko_even_if_deposit_account_has_old_grants(requ
     with pytest.raises(HTTPException) as failure:
         repo.scope(USER)
     assert failure.value.status_code == 403
+
+
+def test_create_forwards_user_identity_request_uuid_and_exact_fields(client):
+    login(client)
+    response = client.post(
+        "/api/deposits", json=CREATE, headers={"Origin": "http://127.0.0.1:8013"}
+    )
+    assert response.status_code == 201
+    request = client.upstream_calls[-1]
+    import json
+
+    body = json.loads(request.content)
+    assert body["request_id"] == str(DEPOSIT)
+    assert body["amount"] == "1234"
+    assert body["reservation_date"] == CREATE["reservation_date"]
+    assert request.headers["Authorization"] == "Bearer verified"
+    client.upstream_state["status"] = 403
+    assert (
+        client.post(
+            "/api/deposits", json=CREATE, headers={"Origin": "http://127.0.0.1:8013"}
+        ).status_code
+        == 403
+    )
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"amount": 1.5},
+        {"phone": "bad"},
+        {"customer_name": " "},
+        {"created_by": str(USER)},
+        {"reservation_date": "2026-10-02T18:30:00"},
+    ],
+)
+def test_create_rejects_invalid_fields_before_upstream(client, fields):
+    login(client)
+    assert (
+        client.post(
+            "/api/deposits", json={**CREATE, **fields}, headers={"Origin": "http://127.0.0.1:8013"}
+        ).status_code
+        == 422
+    )
+    assert not client.upstream_calls
+
+
+def test_creation_grants_are_forwarded_and_omitted_flags_preserved(client):
+    login(client)
+    url = "/api/deposits/access/update"
+    headers = {"Origin": "http://127.0.0.1:8013"}
+    payload = {"user_id": str(USER), "venue": "A", "can_create": True}
+    assert client.post(url, json=payload, headers=headers).status_code == 200
+    assert b'"can_create":true' in client.upstream_calls[-1].content
+    payload.pop("can_create")
+    assert client.post(url, json=payload, headers=headers).status_code == 200
+    assert b"can_create" not in client.upstream_calls[-1].content
