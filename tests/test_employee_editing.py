@@ -37,6 +37,8 @@ class Upstream:
         self.timeout_after_save = False
         self.no_response = False
         self.reject = False
+        self.reject_status = 403
+        self.reject_body = "private upstream content"
         self.ignore_name = False
 
     def visible_card(self, key):
@@ -65,7 +67,7 @@ class Upstream:
         fields = parse_qs(request.content.decode(), keep_blank_values=True)
         self.posts.append((key, fields))
         if self.reject:
-            return httpx.Response(403, text="private upstream content")
+            return httpx.Response(self.reject_status, text=self.reject_body)
         root = fromstring(self.cards[key]) if key in self.cards else Element("employee")
         if root.find("id") is None:
             SubElement(root, "id").text = str(key)
@@ -254,6 +256,30 @@ def test_gateway_login_failure_closes_and_never_writes():
                 pytest.fail("Should not enter")
 
     asyncio.run(run())
+
+
+def test_existing_pin_conflict_on_department_change_allows_corrected_command(editing):
+    db, scope, upstream, editor = editing
+    upstream.reject = True
+    upstream.reject_status = 409
+    upstream.reject_body = "Указанный ПИН-код уже существует.\n"
+    payload = command(upstream, department_codes=["0001"])
+    with pytest.raises(IikoError) as error:
+        editor.save(scope, payload, UUID(int=1))
+    assert error.value.code == "employee_pin_conflict"
+    assert error.value.status_code == 409
+    assert not error.value.outcome_unknown
+    assert db.execute(
+        "SELECT status,error_code,pin_accepted FROM chaika.employee_changes WHERE id=%s",
+        (payload.request_id,),
+    ).fetchone() == ("rejected", "employee_pin_conflict", False)
+    with pytest.raises(HTTPException):
+        editor.save(scope, payload, UUID(int=1))
+    assert len(upstream.posts) == 1
+    upstream.reject = False
+    corrected = command(upstream, department_codes=["0001"], pin_code="001239")
+    assert editor.save(scope, corrected, UUID(int=1))["status"] == "confirmed"
+    assert len(upstream.posts) == 2
 
 
 def test_card_and_write_only_pin_are_sent_exactly_and_not_published(editing):

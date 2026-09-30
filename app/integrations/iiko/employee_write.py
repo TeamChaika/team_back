@@ -14,6 +14,47 @@ from app.integrations.iiko.client import IikoClient
 from app.integrations.iiko.errors import IikoError
 
 
+async def rejection(response: httpx.Response) -> IikoError:
+    status = response.status_code
+    if status == 409:
+        # Only recognize a verified fixed response. Never expose arbitrary upstream
+        # text: employee errors can include credentials or personal data.
+        body = bytearray()
+        try:
+            async with asyncio.timeout(2):
+                async for chunk in response.aiter_bytes():
+                    if len(body) + len(chunk) > 4096:
+                        break
+                    body.extend(chunk)
+                else:
+                    if bytes(body).decode("utf-8", errors="replace").strip() == (
+                        "Указанный ПИН-код уже существует."
+                    ):
+                        return IikoError(
+                            "employee_pin_conflict",
+                            "ПИН-код сотрудника уже используется в iiko. "
+                            "Укажите другой PIN-код и сохраните изменения ещё раз.",
+                            status_code=409,
+                            upstream_status_code=409,
+                        )
+        except (httpx.RequestError, TimeoutError):
+            pass  # The received 409 already confirms rejection, even without a body.
+        return IikoError(
+            "employee_write_rejected",
+            "iiko отклонил изменения сотрудника из-за конфликта данных (HTTP 409). "
+            "Проверьте значения полей в карточке iiko.",
+            status_code=409,
+            upstream_status_code=409,
+        )
+    return IikoError(
+        "employee_write_rejected",
+        f"iiko отклонил запрос сотрудника (HTTP {status}). "
+        "Проверьте права учётной записи iiko и значения полей.",
+        upstream_status_code=status,
+        outcome_unknown=status >= 500,
+    )
+
+
 class EmployeeGateway:
     def __init__(self, settings, *, transport=None):
         self.settings = settings
@@ -60,13 +101,7 @@ class EmployeeGateway:
                 if response.status_code == 404 and method == "GET":
                     return None
                 if response.status_code not in {200, 201}:
-                    raise IikoError(
-                        "employee_write_rejected",
-                        f"iiko отклонил запрос сотрудника (HTTP {response.status_code}). "
-                        "Проверьте права учётной записи iiko и значения полей.",
-                        upstream_status_code=response.status_code,
-                        outcome_unknown=response.status_code >= 500,
-                    )
+                    raise await rejection(response)
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
                     body.extend(chunk)
