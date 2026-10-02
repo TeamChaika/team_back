@@ -67,6 +67,7 @@
 - `CHAIKA_DOCUMENTS_DATABASE_URL` — DSN существующей роли `chaika_iiko_app`, доступный из контейнера.
 - `CHAIKA_DOCUMENTS_IIKO_URL`, `CHAIKA_DOCUMENTS_IIKO_LOGIN`, `CHAIKA_DOCUMENTS_IIKO_PASSWORD_HASH` — прежнее подключение документов; пароль здесь уже SHA1, в отличие от `CHAIKA_IIKO_PASSWORD` аналитики.
 - `CHAIKA_DOCUMENTS_BOT_TOKEN` — токен существующего бота, только после остановки старого polling.
+- `CHAIKA_DOCUMENTS_TELEGRAM_LOCAL_ADDRESS` — пусто для автоматического выбора, `::` для IPv6 или `0.0.0.0` для IPv4. Меняет только соединения Telegram; HTTPS проверяется обычным способом. Выбранное семейство адресов должно быть доступно из контейнера.
 - `CHAIKA_DOCUMENTS_DASHBOARD_URL=https://dashboard.chaika.team` — ссылки в уведомлениях.
 
 API запускается обычной командой `python -m app.serve`. Он контролирует дочерний процесс `python -m app.documents.worker` и перезапускает его при неожиданном завершении. При нескольких репликах цикл обработчика защищён блокировкой PostgreSQL. Можно запускать worker отдельно, оставив автоматический запуск выключенным в процессе API. Нельзя одновременно запускать прежний Django-бот.
