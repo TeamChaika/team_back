@@ -196,6 +196,39 @@ def test_confirm_returns_durable_queue_without_contacting_iiko(service):
         assert job["payload"]["xml"].startswith("<?xml")
 
 
+@pytest.mark.parametrize("kind", ["waybill", "writeoff"])
+def test_approved_documents_leave_pending_list_before_iiko_delivery(service, kind):
+    doc = create(service, kind, reason="Reason", reason_id=1)
+    def pending():
+        return service.dispatch(RECEIVER, "GET", kind, params={"status": "Created"})
+
+    assert pending()["total"] == 1
+    act(service, doc)
+    for submission_state in ("queued", "sending", "unknown"):
+        parent = "waybills" if kind == "waybill" else "writeoffs"
+        with service.database.connection() as db:
+            db.execute(
+                f"UPDATE {parent} SET submission_state=%s WHERE id=%s",
+                (submission_state, doc["id"]),
+            )
+        assert pending()["rows"] == []
+        assert pending()["total"] == 0
+        all_rows = service.dispatch(RECEIVER, "GET", kind)
+        assert [row["id"] for row in all_rows["rows"]] == [doc["id"]]
+        assert detail(service, doc)["submission_state"] == submission_state
+        exported = service.dispatch(
+            RECEIVER, "GET", f"{kind}/export", params={"status": "Created"}, csv=True
+        ).decode("utf-8-sig")
+        assert doc["number"] not in exported
+    # A rejected delivery needs attention again and is not silently hidden.
+    with service.database.connection() as db:
+        db.execute(
+            f"UPDATE {parent} SET submission_state='rejected' WHERE id=%s", (doc["id"],)
+        )
+    assert pending()["total"] == 1
+    assert service.provider.sends == []
+
+
 def test_queue_sends_once_then_idempotent_http_replay_returns_result(service):
     doc = create(service)
     payload = {"request_id": str(uuid4()), "version": 1}
