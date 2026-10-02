@@ -40,6 +40,9 @@ def filters(db, user, kind, params):
             invalid()
         conditions.append("d.status=%s")
         values.append(status)
+        if status == "Created":
+            # Approval completes before the asynchronous delivery to iiko does.
+            conditions.append("d.submission_state NOT IN ('queued','sending','unknown')")
     direction = params.get("direction", "all")
     if direction not in {"all", "incoming", "outgoing"}:
         invalid()
