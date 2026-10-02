@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,3 +21,4 @@ class DocumentSettings(BaseSettings):
     iiko_login: str = ""
     iiko_password_hash: SecretStr = SecretStr("")
     bot_token: SecretStr = SecretStr("")
+    telegram_local_address: Literal["", "0.0.0.0", "::"] = ""

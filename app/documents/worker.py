@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from threading import Event
 
+import httpx
 from psycopg.types.json import Jsonb
 
 from app.core.logging import configure_http_logging
@@ -184,7 +185,12 @@ def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
     bot = (
-        Telegram(settings.bot_token.get_secret_value())
+        Telegram(
+            settings.bot_token.get_secret_value(),
+            transport=httpx.HTTPTransport(local_address=settings.telegram_local_address)
+            if settings.telegram_local_address
+            else None,
+        )
         if settings.bot_token.get_secret_value()
         else None
     )
