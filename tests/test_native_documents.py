@@ -24,13 +24,38 @@ from app.documents.reconcile import reconcile
 from app.documents.service import DocumentService
 from app.documents.telegram import deliver_notification, handle_update
 from app.documents.transport import DocumentTransport
-from app.documents.worker import poll, recover_bot_jobs
+from app.documents.worker import poll, recover_bot_jobs, worker_leader
 from app.portal import create_portal
 from app.web.settings import WebSettings
 from tests.test_portal import FakeRepository, login, provider
 
 SENDER, RECEIVER, ADMIN, FOREIGN = (UUID(int=i) for i in range(1, 5))
 SOURCE, TARGET, PRODUCT = (UUID(int=i) for i in range(10, 13))
+
+
+def test_leader_survives_role_idle_timeout_and_excludes_other_workers(database, monkeypatch):
+    import time
+
+    connection = database.connection
+
+    @contextmanager
+    def short_idle_timeout():
+        with connection() as db:
+            db.execute("SET LOCAL idle_in_transaction_session_timeout='100ms'")
+            yield db
+
+    monkeypatch.setattr(database, "connection", short_idle_timeout)
+    with worker_leader(database) as leader:
+        assert leader is not None
+        assert leader.execute("SHOW idle_in_transaction_session_timeout").fetchone() == {
+            "idle_in_transaction_session_timeout": "0"
+        }
+        with worker_leader(database) as contender:
+            assert contender is None
+        time.sleep(0.2)
+        assert leader.execute("SELECT 1 AS alive").fetchone()["alive"] == 1
+    with worker_leader(database) as successor:
+        assert successor is not None
 
 
 class Provider(DocumentTransport):

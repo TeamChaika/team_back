@@ -2,6 +2,7 @@
 
 import logging
 import signal
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from threading import Event
 
@@ -17,6 +18,19 @@ from app.documents.telegram import Telegram, deliver_notification, handle_update
 
 log = logging.getLogger(__name__)
 LEADER_LOCK = 7623011102049
+
+
+@contextmanager
+def worker_leader(database):
+    with database.connection() as leader:
+        # Network calls deliberately run while this transaction owns the lock.
+        # The legacy role's idle timeout must not release it mid-delivery and
+        # allow another replica to start polling Telegram concurrently.
+        leader.execute("SET LOCAL idle_in_transaction_session_timeout='0'")
+        acquired = leader.execute(
+            "SELECT pg_try_advisory_xact_lock(%s) AS ok", (LEADER_LOCK,)
+        ).fetchone()["ok"]
+        yield leader if acquired else None
 
 
 def refresh_catalogs(service):
@@ -147,10 +161,8 @@ def main():
             try:
                 # Transaction advisory lock also works through transaction poolers.
                 # Held for one bounded cycle; protects Telegram polling across app replicas.
-                with service.database.connection() as leader:
-                    if not leader.execute(
-                        "SELECT pg_try_advisory_xact_lock(%s) AS ok", (LEADER_LOCK,)
-                    ).fetchone()["ok"]:
+                with worker_leader(service.database) as leader:
+                    if leader is None:
                         stop.wait(3)
                         continue
                     now = datetime.now(UTC)
