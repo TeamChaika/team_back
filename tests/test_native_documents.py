@@ -24,7 +24,7 @@ from app.documents.reconcile import reconcile
 from app.documents.service import DocumentService
 from app.documents.telegram import deliver_notification, handle_update
 from app.documents.transport import DocumentTransport
-from app.documents.worker import poll, recover_bot_jobs, worker_leader
+from app.documents.worker import poll, process_jobs, recover_bot_jobs, worker_leader
 from app.portal import create_portal
 from app.web.settings import WebSettings
 from tests.test_portal import FakeRepository, login, provider
@@ -204,6 +204,37 @@ def test_queue_sends_once_then_idempotent_http_replay_returns_result(service):
     assert deliver_one(service)
     assert not deliver_one(service)
     assert act(service, doc, payload=payload)["status"] == "Sent"
+    assert len(service.provider.sends) == 1
+
+
+def test_telegram_outage_does_not_block_delivery_or_heartbeat(service):
+    class Bot:
+        offline = True
+
+        def call(self, method, **payload):
+            if self.offline:
+                raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] private-token")
+            return [] if method == "getUpdates" else {"message_id": 123}
+
+    bot = Bot()
+    doc = create(service)
+    act(service, doc)
+    with worker_leader(service.database) as leader:
+        assert not process_jobs(service, bot, leader)
+    assert detail(service, doc)["status"] == "Sent"
+    with service.database.connection(readonly=True) as db:
+        health = db.execute("SELECT data FROM native_jobs WHERE name='heartbeat'").fetchone()
+        assert health["data"] == {
+            "telegram_error": "ConnectError",
+            "telegram_reason": "tls_certificate",
+        }
+    bot.offline = False
+    with worker_leader(service.database) as leader:
+        assert process_jobs(service, bot, leader)
+    with service.database.connection(readonly=True) as db:
+        assert db.execute("SELECT data FROM native_jobs WHERE name='heartbeat'").fetchone()[
+            "data"
+        ] == {}
     assert len(service.provider.sends) == 1
 
 

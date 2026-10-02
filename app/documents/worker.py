@@ -129,6 +129,39 @@ def poll(service, bot):
             )
 
 
+def process_jobs(service, bot, leader):
+    recover_uncertain(service.database)
+    deliver_one(service)
+    health = {}
+    if bot:
+        try:
+            recover_bot_jobs(service)
+            deliver_notification(service, bot)
+            poll(service, bot)
+        except Exception as error:
+            # Telegram availability must not invalidate iiko worker liveness.
+            # Only fixed diagnostic categories are persisted; URLs/tokens are not.
+            health["telegram_error"] = type(error).__name__
+            for marker, category in (
+                ("CERTIFICATE_VERIFY_FAILED", "tls_certificate"),
+                ("Name or service not known", "dns"),
+                ("nodename nor servname", "dns"),
+                ("Network is unreachable", "network_unreachable"),
+                ("Connection refused", "connection_refused"),
+                ("Connection reset", "connection_reset"),
+            ):
+                if marker in str(error):
+                    health["telegram_reason"] = category
+                    break
+            log.warning("Document Telegram unavailable (%s)", health)
+    leader.execute(
+        "INSERT INTO native_jobs (name,data) VALUES ('heartbeat',%s) "
+        "ON CONFLICT (name) DO UPDATE SET data=excluded.data,updated_at=now()",
+        (Jsonb(health),),
+    )
+    return not health
+
+
 def main():
     import argparse
 
@@ -175,16 +208,9 @@ def main():
                             log.warning(
                                 "Document catalog refresh failed (%s)", type(error).__name__
                             )
-                    recover_uncertain(service.database)
-                    deliver_one(service)
-                    if bot:
-                        recover_bot_jobs(service)
-                        deliver_notification(service, bot)
-                        poll(service, bot)
-                    leader.execute(
-                        "INSERT INTO native_jobs (name,data) VALUES ('heartbeat','{}') "
-                        "ON CONFLICT (name) DO UPDATE SET updated_at=now()"
-                    )
+                    healthy = process_jobs(service, bot, leader)
+                if not healthy:
+                    stop.wait(5)
             except Exception as error:
                 log.warning("Document worker cycle failed (%s)", type(error).__name__)
                 stop.wait(5)
