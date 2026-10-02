@@ -17,6 +17,8 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.gzip import GZipMiddleware
 
 from app.core.config import Settings
+from app.documents.config import DocumentSettings
+from app.documents.service import DocumentService
 from app.schemas.sales_drilldown import DiscountDetailsQuery
 from app.services.order_topology import read_topology
 from app.services.sales_drilldown import discount_details
@@ -49,6 +51,8 @@ def create_portal(
     indicator_service=None,
     deposits_transport=None,
     documents_transport=None,
+    document_service=None,
+    document_settings=None,
 ):
     settings = settings or Settings()
     web = web_settings or WebSettings()
@@ -58,13 +62,18 @@ def create_portal(
     employees = employee_editor or EmployeeEditor(settings, repo)
     live_sales = LiveSales(settings) if settings.live_sales_enabled else None
     indicators = indicator_service or IndicatorService(settings)
+    document_config = document_settings or DocumentSettings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.auth = Auth(web, transport=auth_transport)
         app.state.deposits = DepositsClient(web.deposits_api_url, transport=deposits_transport)
-        app.state.documents = DocumentsClient(
-            web.documents_api_url, web.documents_enabled, transport=documents_transport
+        app.state.documents = document_service or (
+            DocumentService(document_config)
+            if document_config.native_enabled and web.documents_enabled
+            else DocumentsClient(
+                web.documents_api_url, web.documents_enabled, transport=documents_transport
+            )
         )
         scheduler = None
 
@@ -82,12 +91,24 @@ def create_portal(
                 scheduler = start_process()
 
         background = None
+        document_worker = None
         try:
             if repository is None:
                 await run_in_threadpool(repo.open)
             background = asyncio.create_task(start_background())
+            if (
+                web.documents_enabled
+                and document_config.native_enabled
+                and document_config.worker_enabled
+            ):
+                from app.documents.runtime import supervise
+
+                document_worker = asyncio.create_task(supervise())
             yield
         finally:
+            if document_worker is not None:
+                document_worker.cancel()
+                await asyncio.gather(document_worker, return_exceptions=True)
             if background is not None:
                 await background
             if scheduler is not None:
@@ -96,7 +117,10 @@ def create_portal(
                 await run_in_threadpool(stop_process, scheduler)
             await app.state.auth.client.aclose()
             await app.state.deposits.client.aclose()
-            await app.state.documents.client.aclose()
+            if hasattr(app.state.documents, "dispatch"):
+                await run_in_threadpool(app.state.documents.close)
+            else:
+                await app.state.documents.client.aclose()
             if hasattr(indicators, "close"):
                 await run_in_threadpool(indicators.close)
             if repository is None:

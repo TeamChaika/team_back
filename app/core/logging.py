@@ -6,10 +6,16 @@ import re
 
 class IikoCredentialsFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = re.sub(
+        message = re.sub(
             r"([?&](?:login|pass|key)=)[^&\s\"']+",
             r"\1[REDACTED]",
             record.getMessage(),
+            flags=re.IGNORECASE,
+        )
+        record.msg = re.sub(
+            r"(https://api\.telegram\.org/bot)[^/\s\"']+",
+            r"\1[REDACTED]",
+            message,
             flags=re.IGNORECASE,
         )
         record.args = ()

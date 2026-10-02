@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 from app.web.auth import ACCESS_COOKIE
 from app.web.permissions import require_admin, require_section
@@ -96,6 +97,7 @@ def create_documents_router(access):
             require_admin(scope.user)
         if request.method != "GET":
             request.app.state.auth.check_origin(request)
+        request.state.documents_identity = scope.user["id"]
         return scope
 
     Access = Annotated[Scope, Depends(allowed)]
@@ -118,7 +120,18 @@ def create_documents_router(access):
             if len(str(request.query_params)) > 4000:
                 raise HTTPException(422, "Слишком много параметров.")
             kwargs["params"] = list(request.query_params.multi_items())
-        return await request.app.state.documents.call(
+        service = request.app.state.documents
+        if hasattr(service, "dispatch"):
+            return await run_in_threadpool(
+                service.dispatch,
+                request.state.documents_identity,
+                request.method,
+                path,
+                csv=csv,
+                payload=kwargs.get("json"),
+                params=dict(request.query_params),
+            )
+        return await service.call(
             request.cookies.get(ACCESS_COOKIE), request.method, path, csv=csv, **kwargs
         )
 

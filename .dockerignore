@@ -9,6 +9,9 @@
 !supabase/
 !supabase/migrations/
 !supabase/migrations/**
+!migrations/
+!migrations/documents/
+!migrations/documents/**
 **/__pycache__/
 **/*.pyc
 **/.env*
