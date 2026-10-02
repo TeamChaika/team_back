@@ -1,11 +1,13 @@
 """Telegram notifications and existing versioned approval buttons without Django."""
 
+import json
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 from fastapi import HTTPException
 
 from app.documents import reads
+from app.documents.cards import document_cards
 from app.documents.policy import actor, require
 
 
@@ -21,8 +23,19 @@ class Telegram:
             transport=transport,
         )
 
-    def call(self, method, **payload):
-        response = self.client.post(method, json=payload)
+    def call(self, method, *, photo=None, **payload):
+        if photo is None:
+            response = self.client.post(method, json=payload)
+        else:
+            fields = {
+                key: json.dumps(value, ensure_ascii=False)
+                if isinstance(value, (dict, list, bool))
+                else str(value)
+                for key, value in payload.items()
+            }
+            response = self.client.post(
+                method, data=fields, files={"photo": ("document.png", photo, "image/png")}
+            )
         if response.status_code != 200:
             raise ValueError("Telegram request unavailable")
         data = response.json()
@@ -38,40 +51,36 @@ def preview(bot, settings, chat_id, kind, doc):
     prefix = "Waybill" if kind == "waybill" else "writeoff"
     section = "transfers" if kind == "waybill" else "writeoffs"
     title = "Накладная" if kind == "waybill" else "Списание"
-    lines = [f"{title} {doc['number']} · версия {doc['version']}", f"Склад: {doc['store']}"]
-    lines.append(
-        f"Получатель: {doc['counteragent']}" if kind == "waybill" else f"Причина: {doc['reason']}"
-    )
-    lines.extend([f"Создал: {doc['created_by']}", doc.get("comment") or "", "Товары:"])
-    lines.extend(f"{row['name']} — {row['amount']}" for row in doc["items"])
     buttons = {
         "inline_keyboard": [
             [
                 {
-                    "text": "Открыть документ",
+                    "text": "Открыть накладную ↗" if kind == "waybill" else "Открыть списание ↗",
                     "url": f"{settings.dashboard_url.rstrip('/')}/{section}/documents/{doc['id']}",
                 }
             ],
             [
                 {
-                    "text": "Согласовать",
+                    "text": "✓ Согласовать",
                     "callback_data": f"confirm{prefix}:{doc['id']}:{doc['version']}",
                 },
                 {
-                    "text": "Отклонить",
+                    "text": "✕ Отклонить",
                     "callback_data": f"deny{prefix}:{doc['id']}:{doc['version']}",
                 },
             ],
         ]
     }
-    text = "\n".join(lines)
-    chunks = [text[i : i + 3500] for i in range(0, len(text), 3500)]
     result = None
-    for i, chunk in enumerate(chunks):
-        payload = {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True}
-        if i == len(chunks) - 1:
+    for photo, page, total in document_cards(kind, doc):
+        caption = f"{title} {doc['number']} · версия {doc['version']}"
+        if total > 1:
+            caption += f" · {page}/{total}"
+        payload = {"chat_id": chat_id, "photo": photo, "caption": caption}
+        if page == total:
+            payload["caption"] += "\nПроверьте состав перед согласованием."
             payload["reply_markup"] = buttons
-        result = bot.call("sendMessage", **payload)
+        result = bot.call("sendPhoto", **payload)
     return result["message_id"]
 
 
