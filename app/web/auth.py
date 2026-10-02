@@ -178,7 +178,7 @@ class Auth:
                 payload["access_token"],
                 min(int(payload.get("expires_in", 3600)), 86400),
             ),
-            (REFRESH_COOKIE, payload["refresh_token"], 7 * 86400),
+            (REFRESH_COOKIE, payload["refresh_token"], self.settings.session_days * 86400),
         ]:
             response.set_cookie(
                 name,

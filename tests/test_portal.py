@@ -409,6 +409,29 @@ def test_logout_removes_local_session(client):
     assert client.get("/api/me").status_code == 401
 
 
+def test_session_refresh_survives_access_expiry_and_renews_persistent_cookie(client):
+    response = login(client)
+    refresh_cookie = next(
+        c for c in response.headers.get_list("set-cookie") if "chaika_refresh=" in c
+    )
+    assert "Max-Age=2592000" in refresh_cookie
+    client.cookies.delete(ACCESS_COOKIE)
+    assert client.get("/api/me").status_code == 401
+    response = client.post("/api/auth/refresh", headers={"Origin": "http://127.0.0.1:8013"})
+    assert response.status_code == 200
+    assert any("Max-Age=2592000" in c for c in response.headers.get_list("set-cookie"))
+    assert client.get("/api/me").status_code == 200
+
+
+def test_disabled_user_cannot_renew_persistent_session(client):
+    login(client)
+    client.repo.active = False
+    response = client.post("/api/auth/refresh", headers={"Origin": "http://127.0.0.1:8013"})
+    assert response.status_code == 403
+    assert not response.headers.get_list("set-cookie")
+    assert client.get("/api/me").status_code == 403
+
+
 def test_scope_ancestry_and_cycles():
     assert has_store_scope(3, {3: 2, 2: 1}, {1})
     assert not has_store_scope(3, {3: 2, 2: 3}, {1})
