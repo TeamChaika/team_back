@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from collections import defaultdict, deque
 from threading import Lock
@@ -9,7 +10,7 @@ from uuid import UUID
 
 import httpx
 from fastapi import HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from app.web.settings import WebSettings
 
@@ -19,10 +20,39 @@ AUTH_REQUEST_TIMEOUT = 15
 logger = logging.getLogger(__name__)
 
 
+def login_candidates(value: str) -> tuple[str, ...]:
+    """Explicit emails stay exact; bare Russian phones share a small alias set."""
+    value = value.strip().lower()
+    if "@" in value:
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
+            raise ValueError("Invalid login")
+        return (value,)
+    if re.fullmatch(r"\+?[0-9()\s-]+", value):
+        digits = re.sub(r"[^0-9]", "", value)
+        if len(digits) == 11 and digits[0] in "78":
+            number = "7" + digits[1:]
+            return tuple(
+                local + "@chaika.team" for local in (number, "+" + number, "8" + digits[1:])
+            )
+    if not re.fullmatch(r"[^\s@]+", value):
+        raise ValueError("Invalid login")
+    email = value + "@chaika.team"
+    if len(email) > 254:
+        raise ValueError("Login too long")
+    return (email,)
+
+
 class Login(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-    email: str = Field(min_length=3, max_length=254)
+    email: str = Field(min_length=1, max_length=254)
     password: SecretStr = Field(min_length=1, max_length=256)
+
+    @field_validator("email")
+    @classmethod
+    def valid_login(cls, value):
+        value = value.strip().lower()
+        login_candidates(value)
+        return value
 
 
 class LoginLimiter:
@@ -71,7 +101,7 @@ class Auth:
         if response.status_code == 429:
             raise HTTPException(429, "Слишком много запросов к сервису входа.")
         if response.status_code >= 400:
-            raise HTTPException(401, "Не удалось войти. Проверьте почту и пароль.")
+            raise HTTPException(401, "Не удалось войти. Проверьте логин и пароль.")
         if 300 <= response.status_code < 400:
             raise HTTPException(503, "Сервис входа временно недоступен.")
         try:

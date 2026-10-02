@@ -177,6 +177,19 @@ class Repository:
                 rms_ids,
             )
 
+    def resolve_login_email(self, candidates: tuple[str, ...]) -> str:
+        # Never merge accounts or choose one silently when phone aliases collide.
+        with self.connection() as db:
+            matches = db.execute(
+                "SELECT email FROM chaika.portal_identities WHERE lower(email)=ANY(%s) LIMIT 2",
+                (list(candidates),),
+            ).fetchall()
+        if len(matches) > 1:
+            raise HTTPException(
+                401, "Введите полный логин с @chaika.team, указанный в вашей учётной записи."
+            )
+        return matches[0]["email"] if matches else candidates[0]
+
     def portal_scope(self, user_id: UUID) -> Scope:
         """Document store permissions are independent of restaurant analytics."""
         with self.connection() as db:

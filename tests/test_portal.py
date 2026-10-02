@@ -379,7 +379,7 @@ def test_period_and_password_validation_are_sanitized(client):
     login(client)
     assert client.get("/api/sales/daily?start=2026-08-01&end=2026-09-10").status_code == 422
     password = "should-not-appear-in-response"
-    response = client.post("/api/auth/login", json={"email": "x", "password": password})
+    response = client.post("/api/auth/login", json={"email": "", "password": password})
     assert response.status_code == 422
     assert password not in response.text
 

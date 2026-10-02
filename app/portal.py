@@ -24,7 +24,7 @@ from app.services.sync_jobs import SyncJobError
 from app.web.administration import create_admin_router
 from app.web.assistant import AssistantSettings, Message, answer_question
 from app.web.assistant_store import AssistantStore
-from app.web.auth import ACCESS_COOKIE, REFRESH_COOKIE, Auth, Login, LoginLimiter
+from app.web.auth import ACCESS_COOKIE, REFRESH_COOKIE, Auth, Login, LoginLimiter, login_candidates
 from app.web.coverage import ZONE
 from app.web.deposits import DepositsClient, create_deposits_router
 from app.web.documents import DocumentsClient, create_documents_router
@@ -208,10 +208,16 @@ def create_portal(
         auth = request.app.state.auth
         auth.check_origin(request)
         limiter.check(request.client.host if request.client else "unknown")
+        candidates = login_candidates(payload.email)
+        email = (
+            await run_in_threadpool(repo.resolve_login_email, candidates)
+            if len(candidates) > 1
+            else candidates[0]
+        )
         result = await auth.call(
             "POST",
             "token?grant_type=password",
-            json={"email": payload.email, "password": payload.password.get_secret_value()},
+            json={"email": email, "password": payload.password.get_secret_value()},
         )
         user_id = await auth.user(result["access_token"])
         scope = await run_in_threadpool(repo.portal_scope, user_id)
