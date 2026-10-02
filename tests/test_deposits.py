@@ -198,6 +198,8 @@ def test_authorized_access_crud_maps_to_fixed_methods(client):
     "query",
     [
         "page_size=201",
+        "reservation_from=2026-10-03&reservation_to=2026-10-02",
+        "reservation_from=not-a-date",
         "sort_by=password",
         "url=http://evil",
         "min_amount=20&max_amount=10",
@@ -294,3 +296,38 @@ def test_creation_grants_are_forwarded_and_omitted_flags_preserved(client):
     payload.pop("can_create")
     assert client.post(url, json=payload, headers=headers).status_code == 200
     assert b"can_create" not in client.upstream_calls[-1].content
+
+
+@pytest.mark.parametrize("path", ["/api/deposits", "/api/deposits/export"])
+@pytest.mark.parametrize(
+    "dates",
+    [
+        {"reservation_from": "2026-10-02", "reservation_to": "2026-10-02"},
+        {"reservation_from": "2026-10-02"},
+        {"reservation_to": "2026-10-10"},
+    ],
+)
+def test_reservation_date_filters_reach_upstream_with_user_session(client, path, dates):
+    login(client)
+    response = client.get(
+        path, params={**dates, "restaurant": "Test", "date_from": "2026-09-01T00:00:00+03:00"}
+    )
+    assert response.status_code == 200
+    request = client.upstream_calls[-1]
+    for key, value in dates.items():
+        assert request.url.params[key] == value
+    assert request.url.params["restaurant"] == "Test"
+    assert request.url.params["date_from"].startswith("2026-09-01")
+    assert request.headers["Authorization"] == "Bearer verified"
+
+
+@pytest.mark.parametrize("path", ["/api/deposits", "/api/deposits/export"])
+def test_reversed_reservation_range_never_reaches_upstream(client, path):
+    login(client)
+    assert (
+        client.get(
+            path, params={"reservation_from": "2026-10-03", "reservation_to": "2026-10-02"}
+        ).status_code
+        == 422
+    )
+    assert not client.upstream_calls

@@ -1,7 +1,7 @@
 """Fixed deposit API routes using the existing HttpOnly session and per-user RLS."""
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
@@ -37,6 +37,8 @@ class DepositFilters(BaseModel):
     max_amount: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     date_from: datetime | None = None
     date_to: datetime | None = None
+    reservation_from: date | None = None
+    reservation_to: date | None = None
     sort_by: Literal[
         "created_at",
         "paid_at",
@@ -59,6 +61,9 @@ class DepositFilters(BaseModel):
                 raise ValueError("Explicit timezone required")
             if self.date_from > self.date_to:
                 raise ValueError("Invalid date range")
+        if self.reservation_from and self.reservation_to:
+            if self.reservation_from > self.reservation_to:
+                raise ValueError("Invalid reservation date range")
         return self
 
 
