@@ -7,7 +7,7 @@ import httpx
 from fastapi import HTTPException
 
 from app.documents import reads
-from app.documents.cards import document_cards
+from app.documents.messages import document_messages
 from app.documents.policy import actor, require
 
 
@@ -50,7 +50,6 @@ class Telegram:
 def preview(bot, settings, chat_id, kind, doc):
     prefix = "Waybill" if kind == "waybill" else "writeoff"
     section = "transfers" if kind == "waybill" else "writeoffs"
-    title = "Накладная" if kind == "waybill" else "Списание"
     buttons = {
         "inline_keyboard": [
             [
@@ -72,15 +71,16 @@ def preview(bot, settings, chat_id, kind, doc):
         ]
     }
     result = None
-    for photo, page, total in document_cards(kind, doc):
-        caption = f"{title} {doc['number']} · версия {doc['version']}"
-        if total > 1:
-            caption += f" · {page}/{total}"
-        payload = {"chat_id": chat_id, "photo": photo, "caption": caption}
+    for text, page, total in document_messages(kind, doc):
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "link_preview_options": {"is_disabled": True},
+        }
         if page == total:
-            payload["caption"] += "\nПроверьте состав перед согласованием."
             payload["reply_markup"] = buttons
-        result = bot.call("sendPhoto", **payload)
+        result = bot.call("sendMessage", **payload)
     return result["message_id"]
 
 

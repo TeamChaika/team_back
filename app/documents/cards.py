@@ -2,13 +2,14 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageDraw, ImageFont
+
+from app.documents.messages import quantity
 
 WIDTH, MAX_HEIGHT = 960, 1440
 LEFT, RIGHT = 64, 896
@@ -55,16 +56,6 @@ def wrap(text: str, face: ImageFont.FreeTypeFont, width: int) -> list[str]:
         if current:
             lines.append(current)
     return lines or [""]
-
-
-def quantity(value) -> str:
-    # Keep the document quantity, including tiny fractions; never invent a unit.
-    number = format(Decimal(str(value)), "f")
-    if "." in number:
-        number = number.rstrip("0").rstrip(".")
-    whole, dot, fraction = number.partition(".")
-    whole = f"{int(whole):,}".replace(",", " ")
-    return whole + ("," + fraction if dot else "")
 
 
 @dataclass(frozen=True)

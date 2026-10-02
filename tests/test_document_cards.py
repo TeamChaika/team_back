@@ -1,4 +1,4 @@
-"""Branded previews must preserve quantities and the versioned approval contract."""
+"""Document previews preserve quantities and the versioned approval contract."""
 
 import json
 from io import BytesIO
@@ -19,6 +19,7 @@ from app.documents.cards import (
     quantity,
     wrap,
 )
+from app.documents.messages import document_messages, html_size
 from app.documents.telegram import Telegram, preview
 
 
@@ -112,32 +113,33 @@ class Bot:
 )
 def test_only_last_page_has_versioned_buttons(kind, prefix, section):
     bot = Bot()
-    doc = example(items=[{"name": f"Товар {i}", "amount": i + 1} for i in range(25)])
+    doc = example(items=[{"name": f"Товар {i}", "amount": i + 1} for i in range(220)])
     settings = SimpleNamespace(dashboard_url="https://dashboard.test")
     result = preview(bot, settings, 101, kind, doc)
     assert result == len(bot.calls) > 1
-    assert all(method == "sendPhoto" for method, _ in bot.calls)
+    assert all(method == "sendMessage" for method, _ in bot.calls)
     assert all("reply_markup" not in payload for _, payload in bot.calls[:-1])
     for _, payload in bot.calls:
-        assert payload["photo"].startswith(b"\x89PNG\r\n\x1a\n")
-        assert len(payload["caption"]) <= 1024
-        assert "DJ076651" in payload["caption"] and "версия 2" in payload["caption"]
+        assert "photo" not in payload and "caption" not in payload
+        assert payload["parse_mode"] == "HTML"
+        assert html_size(payload["text"]) <= 4096
+        assert "DJ076651" in payload["text"] and "версия 2" in payload["text"]
     buttons = bot.calls[-1][1]["reply_markup"]["inline_keyboard"]
     assert buttons[0][0]["url"] == f"https://dashboard.test/{section}/documents/76651"
     assert buttons[1][0]["callback_data"] == f"confirm{prefix}:76651:2"
     assert buttons[1][1]["callback_data"] == f"deny{prefix}:76651:2"
 
 
-def test_partial_upload_stops_without_retry_or_sending_approval_buttons():
+def test_partial_send_stops_without_retry_or_sending_approval_buttons():
     bot = Bot(fail_at=2)
-    doc = example(items=[{"name": f"Товар {i}", "amount": 1} for i in range(40)])
+    doc = example(items=[{"name": f"Товар {i}", "amount": 1} for i in range(500)])
     with pytest.raises(httpx.ReadTimeout):
         preview(bot, SimpleNamespace(dashboard_url="https://dashboard.test"), 101, "waybill", doc)
     assert len(bot.calls) == 2
     assert all("reply_markup" not in payload for _, payload in bot.calls)
 
 
-def test_photo_is_uploaded_directly_not_exposed_at_a_public_url():
+def test_formatted_text_is_sent_as_json_without_an_image():
     requests = []
 
     def respond(request):
@@ -156,13 +158,61 @@ def test_photo_is_uploaded_directly_not_exposed_at_a_public_url():
             )
             == 44
         )
-        photo = requests[-1]
-        assert photo.url.path.endswith("/sendPhoto")
-        assert photo.headers["Content-Type"].startswith("multipart/form-data;")
-        assert b'filename="document.png"' in photo.content
-        assert b"image/png" in photo.content
-        assert b"confirmWaybill:76651:2" in photo.content
+        message = requests[-1]
+        assert message.url.path.endswith("/sendMessage")
+        assert message.headers["Content-Type"] == "application/json"
+        payload = json.loads(message.content)
+        assert payload["parse_mode"] == "HTML"
+        assert payload["link_preview_options"] == {"is_disabled": True}
+        assert "<b>CHAIKA" in payload["text"]
+        assert "Мясо Бедро куриное — 12" in payload["text"]
+        assert "photo" not in payload
+        assert payload["reply_markup"]["inline_keyboard"][1][0]["callback_data"] == (
+            "confirmWaybill:76651:2"
+        )
         bot.call("getUpdates", offset=12, timeout=2)
         assert json.loads(requests[-1].content) == {"offset": 12, "timeout": 2}
     finally:
         bot.close()
+
+
+@pytest.mark.parametrize("kind", ["waybill", "writeoff"])
+def test_text_keeps_actual_fields_and_escapes_untrusted_markup(kind):
+    from xml.etree import ElementTree
+
+    doc = example(
+        store="Кухня & Бар",
+        comment='<a href="https://evil.test">Не ссылка</a>',
+        items=[{"name": "Мука <Экстра>", "amount": 0.00001, "unit": "кг"}],
+    )
+    messages = list(document_messages(kind, doc))
+    assert len(messages) == 1
+    html = messages[0][0]
+    parsed = ElementTree.fromstring("<root>" + html + "</root>")
+    assert all(element.tag in {"root", "b"} for element in parsed.iter())
+    text = "".join(parsed.itertext())
+    assert "Кухня & Бар" in text and doc["comment"] in text
+    assert "Мука <Экстра> — 0,00001 кг" in text
+    assert "Иван Петров" in text and "02.10.2026 · 16:40" in text
+    assert ("Гастро Двор · Кухня" in text) == (kind == "waybill")
+    assert ("Проработка" in text) == (kind == "writeoff")
+
+
+def test_long_escaped_text_and_emoji_are_complete_and_within_message_limits():
+    from xml.etree import ElementTree
+
+    name = "&<>😀" * 1300
+    comment = "Большой комментарий & < > 😀" * 300
+    doc = example(items=[{"name": name, "amount": 1.25}], comment=comment)
+    messages = list(document_messages("waybill", doc))
+    assert len(messages) > 3
+    bodies = []
+    for html, _, _ in messages:
+        assert html_size(html) <= 4096
+        parsed = ElementTree.fromstring("<root>" + html + "</root>")
+        # Drop the repeated identity header; remove only added pagination line breaks.
+        bodies.append("".join(parsed.itertext()).split("\n\n", 1)[1])
+    text = "".join(bodies).replace("\n", "")
+    assert name + " — 1,25" in text
+    assert comment in text
+    assert "Создал: Иван Петров" in text
