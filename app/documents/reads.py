@@ -46,14 +46,14 @@ def filters(db, user, kind, params):
     direction = params.get("direction", "all")
     if direction not in {"all", "incoming", "outgoing"}:
         invalid()
+    store = identifier(params["store_id"]) if params.get("store_id") else None
+    if store is not None and store not in allowed:
+        fail(403, "Нет доступа к выбранному складу.")
     if kind == "waybill" and direction != "all":
         field = "counteragent_id" if direction == "incoming" else "store_id"
         conditions.append(f"d.{field}=ANY(%s)")
-        values.append(allowed)
-    if params.get("store_id"):
-        store = identifier(params["store_id"])
-        if store not in allowed:
-            fail(403, "Нет доступа к выбранному складу.")
+        values.append([store] if store is not None else allowed)
+    elif store is not None:
         conditions.append(
             "(d.store_id=%s" + (" OR d.counteragent_id=%s)" if kind == "waybill" else ")")
         )
