@@ -23,6 +23,11 @@ OTHER = UUID(int=3)
 
 class FakeRepository:
     active = True
+    password_change_required = False
+
+    def complete_password_change(self, user_id):
+        assert user_id == USER
+        self.password_change_required = False
 
     def portal_scope(self, user_id):
         return self.scope(user_id)
@@ -31,7 +36,12 @@ class FakeRepository:
         if not self.active or user_id != USER or selected not in (None, DEPARTMENT):
             raise HTTPException(403, "Нет доступа")
         return Scope(
-            {"id": USER, "display_name": "Менеджер", "role": "manager"},
+            {
+                "id": USER,
+                "display_name": "Менеджер",
+                "role": "manager",
+                "password_change_required": self.password_change_required,
+            },
             ({"id": DEPARTMENT, "code": "1"},),
             selected,
             (UUID(int=4),),

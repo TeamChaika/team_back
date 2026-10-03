@@ -4,7 +4,9 @@ import logging
 from typing import Annotated
 from uuid import UUID
 
+import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from starlette.concurrency import run_in_threadpool
 
@@ -83,7 +85,7 @@ async def change_password(auth, caller_id, token, payload):
                 logger.warning("profile_password_cleanup_failed")
 
 
-def create_profile_router(access):
+def create_profile_router(access, repo):
     router = APIRouter(prefix="/api/profile", tags=["profile"])
     User = Annotated[Scope, Depends(access)]
     passwords, links = LoginLimiter(5), LoginLimiter(10)
@@ -102,6 +104,21 @@ def create_profile_router(access):
         session = await change_password(
             auth, scope.user["id"], request.cookies[ACCESS_COOKIE], payload
         )
+        try:
+            await run_in_threadpool(repo.complete_password_change, scope.user["id"])
+        except psycopg.Error:
+            # Auth has already saved the password. Preserve the new session but do not
+            # claim that the database gate was cleared after an unconfirmed commit.
+            logger.warning("profile_password_completion_failed")
+            partial = JSONResponse(
+                {
+                    "detail": "Новый пароль сохранён, но обновление доступа не подтверждено. "
+                    "Обновите страницу. Если форма осталась, укажите новый пароль как текущий."
+                },
+                status_code=503,
+            )
+            auth.cookies(partial, session)
+            return partial
         auth.cookies(response, session)
         return {"status": "ok"}
 

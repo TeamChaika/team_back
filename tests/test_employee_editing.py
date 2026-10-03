@@ -94,8 +94,8 @@ def editing(sample):
         uid = uuid4()
         db.execute("INSERT INTO auth.users(id) VALUES(%s)", (uid,))
         db.execute(
-            "INSERT INTO chaika.web_users(id,display_name,role,all_departments,sections) "
-            "VALUES(%s,'Test','owner',true,ARRAY['employees'])",
+            "INSERT INTO chaika.web_users(id,display_name,role,all_departments,sections,"
+            "password_change_required) VALUES(%s,'Test','owner',true,ARRAY['employees'],false)",
             (uid,),
         )
         db.execute("SET LOCAL ROLE chaika_backend")

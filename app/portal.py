@@ -33,6 +33,7 @@ from app.web.documents import DocumentsClient, create_documents_router
 from app.web.employees import EmployeeCommand, EmployeeEditor, owner
 from app.web.indicators import IndicatorQuery, IndicatorService, catalog
 from app.web.live_sales import LiveSales
+from app.web.password_policy import require_personal_password
 from app.web.permissions import IIKO_SECTIONS, require_section, section_for_path, sections_for
 from app.web.profile import create_profile_router
 from app.web.repository import Repository, Scope, serial
@@ -188,6 +189,7 @@ def create_portal(
         selection = tuple(sorted(set(department_id or []), key=str))
         selected = selection[0] if len(selection) == 1 else selection or None
         scope = await run_in_threadpool(repo.scope, user_id, selected)
+        require_personal_password(scope.user)
         require_section(scope.user, section_for_path(request.url.path))
         request.state.timings = [
             ("auth", (authenticated - started) * 1000),
@@ -202,6 +204,11 @@ def create_portal(
         user_id = await request.app.state.auth.user(request.cookies.get(ACCESS_COOKIE))
         authenticated = perf_counter()
         scope = await run_in_threadpool(repo.portal_scope, user_id)
+        if (request.method, request.url.path) not in {
+            ("GET", "/api/me"),
+            ("POST", "/api/profile/password"),
+        }:
+            require_personal_password(scope.user)
         request.state.timings = [
             ("auth", (authenticated - started) * 1000),
             ("permissions", (perf_counter() - authenticated) * 1000),
@@ -218,7 +225,7 @@ def create_portal(
     app.include_router(create_deposits_router(deposit_access, repo))
     app.include_router(create_documents_router(portal_access))
     app.include_router(create_admin_router(portal_access, repo, web))
-    app.include_router(create_profile_router(portal_access))
+    app.include_router(create_profile_router(portal_access, repo))
 
     def check_period(start, end):
         if start > end or (end - start).days > 30 or end > datetime.now(ZONE).date():
@@ -248,7 +255,10 @@ def create_portal(
         user_id = await auth.user(result["access_token"])
         scope = await run_in_threadpool(repo.portal_scope, user_id)
         auth.cookies(response, result)
-        return {"name": scope.user["display_name"]}
+        return {
+            "name": scope.user["display_name"],
+            "password_change_required": bool(scope.user.get("password_change_required")),
+        }
 
     @app.post("/api/auth/refresh")
     async def refresh(request: Request, response: Response):
@@ -261,9 +271,12 @@ def create_portal(
             "POST", "token?grant_type=refresh_token", json={"refresh_token": token}
         )
         user_id = await auth.user(result["access_token"])
-        await run_in_threadpool(repo.portal_scope, user_id)
+        scope = await run_in_threadpool(repo.portal_scope, user_id)
         auth.cookies(response, result)
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "password_change_required": bool(scope.user.get("password_change_required")),
+        }
 
     @app.post("/api/auth/logout")
     async def logout(request: Request):
@@ -292,6 +305,24 @@ def create_portal(
 
     @app.get("/api/me")
     def me(scope: PortalAccess):
+        if scope.user.get("password_change_required"):
+            return {
+                "user": {
+                    "id": str(scope.user["id"]),
+                    "display_name": scope.user["display_name"],
+                    "role": scope.user["role"],
+                    "password_change_required": True,
+                },
+                "departments": [],
+                "sales_dates": [],
+                "balance_dates": [],
+                "sections": [],
+                "modules": [],
+                "can_manage": False,
+                "documents_enabled": False,
+                "live_sales_enabled": False,
+                "today": datetime.now(ZONE).date().isoformat(),
+            }
         return {
             **repo.metadata(scope),
             "today": datetime.now(ZONE).date().isoformat(),

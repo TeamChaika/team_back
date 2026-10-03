@@ -453,7 +453,8 @@ def chat_db():
         for uid in users:
             db.execute("INSERT INTO auth.users (id) VALUES (%s)", (uid,))
             db.execute(
-                "INSERT INTO chaika.web_users (id,display_name,role) VALUES (%s,'Test','manager')",
+                "INSERT INTO chaika.web_users (id,display_name,role,password_change_required) "
+                "VALUES (%s,'Test','manager',false)",
                 (uid,),
             )
         db.execute("SET LOCAL ROLE chaika_backend")
