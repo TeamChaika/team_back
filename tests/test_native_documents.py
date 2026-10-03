@@ -445,6 +445,41 @@ def test_read_filter_export_and_formula_escaping(service):
     )
 
 
+def test_waybill_direction_uses_accessible_or_selected_warehouse(service):
+    doc = create(service)
+    for user, direction, expected in [
+        (SENDER, "incoming", 0),
+        (SENDER, "outgoing", 1),
+        (RECEIVER, "incoming", 1),
+        (RECEIVER, "outgoing", 0),
+        (FOREIGN, "incoming", 0),
+    ]:
+        assert (
+            service.dispatch(user, "GET", "waybill", params={"direction": direction})["total"]
+            == expected
+        )
+    with pytest.raises(HTTPException) as exc:
+        service.dispatch(
+            SENDER, "GET", "waybill", params={"direction": "incoming", "store_id": str(TARGET)}
+        )
+    assert exc.value.status_code == 403
+    with service.database.connection() as db:
+        db.execute(
+            "INSERT INTO portal_documents_grant (user_id,kind,store_id,actions) "
+            "VALUES (1,'waybill',%s,%s)",
+            (TARGET, Jsonb(["view"])),
+        )
+    for store in (SOURCE, TARGET):
+        for direction in ("incoming", "outgoing", "all"):
+            params = {"direction": direction, "store_id": str(store)}
+            expected = direction == "all" or (store == TARGET) == (direction == "incoming")
+            result = service.dispatch(SENDER, "GET", "waybill", params=params)
+            assert [row["id"] for row in result["rows"]] == ([doc["id"]] if expected else [])
+            assert result["total"] == int(expected)
+            exported = service.dispatch(SENDER, "GET", "waybill/export", params=params, csv=True)
+            assert (doc["number"] in exported.decode("utf-8-sig")) == expected
+
+
 def test_admin_optimistic_revision_and_no_implicit_warehouse_access(service):
     with pytest.raises(HTTPException):
         service.dispatch(SENDER, "GET", "admin/staff")
