@@ -134,6 +134,22 @@ def test_password_and_provider_key_not_represented_in_models():
     assert "private-terminal-key" not in repr(terminal)
 
 
+@pytest.mark.parametrize("length, valid", [(7, False), (8, True), (128, True), (129, False)])
+def test_new_account_password_length(length, valid):
+    payload = {
+        "request_id": "00000000-0000-4000-8000-000000000001",
+        "email": "test@example.invalid",
+        "password": "a" * length,
+        "display_name": "Test",
+        "sections": [],
+    }
+    if valid:
+        assert NewAccount.model_validate(payload).password.get_secret_value() == "a" * length
+    else:
+        with pytest.raises(ValidationError):
+            NewAccount.model_validate(payload)
+
+
 def test_inactive_terminal_cannot_be_selected_for_payments():
     with pytest.raises(ValidationError):
         Terminal(name="Test", active=False, make_default=True)

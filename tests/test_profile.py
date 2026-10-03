@@ -65,16 +65,19 @@ def test_requires_session_origin_and_active_profile(client):
     assert not any(r.method == "PUT" for r in client.calls)
 
 
-def test_password_uses_verified_self_email_and_rotates_cookies(client):
+@pytest.mark.parametrize("new_password", ["a" * 8, "a" * 11, "a" * 128])
+def test_password_uses_verified_self_email_and_rotates_cookies(client, new_password):
     authenticated(client)
-    response = client.post("/api/profile/password", headers=ORIGIN, json=PASSWORDS)
+    response = client.post(
+        "/api/profile/password", headers=ORIGIN, json={**PASSWORDS, "new_password": new_password}
+    )
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
     login = next(r for r in client.calls if r.url.path.endswith("/token"))
     assert json.loads(login.content) == {"email": "self@example.invalid", "password": "old-private"}
     update = next(r for r in client.calls if r.method == "PUT")
     assert update.headers["authorization"] == "Bearer fresh"
-    assert json.loads(update.content) == {"password": "new-private-password"}
+    assert json.loads(update.content) == {"password": new_password}
     assert "fresh-r" in response.headers["set-cookie"]
     assert "Cache-Control" in response.headers
 
@@ -82,7 +85,8 @@ def test_password_uses_verified_self_email_and_rotates_cookies(client):
 @pytest.mark.parametrize(
     "payload",
     [
-        {**PASSWORDS, "new_password": "short"},
+        {**PASSWORDS, "new_password": "a" * 7},
+        {**PASSWORDS, "new_password": "a" * 129},
         {**PASSWORDS, "user_id": str(OTHER)},
         {"current_password": "same-password", "new_password": "same-password"},
     ],

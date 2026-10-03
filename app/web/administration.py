@@ -56,7 +56,7 @@ class Account(Input):
 class NewAccount(Account):
     request_id: UUID
     email: str = Field(min_length=3, max_length=254)
-    password: SecretStr = Field(min_length=12, max_length=128)
+    password: SecretStr = Field(min_length=8, max_length=128)
 
     @field_validator("email")
     @classmethod
