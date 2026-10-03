@@ -34,6 +34,7 @@ from app.web.employees import EmployeeCommand, EmployeeEditor, owner
 from app.web.indicators import IndicatorQuery, IndicatorService, catalog
 from app.web.live_sales import LiveSales
 from app.web.password_policy import require_personal_password
+from app.web.password_recovery import create_recovery_router
 from app.web.permissions import IIKO_SECTIONS, require_section, section_for_path, sections_for
 from app.web.profile import create_profile_router
 from app.web.repository import Repository, Scope, serial
@@ -226,6 +227,7 @@ def create_portal(
     app.include_router(create_documents_router(portal_access))
     app.include_router(create_admin_router(portal_access, repo, web))
     app.include_router(create_profile_router(portal_access, repo))
+    app.include_router(create_recovery_router(repo, web, transport=auth_transport))
 
     def check_period(start, end):
         if start > end or (end - start).days > 30 or end > datetime.now(ZONE).date():

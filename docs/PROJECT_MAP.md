@@ -7,6 +7,7 @@
 | --- | --- | --- |
 | Вход, сессия, рестораны, разделы | [API и доступ](CODEMAPS/api-access.md) | [app/portal.py](../app/portal.py) |
 | Мой профиль, свой пароль, подключить Telegram | [API и доступ](CODEMAPS/api-access.md) | [app/web/profile.py](../app/web/profile.py), [app/documents/telegram_link.py](../app/documents/telegram_link.py) |
+| Восстановление через Telegram | [Сценарий и выпуск](telegram-password-recovery.md) | [app/web/password_recovery.py](../app/web/password_recovery.py), [app/documents/password_recovery.py](../app/documents/password_recovery.py) |
 | Обязательная смена временного пароля | [Порядок выпуска и маркировка пользователей](password-change.md) | [app/web/password_policy.py](../app/web/password_policy.py), зависимости доступа в [app/portal.py](../app/portal.py) |
 | Права пользователей dashboard | [API и доступ](CODEMAPS/api-access.md) | [app/web/administration.py](../app/web/administration.py) |
 | Сотрудники iiko, создание и сверка | [API и доступ](CODEMAPS/api-access.md) | [app/web/employees.py](../app/web/employees.py) |

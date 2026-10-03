@@ -179,9 +179,19 @@ def consume_digest(service, digest, telegram_id):
     return {"linked": True}
 
 
+def _redact_recovery(value):
+    if isinstance(value, str):
+        return re.sub(r"(/reset-password[#?]token=)[A-Za-z0-9_-]+", r"\1[redacted]", value)
+    if isinstance(value, dict):
+        return {key: _redact_recovery(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_recovery(item) for item in value]
+    return value
+
+
 def queued_update(update):
     """Discard raw deep-link credentials before writing Telegram's durable inbox."""
-    update = dict(update)
+    update = _redact_recovery(dict(update))
     update.pop("_telegram_link_digest", None)
     message = update.get("message") or {}
     parts = (message.get("text") or "").split()
