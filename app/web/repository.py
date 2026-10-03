@@ -124,7 +124,8 @@ class Repository:
         with self.connection() as db:
             # Queue independent reads before fetching: one network round trip, fresh permissions.
             users = db.execute(
-                "SELECT id,display_name,role,sections,is_portal_admin,all_departments FROM "
+                "SELECT id,display_name,role,sections,is_portal_admin,all_departments,"
+                "password_change_required FROM "
                 "chaika.web_users WHERE id=%s AND active",
                 (user_id,),
             )
@@ -147,6 +148,8 @@ class Repository:
             user = users.fetchone()
             if not user:
                 raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
+            if user.get("password_change_required"):
+                return Scope(user, (), None, (), ())
             if not IIKO_SECTIONS.intersection(sections_for(user)):
                 raise HTTPException(403, "Этой учётной записи доступны только депозиты.")
             nodes = node_rows.fetchall()
@@ -194,12 +197,15 @@ class Repository:
         """Document store permissions are independent of restaurant analytics."""
         with self.connection() as db:
             user = db.execute(
-                "SELECT id,display_name,role,sections,is_portal_admin,all_departments FROM "
+                "SELECT id,display_name,role,sections,is_portal_admin,all_departments,"
+                "password_change_required FROM "
                 "chaika.web_users WHERE id=%s AND active",
                 (user_id,),
             ).fetchone()
         if not user:
             raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
+        if user.get("password_change_required"):
+            return Scope(user, (), None, (), ())
         if not IIKO_SECTIONS.intersection(sections_for(user)):
             return Scope(user, (), None, (), ())
         if not ANALYTICS_SECTIONS.intersection(sections_for(user)) and not user.get(
@@ -214,6 +220,19 @@ class Repository:
             if not analytics_grant:
                 return Scope(user, (), None, (), ())
         return self.scope(user_id)
+
+    def complete_password_change(self, user_id: UUID) -> None:
+        """Called only after Auth confirms a new password for this authenticated account."""
+        self._pool.open()
+        with self._pool.connection() as db, db.transaction():
+            db.execute("SET LOCAL statement_timeout='15000ms'")
+            changed = db.execute(
+                "UPDATE chaika.web_users SET password_change_required=false,"
+                "password_changed_at=now() WHERE id=%s AND active RETURNING id",
+                (user_id,),
+            ).fetchone()
+            if not changed:
+                raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
 
     def deposit_users(self):
         with self.connection() as db:

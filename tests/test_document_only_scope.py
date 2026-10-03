@@ -17,6 +17,7 @@ class DocumentDatabase(PermissionDatabase):
     active = True
     analytics = False
     all_departments = False
+    password_change_required = False
 
     def execute(self, sql, params=None):
         if "chaika.web_users" in sql:
@@ -28,6 +29,7 @@ class DocumentDatabase(PermissionDatabase):
                         display_name="Test",
                         sections=self.sections,
                         all_departments=self.all_departments,
+                        password_change_required=self.password_change_required,
                     )
                 ]
                 if self.active

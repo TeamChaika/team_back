@@ -74,6 +74,42 @@ def test_pool_replaces_closed_connection(pooled_repository):
         assert connection.execute("SELECT 1 AS ok").fetchone()["ok"] == 1
 
 
+def test_password_completion_writes_only_active_self_with_runtime_role(db):
+    active_id, disabled_id = uuid4(), uuid4()
+    db.execute("SET LOCAL ROLE postgres")
+    for uid, active in ((active_id, True), (disabled_id, False)):
+        db.execute("INSERT INTO auth.users(id) VALUES(%s)", (uid,))
+        db.execute(
+            "INSERT INTO chaika.web_users(id,display_name,role,active,sections) "
+            "VALUES(%s,'Personal password test','manager',%s,ARRAY['transfers'])",
+            (uid, active),
+        )
+    db.execute("SET LOCAL ROLE chaika_backend")
+
+    class Pool:
+        def open(self):
+            pass
+
+        @contextmanager
+        def connection(self):
+            yield db
+
+    repo = object.__new__(Repository)
+    repo._pool = Pool()
+    repo.complete_password_change(active_id)
+    assert db.execute(
+        "SELECT password_change_required,password_changed_at IS NOT NULL,sections "
+        "FROM chaika.web_users WHERE id=%s", (active_id,)
+    ).fetchone() == (False, True, ["transfers"])
+    with pytest.raises(HTTPException) as denied:
+        repo.complete_password_change(disabled_id)
+    assert denied.value.status_code == 403
+    assert db.execute(
+        "SELECT password_change_required,password_changed_at FROM chaika.web_users WHERE id=%s",
+        (disabled_id,),
+    ).fetchone() == (True, None)
+
+
 def test_batched_scope_rechecks_user_grants_and_active_state(db, bundle):
     sources, snapshots = stage(db, bundle)
     publish(db, sources, snapshots)
@@ -82,8 +118,8 @@ def test_batched_scope_rechecks_user_grants_and_active_state(db, bundle):
     db.execute("SET LOCAL ROLE postgres")
     db.execute("INSERT INTO auth.users(id) VALUES(%s)", (user_id,))
     db.execute(
-        "INSERT INTO chaika.web_users(id,display_name,role,sections) "
-        "VALUES(%s,'Test','manager',ARRAY['sales'])",
+        "INSERT INTO chaika.web_users(id,display_name,role,sections,password_change_required) "
+        "VALUES(%s,'Test','manager',ARRAY['sales'],false)",
         (user_id,),
     )
     db.execute(

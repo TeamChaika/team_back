@@ -3,6 +3,7 @@
 import json
 
 import httpx
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -137,3 +138,36 @@ def test_telegram_disabled_status_and_origin_guard(client):
     assert client.get(path).json() == {"available": False, "linked": False, "telegram_id": None}
     assert client.post(path + "/link").status_code == 403
     assert client.post(path + "/link", headers=ORIGIN).status_code == 503
+
+
+def test_required_password_is_cleared_only_after_confirmed_update(client):
+    authenticated(client)
+    client.repo.password_change_required = True
+    client.state["wrong_password"] = True
+    assert client.post("/api/profile/password", headers=ORIGIN, json=PASSWORDS).status_code == 422
+    assert client.repo.password_change_required
+    client.state["wrong_password"] = False
+    client.state["update_failure"] = 503
+    assert client.post("/api/profile/password", headers=ORIGIN, json=PASSWORDS).status_code == 503
+    assert client.repo.password_change_required
+    client.state["update_failure"] = None
+    assert client.post("/api/profile/password", headers=ORIGIN, json=PASSWORDS).status_code == 200
+    assert not client.repo.password_change_required
+    assert client.get("/api/purchase-prices").status_code == 200
+
+
+def test_database_failure_after_auth_update_keeps_gate_and_explains_partial_success(client):
+    authenticated(client)
+    client.repo.password_change_required = True
+
+    def unavailable(user_id):
+        raise psycopg.OperationalError("private database detail")
+
+    client.repo.complete_password_change = unavailable
+    response = client.post("/api/profile/password", headers=ORIGIN, json=PASSWORDS)
+    assert response.status_code == 503
+    assert "Новый пароль сохранён" in response.json()["detail"]
+    assert "private" not in response.text
+    assert "fresh-r" in response.headers["set-cookie"]
+    assert client.repo.password_change_required
+    assert client.get("/api/purchase-prices").json()["detail"]["code"] == "password_change_required"
