@@ -1,5 +1,7 @@
 # Chaika Team — Backend
 
+Для быстрого поиска модулей: [карта проекта](docs/PROJECT_MAP.md), [запуск и диагностика](docs/CODEMAPS/operations.md). Правила для агентов: [AGENTS.md](AGENTS.md).
+
 Python 3.12 + FastAPI: интеграция с iiko, сохранение истории в PostgreSQL/Supabase, API аналитического сайта и помощник по закупкам через OpenRouter, OpenAI или Timeweb.
 
 Фронтенд React находится в отдельном репозитории `TeamChaika/team_front`. Для совместного запуска клонируйте оба репозитория в соседние папки.
