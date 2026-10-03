@@ -47,11 +47,19 @@ class DocumentService:
             user = actor(db, telegram_id=telegram_id, kind=kind)
             stores = reads.stores_for(db, user["id"], kind, "approve")
             field = "counteragent_id" if kind == "waybill" else "store_id"
+            condition = f"d.{field}=ANY(%s)"
+            values = [stores]
+            if kind == "waybill":
+                condition = (
+                    "((d.counteragent_id=ANY(%s) AND d.receipt_state!='pending_sender') "
+                    "OR (d.store_id=ANY(%s) AND d.receipt_state='pending_sender'))"
+                )
+                values.append(reads.stores_for(db, user["id"], kind, "edit"))
             docs = db.execute(
-                reads.joined(kind) + f" WHERE d.{field}=ANY(%s) AND d.status='Created' "
+                reads.joined(kind) + f" WHERE {condition} AND d.status='Created' "
                 "AND d.submission_state NOT IN ('queued','sending','unknown') ORDER BY d.id "
                 "DESC LIMIT 20",
-                (stores,),
+                values,
             ).fetchall()
             return [
                 {**reads.serialize(kind, doc), "items": reads.items(db, kind, doc["id"])}
@@ -59,7 +67,7 @@ class DocumentService:
             ]
 
     def bot_action(self, telegram_id, kind, action, document_id, body):
-        if action not in {"confirm", "deny"}:
+        if action not in {"confirm", "deny", "confirm_receipt", "reject_receipt"}:
             fail(403, "Действие недоступно.")
         return mutate(
             self.database,

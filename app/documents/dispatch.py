@@ -61,6 +61,7 @@ def reserve(database, job):
             or doc["version"] != job["version"]
             or doc["submission_state"] != "queued"
             or doc["status"] != "Created"
+            or doc.get("receipt_state") == "pending_sender"
         ):
             db.execute(
                 "UPDATE native_dispatch SET state='obsolete',updated_at=now() WHERE "
