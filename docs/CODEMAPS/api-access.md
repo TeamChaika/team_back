@@ -7,6 +7,7 @@
 | Задача | Файлы и путь вызова |
 | --- | --- |
 | Вход/сессия | [app/portal.py](../../app/portal.py) `/api/auth/*` → [app/web/auth.py](../../app/web/auth.py) → Supabase Auth; профиль проверяется через [app/web/repository.py](../../app/web/repository.py) |
+| Мой профиль | `/api/profile/*` → [app/web/profile.py](../../app/web/profile.py): смена пароля через повторный вход того же пользователя и Supabase `PUT /user`; Telegram → [telegram_link.py](../../app/documents/telegram_link.py). Доступ всем активным аккаунтам через `portal_access`, без требования аналитических разделов. Origin и лимиты проверяются для записи; идентификатор только из сессии |
 | Выбор ресторанов | `access` в [app/portal.py](../../app/portal.py) → `Repository.scope` → `chaika.web_users`, `web_department_access`, `corporate_nodes`, `stores`, `rms_bindings`; `Scope.ids` ограничивает доступные подразделения |
 | Разделы | [app/web/permissions.py](../../app/web/permissions.py) задаёт `sections_for`/`require_section`/`section_for_path`; права проверяются на API, включая режим «только документы» |
 | Управление dashboard | `/api/management/*` → [app/web/administration.py](../../app/web/administration.py); `require_admin` и аудит прав портала; это не назначение складских прав документов |

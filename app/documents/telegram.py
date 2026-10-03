@@ -188,13 +188,27 @@ def handle_update(service, bot, update):
         )
         return
     message = update.get("message") or {}
-    text = message.get("text", "").split(" ")[0].split("@")[0]
+    parts = (message.get("text") or "").split()
+    text = parts[0].split("@")[0] if parts else ""
     if text not in {"/start", "/pending"}:
         return
     # Do not disclose private document previews into a group chat.
     if message.get("chat", {}).get("type") != "private":
         return
     chat_id, user_id = message["chat"]["id"], message["from"]["id"]
+    if text == "/start" and len(parts) >= 2 and parts[1].startswith("link_"):
+        from app.documents.telegram_link import consume, consume_digest
+
+        try:
+            if "_telegram_link_digest" in update:
+                consume_digest(service, update["_telegram_link_digest"], user_id)
+            else:
+                consume(service, parts[1][5:], user_id)
+            result = "Telegram подключён. Вернитесь в «Мой профиль»."
+        except HTTPException as error:
+            result = str(error.detail)
+        bot.call("sendMessage", chat_id=chat_id, text=result)
+        return
     if text == "/start":
         bot.call(
             "sendMessage",
