@@ -140,6 +140,10 @@ def deliver_notification(service, bot):
 
 
 def handle_update(service, bot, update):
+    from app.documents.password_recovery import handle_update as recovery_update
+
+    if recovery_update(service, bot, update):
+        return
     callback = update.get("callback_query")
     if callback:
         data = callback.get("data", "")
