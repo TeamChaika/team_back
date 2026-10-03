@@ -21,4 +21,5 @@ class DocumentSettings(BaseSettings):
     iiko_login: str = ""
     iiko_password_hash: SecretStr = SecretStr("")
     bot_token: SecretStr = SecretStr("")
+    bot_username: str = ""
     telegram_local_address: Literal["", "0.0.0.0", "::"] = ""

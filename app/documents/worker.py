@@ -16,6 +16,7 @@ from app.documents.policy import identifier
 from app.documents.reads import ZONE
 from app.documents.service import DocumentService
 from app.documents.telegram import Telegram, deliver_notification, handle_update
+from app.documents.telegram_link import queued_update
 
 log = logging.getLogger(__name__)
 LEADER_LOCK = 7623011102049
@@ -99,7 +100,7 @@ def poll(service, bot):
                 db.execute(
                     "INSERT INTO native_bot_updates (id,data) VALUES (%s,%s) ON CONFLICT DO "
                     "NOTHING",
-                    (update["update_id"], Jsonb(update)),
+                    (update["update_id"], Jsonb(queued_update(update))),
                 )
             db.execute(
                 "INSERT INTO native_jobs (name,data) VALUES ('telegram-offset',%s) "
