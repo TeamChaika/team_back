@@ -70,6 +70,17 @@ def preview(bot, settings, chat_id, kind, doc):
             ],
         ]
     }
+    if kind == "waybill" and doc.get("receipt_state") == "pending_sender":
+        buttons["inline_keyboard"][1] = [
+            {
+                "text": "✓ Подтвердить факт",
+                "callback_data": f"confirmReceipt:{doc['id']}:{doc['version']}",
+            },
+            {
+                "text": "✕ Вернуть получателю",
+                "callback_data": f"rejectReceipt:{doc['id']}:{doc['version']}",
+            },
+        ]
     result = None
     for text, page, total in document_messages(kind, doc):
         payload = {
@@ -110,8 +121,11 @@ def deliver_notification(service, bot):
         else:
             try:
                 user = actor(db, telegram_id=recipient["telegram_id"], kind=kind)
-                store = doc["counteragent_id"] if kind == "waybill" else doc["store_id"]
-                require(db, user["id"], kind, "approve", store)
+                sender = kind == "waybill" and doc.get("receipt_state") == "pending_sender"
+                store = (
+                    doc["counteragent_id"] if kind == "waybill" and not sender else doc["store_id"]
+                )
+                require(db, user["id"], kind, "edit" if sender else "approve", store)
                 data = {**reads.serialize(kind, doc), "items": reads.items(db, kind, doc["id"])}
             except HTTPException as error:
                 if error.status_code >= 500:
@@ -150,6 +164,8 @@ def handle_update(service, bot, update):
         parts = data.split(":")
         text = "Кнопка старой версии. Выполните /pending и проверьте актуальный состав документа."
         prefixes = {
+            "confirmReceipt": ("waybill", "confirm_receipt"),
+            "rejectReceipt": ("waybill", "reject_receipt"),
             "confirmWaybill": ("waybill", "confirm"),
             "denyWaybill": ("waybill", "deny"),
             "confirmwriteoff": ("writeoff", "confirm"),
@@ -176,6 +192,8 @@ def handle_update(service, bot, update):
                         "Согласовано. Документ в очереди: "
                         "отправим в iiko автоматически при наличии связи."
                     )
+                elif result.get("receipt_state") == "rejected":
+                    text = "Расхождения отклонены. Накладная возвращена получателю на проверку."
                 elif result["status"] == "Sent":
                     text = "Документ отправлен в iiko."
                 elif result["status"] == "Denied":

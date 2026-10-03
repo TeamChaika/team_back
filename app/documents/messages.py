@@ -41,6 +41,10 @@ def document_messages(kind: str, doc: dict):
         f"<b>CHAIKA · {title} №{escape(str(doc['number']), quote=False)}</b>\n"
         f"На согласовании · версия {int(doc['version'])}"
     )
+    if doc.get("receipt_state") == "pending_sender":
+        heading += "\n<b>Расхождения при приёмке · требуется подтверждение отправителя</b>"
+    elif doc.get("receipt_state") == "rejected":
+        heading += "\n<b>Отправитель отклонил расхождения · проверьте приёмку повторно</b>"
     pages = [""]
 
     def add(text, bold=False):
@@ -61,6 +65,8 @@ def document_messages(kind: str, doc: dict):
         amount = quantity(item["amount"])
         if item.get("unit"):
             amount += " " + str(item["unit"])
+        if item.get("received_amount") is not None:
+            amount += " → факт: " + quantity(item["received_amount"])
         add(f"{index}. {item['name']} — {amount}")
     if doc.get("comment", "").strip():
         add("")

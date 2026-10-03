@@ -12,7 +12,9 @@ from app.web.permissions import require_admin, require_section
 from app.web.repository import Scope
 
 Kind = Literal["waybill", "writeoff"]
-Action = Literal["edit", "copy", "cancel", "confirm", "deny"]
+Action = Literal[
+    "edit", "copy", "cancel", "confirm", "deny", "receive", "confirm_receipt", "reject_receipt"
+]
 SECTIONS = {"waybill": "transfers", "writeoff": "writeoffs"}
 ERRORS = {
     400: "Проверьте параметры документа.",

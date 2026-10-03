@@ -11,6 +11,7 @@ ZONE = ZoneInfo("Europe/Simferopol")
 
 def summary(kind, doc):
     return {
+        "receipt_state": doc.get("receipt_state", "none"),
         "kind": kind,
         "id": doc["id"],
         "number": f"DJ{doc['id']:06d}",
@@ -198,6 +199,7 @@ def items(db, kind, document_id, names=None):
             "product_id": str(row["product_id"]),
             "name": names.get(str(row["product_id"]), str(row["product_id"])),
             "amount": row["amount"],
+            **({"received_amount": row.get("received_amount")} if kind == "waybill" else {}),
         }
         for row in db.execute(
             f"SELECT * FROM {child} WHERE {kind}_id=%s ORDER BY id", (document_id,)
@@ -211,6 +213,10 @@ def available_actions(db, user, kind, doc):
     result = []
     if kind == "waybill" and doc["store_id"] in stores_for(db, user["id"], kind, "copy"):
         result.append("copy")
+    if kind == "waybill" and doc.get("receipt_state") == "pending_sender":
+        if doc["store_id"] in stores_for(db, user["id"], kind, "edit"):
+            result.extend(["confirm_receipt", "reject_receipt"])
+        return result
     if doc["status"] == "Created":
         for action in ("edit", "cancel", "approve"):
             store = (
@@ -220,6 +226,8 @@ def available_actions(db, user, kind, doc):
             )
             if store in stores_for(db, user["id"], kind, action):
                 result.extend(["confirm", "deny"] if action == "approve" else [action])
+                if action == "approve" and kind == "waybill":
+                    result.append("receive")
     return result
 
 
@@ -231,7 +239,7 @@ def detail(db, user, kind, document_id, params):
     if not doc:
         fail(404, "Документ не найден.")
     history = db.execute(
-        "SELECT e.action,e.version,e.created_at, "
+        "SELECT e.action,e.version,e.created_at,e.data, "
         "coalesce(nullif(trim(u.first_name || ' ' || u.last_name),''),u.username) AS actor "
         "FROM portal_documents_event e JOIN authentication_user u ON u.id=e.actor_id "
         "WHERE kind=%s AND document_id=%s ORDER BY e.id DESC LIMIT 100",
