@@ -889,6 +889,22 @@ class Repository:
             }
         )
 
+    def manual_sync(self, scope, job, request_id):
+        from app.manual_sync import request_run
+        from app.web.permissions import require_admin
+
+        require_admin(scope.user)
+        if not scope.unrestricted:
+            raise HTTPException(403, "Ручная синхронизация требует доступа ко всем заведениям.")
+        self._pool.open()
+        with self._pool.connection() as db, db.transaction():
+            db.execute("SET LOCAL statement_timeout='15000ms'")
+            return serial(
+                request_run(
+                    db, job, request_id, scope.user["id"], enabled=self.settings.sync_enabled
+                )
+            )
+
     def status(self, scope):
         with self.connection() as db:
             coverage = db.execute(
@@ -918,12 +934,33 @@ class Repository:
                         "ORDER BY job,slot DESC"
                     ).fetchall()
                     by_key = {r["job"]: r for r in latest}
+                    from app.manual_sync import available, manual_state
+                    from app.manual_sync import latest as manual_latest
+
+                    ready = available(db)
+                    requests = manual_latest(db)
+                    now = db.execute("SELECT clock_timestamp() AS now").fetchone()["now"]
+                    active = {
+                        row["job"]
+                        for row in db.execute(
+                            "SELECT DISTINCT job FROM chaika.scheduled_sync_runs "
+                            "WHERE status='running'"
+                        ).fetchall()
+                    }
                     scheduled = [
                         {
                             "job": j.key,
                             "label": j.label,
                             "schedule": j.schedule,
                             **by_key.get(j.key, {"status": "waiting"}),
+                            "scheduler_available": ready,
+                            "manual": manual_state(
+                                requests.get(j.key),
+                                now,
+                                ready=ready,
+                                authorized=bool(scope.user.get("is_portal_admin")),
+                                automatic_running=j.key in active,
+                            ),
                         }
                         for j in JOBS
                     ]
