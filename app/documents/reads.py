@@ -4,6 +4,7 @@ from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.documents.catalog import products
+from app.documents.costs import estimate
 from app.documents.policy import fail, identifier, invalid, stores_for, table
 
 ZONE = ZoneInfo("Europe/Simferopol")
@@ -124,7 +125,10 @@ def serialize(kind, doc):
         )
     else:
         result.update(
-            reason=doc["reason_id"], reason_id=doc["reason_pk"], iiko_document_type="writeoff"
+            reason=doc["reason_id"],
+            reason_id=doc["reason_pk"],
+            iiko_document_type="writeoff",
+            cost_estimate=doc.get("cost_estimate"),
         )
     return result
 
@@ -245,9 +249,13 @@ def detail(db, user, kind, document_id, params):
         "WHERE kind=%s AND document_id=%s ORDER BY e.id DESC LIMIT 100",
         (kind, document_id),
     ).fetchall()
+    lines = items(db, kind, document_id)
+    result = serialize(kind, doc)
+    if kind == "writeoff" and result["cost_estimate"] is None:
+        result["cost_estimate"] = estimate(db, doc["store_id"], lines, at=doc["created_at"])
     return {
-        **serialize(kind, doc),
-        "items": items(db, kind, document_id),
+        **result,
+        "items": lines,
         "actions": available_actions(db, user, kind, doc),
         "history": history,
     }
