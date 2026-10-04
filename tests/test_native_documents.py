@@ -99,6 +99,7 @@ def database():
         db.execute(Path("tests/fixtures/documents_schema.sql").read_text())
         db.execute(Path("migrations/documents/0001_native_runtime.sql").read_text())
         db.execute(Path("migrations/documents/0004_receipt_discrepancies.sql").read_text())
+        db.execute(Path("migrations/documents/0005_writeoff_cost_estimates.sql").read_text())
     database = DocumentDatabase(test_url)
     yield database
     database.close()

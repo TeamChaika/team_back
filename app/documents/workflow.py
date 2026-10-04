@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from psycopg.types.json import Jsonb
 
 from app.documents.catalog import products
+from app.documents.costs import estimate
 from app.documents.policy import actor, fail, identifier, invalid, require, stores_for, table
 from app.documents.reads import summary
 
@@ -38,7 +39,10 @@ def validate(db, kind, body):
         ).fetchone():
             invalid("Выберите действующую причину списания.")
         fields["reason_id"] = reason
-    rows = body.get("items")
+    return fields, validate_items(db, body.get("items"))
+
+
+def validate_items(db, rows):
     if not isinstance(rows, list) or not 1 <= len(rows) <= 200:
         invalid("Добавьте от 1 до 200 позиций.")
     names = products(db)
@@ -56,7 +60,7 @@ def validate(db, kind, body):
             invalid("Проверьте товары: неизвестная или повторная позиция.")
         seen.add(product)
         result.append({"product_id": product, "amount": amount})
-    return fields, result
+    return result
 
 
 def event(db, kind, doc, user_id, action, data=None):
@@ -237,6 +241,8 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
             (key, user["id"], kind, action, document_id, fingerprint),
         )
         if action in {"create", "copy"}:
+            if kind == "writeoff":
+                fields["cost_estimate"] = Jsonb(estimate(db, fields["store_id"], rows))
             # Field names come only from validate(), not the request.
             columns = ",".join(fields)
             placeholders = ",".join(["%s"] * len(fields))
@@ -351,6 +357,8 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
             ).fetchone()
             event(db, kind, doc, user["id"], action)
         result = summary(kind, doc)
+        if kind == "writeoff":
+            result["cost_estimate"] = doc.get("cost_estimate")
         finish(db, key, result, "queued" if queue else "done")
         if queue:
             rows = db.execute(
