@@ -19,6 +19,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from app.core.config import Settings
 from app.documents.config import DocumentSettings
 from app.documents.service import DocumentService
+from app.manual_sync import RunRequest
 from app.schemas.sales_drilldown import DiscountDetailsQuery
 from app.services.order_topology import read_topology
 from app.services.sales_drilldown import discount_details
@@ -35,7 +36,13 @@ from app.web.indicators import IndicatorQuery, IndicatorService, catalog
 from app.web.live_sales import LiveSales
 from app.web.password_policy import require_personal_password
 from app.web.password_recovery import create_recovery_router
-from app.web.permissions import IIKO_SECTIONS, require_section, section_for_path, sections_for
+from app.web.permissions import (
+    IIKO_SECTIONS,
+    require_admin,
+    require_section,
+    section_for_path,
+    sections_for,
+)
 from app.web.profile import create_profile_router
 from app.web.repository import Repository, Scope, serial
 from app.web.settings import WebSettings
@@ -574,6 +581,12 @@ def create_portal(
         if source_id not in scope.rms_ids:
             raise HTTPException(403, "Нет доступа к этому ресторану.")
         return read_topology(settings, source_id, day, order_number, order_id=order_id)
+
+    @app.post("/api/status/sync/{job}/run", status_code=202)
+    def run_sync(job: str, body: RunRequest, request: Request, scope: Access):
+        require_admin(scope.user)
+        request.app.state.auth.check_origin(request)
+        return repo.manual_sync(scope, job, body.request_id)
 
     @app.get("/api/status")
     def status(scope: Access):

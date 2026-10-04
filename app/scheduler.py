@@ -78,14 +78,15 @@ class CaptureStop:
         self.local.set()
 
 
-def run_job(job, slot, settings, stop):
+def run_job(job, slot, settings, stop, *, namespace="scheduled"):
     # All existing loaders take the same database advisory lock and release iiko tokens.
     from app.services.sync_jobs import ROOT
     from app.sync_invoices import HistoryRequest, synchronize_histories
 
     day = slot.astimezone(ZONE).date()
     yesterday = day - timedelta(days=1)
-    root = ROOT / "scheduled" / job.key / slot.strftime("%Y%m%dT%H%M")
+    stamp = "%Y%m%dT%H%M" if namespace == "scheduled" else "%Y%m%dT%H%M%S%f"
+    root = ROOT / namespace / job.key / slot.strftime(stamp)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     if job.key in {"sales", "sales_history"}:
         from app.sync_sales_history import synchronize_history
@@ -191,25 +192,41 @@ def run_job(job, slot, settings, stop):
             fn(settings, API)
 
 
-def run_due(db, settings, stop, *, now=None, execute=run_job):
+def run_due(db, settings, stop, *, now=None, execute=run_job, manual=False):
+    from app.manual_sync import job_lock, run_one
+
     now = now or datetime.now(UTC)
     for job in JOBS:
         if stop.is_set():
             break
+        if manual:
+            run_one(db, settings, stop, execute=lambda *args: run_job(*args, namespace="manual"))
+            if stop.is_set():
+                break
         slot = job.slot(now)
-        previous = db.execute(
-            "SELECT status,next_retry_at FROM chaika.scheduled_sync_runs WHERE job=%s AND slot=%s",
-            (job.key, slot),
-        ).fetchone()
-        if previous and (previous[0] == "succeeded" or (previous[1] and previous[1] > now)):
-            continue
-        db.execute(
-            "INSERT INTO chaika.scheduled_sync_runs(job,slot,status) VALUES(%s,%s,'running') "
-            "ON CONFLICT(job,slot) DO UPDATE SET status='running',"
-            "started_at=now(),finished_at=NULL,"
-            "attempts=chaika.scheduled_sync_runs.attempts+1,error_code=NULL,next_retry_at=NULL",
-            (job.key, slot),
-        )
+        with db.transaction():
+            job_lock(db, job.key)
+            pending = db.execute(
+                "SELECT 1 FROM chaika.manual_sync_requests "
+                "WHERE job=%s AND state IN ('pending','running') LIMIT 1",
+                (job.key,),
+            ).fetchone()
+            if pending:
+                continue
+            previous = db.execute(
+                "SELECT status,next_retry_at FROM chaika.scheduled_sync_runs "
+                "WHERE job=%s AND slot=%s",
+                (job.key, slot),
+            ).fetchone()
+            if previous and (previous[0] == "succeeded" or (previous[1] and previous[1] > now)):
+                continue
+            db.execute(
+                "INSERT INTO chaika.scheduled_sync_runs(job,slot,status) VALUES(%s,%s,'running') "
+                "ON CONFLICT(job,slot) DO UPDATE SET status='running',"
+                "started_at=now(),finished_at=NULL,"
+                "attempts=chaika.scheduled_sync_runs.attempts+1,error_code=NULL,next_retry_at=NULL",
+                (job.key, slot),
+            )
         try:
             execute(job, slot, settings, stop)
         except Exception as error:
@@ -295,9 +312,12 @@ def main():
                             "error_code='interrupted',"
                             "finished_at=now(),next_retry_at=now() WHERE status='running'"
                         )
-                        while not stop.is_set() and collector.poll() is None:
-                            run_due(db, settings, stop)
-                            stop.wait(15)
+                        from app.manual_sync import heartbeat
+
+                        with heartbeat(settings, db, collector):
+                            while not stop.is_set() and collector.poll() is None:
+                                run_due(db, settings, stop, manual=True)
+                                stop.wait(15)
                     finally:
                         db.execute("SELECT pg_advisory_unlock(%s)", (LEADER_LOCK,))
             except psycopg.Error as error:
