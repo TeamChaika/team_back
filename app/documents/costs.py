@@ -4,7 +4,23 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, DecimalException, localcontext
 from zoneinfo import ZoneInfo
 
+from app.documents.recipe_costs import RecipeCosts, UnpricedRecipe
+
 ZONE = ZoneInfo("Europe/Simferopol")
+
+
+def stock_cost(stock):
+    if not stock:
+        return None, "missing_balance"
+    try:
+        quantity, value = Decimal(str(stock["amount"])), Decimal(str(stock["value"]))
+        if not quantity.is_finite() or not value.is_finite():
+            return None, "invalid_balance"
+        if quantity == 0 or value == 0 or (quantity > 0) != (value > 0):
+            return None, "nonpositive_balance"
+        return value / quantity, None
+    except (DecimalException, ValueError):
+        return None, "invalid_balance"
 
 
 def estimate(db, store_id, rows, *, at=None):
@@ -14,7 +30,13 @@ def estimate(db, store_id, rows, *, at=None):
         point = point.replace(tzinfo=ZONE)
     present = db.execute(
         "SELECT to_regclass('chaika.store_balance_reports') AS reports, "
-        "to_regclass('chaika.store_balance_items') AS items"
+        "to_regclass('chaika.store_balance_items') AS items, "
+        "to_regclass('chaika.products') AS products, "
+        "to_regclass('chaika.assembly_charts') AS charts, "
+        "to_regclass('chaika.assembly_chart_items') AS chart_items, "
+        "to_regclass('chaika.assembly_chart_scopes') AS scopes, "
+        "to_regclass('chaika.stores') AS stores, "
+        "to_regclass('chaika.corporate_nodes') AS nodes"
     ).fetchone()
     report = None
     if present["reports"] and present["items"]:
@@ -38,6 +60,18 @@ def estimate(db, store_id, rows, *, at=None):
                 (report["last_snapshot_id"], store_id, [str(r["product_id"]) for r in rows]),
             ).fetchall()
         }
+    recipes = None
+    if (
+        report
+        and not stale
+        and all(
+            present.get(key)
+            for key in ("products", "charts", "chart_items", "scopes", "stores", "nodes")
+        )
+    ):
+        recipes = RecipeCosts(
+            db, store_id, point.astimezone(ZONE), report["last_snapshot_id"], stock_cost
+        )
     result, known, unpriced = [], Decimal(0), 0
     with localcontext() as context:
         context.prec = 50
@@ -46,31 +80,33 @@ def estimate(db, store_id, rows, *, at=None):
             stock = balances.get(product)
             reason = "stale_balance" if stale else "missing_balance"
             unit, value = None, None
+            cost = None
+            method = "store_balance"
             if stock:
-                quantity, stock_value = Decimal(str(stock["amount"])), Decimal(str(stock["value"]))
-                if not quantity.is_finite() or not stock_value.is_finite():
-                    reason = "invalid_balance"
-                elif quantity == 0 or stock_value == 0 or (quantity > 0) != (stock_value > 0):
-                    reason = "nonpositive_balance"
-                else:
+                cost, reason = stock_cost(stock)
+            if cost is None and recipes:
+                metadata = recipes.product(product)
+                if metadata and metadata["type"] == "PREPARED":
                     try:
-                        cost = stock_value / quantity
-                        calculated = (cost * Decimal(str(row["amount"]))).quantize(
-                            Decimal("0.01"), rounding=ROUND_HALF_UP
-                        )
-                        calculated_unit = format(
-                            cost.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP), "f"
-                        )
-                        updated_total = known + calculated
+                        cost = recipes.resolve(product)
+                        method = "recipe"
+                    except UnpricedRecipe as exc:
+                        reason = exc.reason
                     except DecimalException:
-                        reason = "invalid_balance"
-                    else:
-                        value, unit, known, reason = (
-                            calculated,
-                            calculated_unit,
-                            updated_total,
-                            None,
-                        )
+                        reason = "invalid_recipe"
+            if cost is not None:
+                try:
+                    calculated = (cost * Decimal(str(row["amount"]))).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                    calculated_unit = format(
+                        cost.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP), "f"
+                    )
+                    updated_total = known + calculated
+                except DecimalException:
+                    reason = "invalid_recipe" if method == "recipe" else "invalid_balance"
+                else:
+                    value, unit, known, reason = calculated, calculated_unit, updated_total, None
 
             if value is None:
                 unpriced += 1
@@ -81,6 +117,7 @@ def estimate(db, store_id, rows, *, at=None):
                     "unit_cost": unit,
                     "sum": format(value, "f") if value is not None else None,
                     "reason": reason,
+                    "valuation_method": method if value is not None else None,
                 }
             )
     return {
