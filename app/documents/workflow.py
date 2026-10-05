@@ -8,7 +8,12 @@ from datetime import UTC, datetime
 from psycopg.types.json import Jsonb
 
 from app.documents.catalog import products
-from app.documents.costs import estimate
+from app.documents.costs import (
+    displayed_estimate,
+    estimate,
+    improved_estimate,
+    needs_current_estimate,
+)
 from app.documents.policy import actor, fail, identifier, invalid, require, stores_for, table
 from app.documents.reads import summary
 
@@ -332,6 +337,24 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
             if not queue:
                 enqueue(db, kind, doc)
         else:
+            approval_quote = None
+            if kind == "writeoff" and action == "confirm" and needs_current_estimate(doc):
+                quote_rows = db.execute(
+                    "SELECT product_id,amount FROM writeoffs_items "
+                    "WHERE writeoff_id=%s ORDER BY id",
+                    (doc["id"],),
+                ).fetchall()
+                approval_quote = {
+                    **improved_estimate(db, doc, quote_rows),
+                    "frozen_at_approval": True,
+                }
+                db.execute(
+                    "UPDATE writeoffs SET cost_estimate=%s WHERE id=%s",
+                    (
+                        Jsonb({**doc["cost_estimate"], "approval_estimate": approval_quote}),
+                        doc["id"],
+                    ),
+                )
             if kind == "waybill" and action == "confirm" and receipt_state == "rejected":
                 db.execute(
                     f"UPDATE {child} SET received_amount=NULL WHERE waybill_id=%s", (doc["id"],)
@@ -355,10 +378,17 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
                     doc["id"],
                 ),
             ).fetchone()
-            event(db, kind, doc, user["id"], action)
+            event(
+                db,
+                kind,
+                doc,
+                user["id"],
+                action,
+                {"approval_estimate": approval_quote} if approval_quote is not None else None,
+            )
         result = summary(kind, doc)
         if kind == "writeoff":
-            result["cost_estimate"] = doc.get("cost_estimate")
+            result["cost_estimate"] = displayed_estimate(doc.get("cost_estimate"))
         finish(db, key, result, "queued" if queue else "done")
         if queue:
             rows = db.execute(

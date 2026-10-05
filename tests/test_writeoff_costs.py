@@ -216,3 +216,142 @@ def test_real_snapshot_scope_duplicates_immutability_and_runtime_role(service): 
     finally:
         with service.database.connection() as db:
             db.execute("DROP SCHEMA chaika CASCADE")
+
+
+def test_recipe_runtime_role_and_observation_cutoff(service):  # noqa: F811
+    from pathlib import Path
+
+    ingredient, chart, snapshot, department, unit = [uuid4() for _ in range(5)]
+    with service.database.connection() as db:
+        db.execute("CREATE SCHEMA chaika")
+        for table, columns in {
+            "store_balance_reports": (
+                "source_id text,accounting_timestamp timestamp,"
+                "last_snapshot_id uuid,last_seen_at timestamptz"
+            ),
+            "store_balance_items": (
+                "snapshot_id uuid,product_id uuid,store_id uuid,amount numeric,sum numeric"
+            ),
+            "products": (
+                "source_id text,id uuid,type text,main_unit_id uuid,"
+                "present_in_latest boolean,deleted boolean,last_seen_at timestamptz"
+            ),
+            "stores": (
+                "source_id text,id uuid,parent_id uuid,present_in_latest boolean,"
+                "last_seen_at timestamptz"
+            ),
+            "corporate_nodes": (
+                "source_id text,id uuid,parent_id uuid,type text,"
+                "present_in_latest boolean,last_seen_at timestamptz"
+            ),
+            "assembly_charts": (
+                "source_id text,id uuid,product_id uuid,assembled_amount numeric,"
+                "details jsonb,date_from date,date_to date,"
+                "last_seen_at timestamptz,last_snapshot_id uuid"
+            ),
+            "assembly_chart_items": (
+                "source_id text,id uuid,chart_id uuid,product_id uuid,"
+                "amount_in numeric,details jsonb,present_in_latest boolean"
+            ),
+            "assembly_chart_scopes": (
+                "source_id text,chart_id uuid,business_date date,"
+                "present_in_latest boolean,last_snapshot_id uuid"
+            ),
+        }.items():
+            db.execute(f"CREATE TABLE chaika.{table} ({columns})")
+            db.execute(f"ALTER TABLE chaika.{table} ENABLE ROW LEVEL SECURITY")
+    try:
+        with service.database.connection() as db:
+            for file in ["0005_writeoff_cost_estimates.sql", "0006_writeoff_recipe_costs.sql"]:
+                migration = Path("migrations/documents", file).read_text()
+                db.execute(migration.replace("BEGIN;", "").replace("COMMIT;", ""))
+            db.execute(
+                "INSERT INTO chaika.store_balance_reports VALUES ('primary',"
+                "(now() AT TIME ZONE 'Europe/Simferopol')-interval '1 hour',%s,"
+                "now()-interval '1 hour')",
+                (snapshot,),
+            )
+            db.execute(
+                "INSERT INTO chaika.store_balance_items VALUES (%s,%s,%s,5,100)",
+                (snapshot, ingredient, SOURCE),
+            )
+            for pid, kind in [(PRODUCT, "PREPARED"), (ingredient, "GOODS")]:
+                db.execute(
+                    "INSERT INTO chaika.products VALUES ('primary',%s,%s,%s,true,false,"
+                    "now()-interval '1 hour')",
+                    (pid, kind, unit),
+                )
+            db.execute(
+                "INSERT INTO chaika.stores VALUES ('primary',%s,%s,true,now()-interval '1 hour')",
+                (SOURCE, department),
+            )
+            db.execute(
+                "INSERT INTO chaika.corporate_nodes VALUES ('primary',%s,NULL,"
+                "'DEPARTMENT',true,now()-interval '1 hour')",
+                (department,),
+            )
+            db.execute(
+                "INSERT INTO chaika.assembly_charts VALUES ('primary',%s,%s,2,"
+                '\'{"product_size_assembly_strategy":"COMMON"}\',current_date-1,NULL,'
+                "now()-interval '1 hour',%s)",
+                (chart, PRODUCT, snapshot),
+            )
+            db.execute(
+                "INSERT INTO chaika.assembly_chart_scopes VALUES ('primary',%s,"
+                "(now() AT TIME ZONE 'Europe/Simferopol')::date,true,%s)",
+                (chart, snapshot),
+            )
+            db.execute(
+                "INSERT INTO chaika.assembly_chart_items VALUES ('primary',%s,%s,%s,3,'{}',true)",
+                (uuid4(), chart, ingredient),
+            )
+            db.execute(
+                "INSERT INTO chaika.products VALUES ('foreign',%s,'GOODS',%s,true,false,now())",
+                (uuid4(), unit),
+            )
+            db.execute("SET LOCAL ROLE chaika_iiko_app")
+            assert db.execute("SELECT count(*) AS n FROM chaika.products").fetchone()["n"] == 2
+            assert estimate(db, SOURCE, [{"product_id": PRODUCT, "amount": 1}])["total"] == "30.00"
+            assert estimate(db, TARGET, [{"product_id": PRODUCT, "amount": 1}])["total"] is None
+
+        class RefreshBetweenStatements:
+            def __init__(self, connection):
+                self.connection = connection
+                self.refreshed = False
+
+            def execute(self, sql, params=None):
+                cursor = self.connection.execute(sql, params)
+                if "FROM chaika.assembly_charts c" in sql and not self.refreshed:
+                    self.refreshed = True
+                    with service.database.connection() as writer:
+                        writer.execute(
+                            "UPDATE chaika.assembly_charts SET assembled_amount=99,"
+                            "last_seen_at=now()+interval '1 hour'"
+                        )
+                        writer.execute("UPDATE chaika.assembly_chart_items SET amount_in=999")
+                return cursor
+
+        with service.database.connection() as db:
+            db.execute("SET LOCAL ROLE chaika_iiko_app")
+            concurrent = RefreshBetweenStatements(db)
+            assert (
+                estimate(concurrent, SOURCE, [{"product_id": PRODUCT, "amount": 1}])["total"]
+                == "30.00"
+            )
+            assert concurrent.refreshed
+        for assignment in [
+            "last_seen_at=now()+interval '1 hour'",
+            "last_snapshot_id=gen_random_uuid()",
+        ]:
+            with service.database.connection() as db:
+                db.execute(
+                    "UPDATE chaika.assembly_charts SET last_seen_at=now()-interval '1 hour',"
+                    "last_snapshot_id=%s,date_to=NULL",
+                    (snapshot,),
+                )
+                db.execute("UPDATE chaika.assembly_charts SET " + assignment)
+                db.execute("SET LOCAL ROLE chaika_iiko_app")
+                assert estimate(db, SOURCE, [{"product_id": PRODUCT, "amount": 1}])["total"] is None
+    finally:
+        with service.database.connection() as db:
+            db.execute("DROP SCHEMA chaika CASCADE")
