@@ -129,3 +129,31 @@ def estimate(db, store_id, rows, *, at=None):
         "known_total": format(known, ".2f"),
         "unpriced_count": unpriced,
     }
+
+
+def displayed_estimate(stored):
+    """An approval quote is frozen; original creation fields stay intact in storage."""
+    return stored.get("approval_estimate", stored) if stored else stored
+
+
+def needs_current_estimate(doc):
+    stored = doc.get("cost_estimate")
+    return bool(
+        stored
+        and stored.get("total") is None
+        and "approval_estimate" not in stored
+        and doc["status"] == "Created"
+        and doc["submission_state"] in {"idle", "failed"}
+    )
+
+
+def improved_estimate(db, doc, rows):
+    """Never replace an incomplete quote with equal or worse price coverage."""
+    current = estimate(db, doc["store_id"], rows)
+    if current["unpriced_count"] >= doc["cost_estimate"]["unpriced_count"]:
+        return doc["cost_estimate"]
+    return {
+        **current,
+        "refreshed": True,
+        "original_estimated_at": doc["cost_estimate"].get("estimated_at"),
+    }
