@@ -5,6 +5,7 @@ import signal
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from threading import Event
+from time import monotonic
 
 import httpx
 from psycopg.types.json import Jsonb
@@ -16,6 +17,7 @@ from app.documents.policy import identifier
 from app.documents.reads import ZONE
 from app.documents.service import DocumentService
 from app.documents.telegram import Telegram, deliver_notification, handle_update
+from app.documents.telegram_cleanup import deliver_cleanup
 from app.documents.telegram_link import queued_update
 
 log = logging.getLogger(__name__)
@@ -131,15 +133,25 @@ def poll(service, bot):
             )
 
 
+def drain_cleanup(service, bot):
+    """Drain a small recipient group promptly without starving dispatch or polling."""
+    deadline = monotonic() + 2
+    for _ in range(20):
+        if monotonic() >= deadline or not deliver_cleanup(service, bot):
+            break
+
+
 def process_jobs(service, bot, leader):
     recover_uncertain(service.database)
-    deliver_one(service)
     health = {}
     if bot:
         try:
             recover_bot_jobs(service)
+            drain_cleanup(service, bot)
             deliver_notification(service, bot)
             poll(service, bot)
+            # Bot approval committed during poll: clean every due recipient in this cycle.
+            drain_cleanup(service, bot)
         except Exception as error:
             # Telegram availability must not invalidate iiko worker liveness.
             # Only fixed diagnostic categories are persisted; URLs/tokens are not.
@@ -156,6 +168,8 @@ def process_jobs(service, bot, leader):
                     health["telegram_reason"] = category
                     break
             log.warning("Document Telegram unavailable (%s)", health)
+    # Existing cleanup and approvals received in this cycle precede slow iiko calls.
+    deliver_one(service)
     leader.execute(
         "INSERT INTO native_jobs (name,data) VALUES ('heartbeat',%s) "
         "ON CONFLICT (name) DO UPDATE SET data=excluded.data,updated_at=now()",
