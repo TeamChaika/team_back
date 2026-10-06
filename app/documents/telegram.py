@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from app.documents import reads
 from app.documents.messages import document_messages
 from app.documents.policy import actor, require
+from app.documents.telegram_cleanup import TelegramError, eligible, record_callback, record_sent
 
 
 class Telegram:
@@ -36,18 +37,26 @@ class Telegram:
             response = self.client.post(
                 method, data=fields, files={"photo": ("document.png", photo, "image/png")}
             )
-        if response.status_code != 200:
-            raise ValueError("Telegram request unavailable")
-        data = response.json()
-        if not isinstance(data, dict) or data.get("ok") is not True:
-            raise ValueError("Telegram request rejected")
+        try:
+            data = response.json()
+        except ValueError:
+            raise TelegramError(response.status_code) from None
+        if response.status_code != 200 or not isinstance(data, dict) or data.get("ok") is not True:
+            details = data if isinstance(data, dict) else {}
+            parameters = details.get("parameters")
+            parameters = parameters if isinstance(parameters, dict) else {}
+            raise TelegramError(
+                details.get("error_code", response.status_code),
+                details.get("description", ""),
+                parameters.get("retry_after"),
+            )
         return data.get("result")
 
     def close(self):
         self.client.close()
 
 
-def preview(bot, settings, chat_id, kind, doc):
+def preview(bot, settings, chat_id, kind, doc, *, service=None):
     prefix = "Waybill" if kind == "waybill" else "writeoff"
     section = "transfers" if kind == "waybill" else "writeoffs"
     buttons = {
@@ -83,6 +92,8 @@ def preview(bot, settings, chat_id, kind, doc):
         ]
     result = None
     for text, page, total in document_messages(kind, doc):
+        if service is not None and not eligible(service, kind, doc):
+            break
         payload = {
             "chat_id": chat_id,
             "text": text,
@@ -92,7 +103,9 @@ def preview(bot, settings, chat_id, kind, doc):
         if page == total:
             payload["reply_markup"] = buttons
         result = bot.call("sendMessage", **payload)
-    return result["message_id"]
+        if service is not None:
+            record_sent(service, bot, kind, doc, chat_id, result["message_id"])
+    return result["message_id"] if result else None
 
 
 def deliver_notification(service, bot):
@@ -140,8 +153,10 @@ def deliver_notification(service, bot):
         return True
     message_id = None
     try:
-        message_id = preview(bot, service.settings, recipient["telegram_id"], kind, data)
-        state = "sent"
+        message_id = preview(
+            bot, service.settings, recipient["telegram_id"], kind, data, service=service
+        )
+        state = "sent" if message_id is not None else "obsolete"
     except Exception:
         state = "unknown"  # Includes partial multipart delivery; do not automatically resend.
     with service.database.connection() as db:
@@ -174,11 +189,23 @@ def handle_update(service, bot, update):
         if (
             len(parts) == 3
             and parts[0] in prefixes
-            and all(p.isdigit() and 0 < int(p) < 2**63 for p in parts[1:])
+            and parts[1].isdigit()
+            and 0 < int(parts[1]) < 2**63
+            and parts[2].isdigit()
+            and 0 < int(parts[2]) < 2**31
         ):
             kind, action = prefixes[parts[0]]
             doc_id, version = map(int, parts[1:])
             user_id = callback["from"]["id"]
+            # A callback gives the original chat of a legacy preview; never guess it
+            # from today's profile binding. Older callbacks without message are valid too.
+            record_callback(
+                service,
+                kind,
+                {"id": doc_id, "version": version},
+                data,
+                callback.get("message"),
+            )
             key = uuid5(
                 NAMESPACE_URL,
                 f"chaika:{user_id}:{callback['id']}:{kind}:{doc_id}:{version}:{action}",
@@ -247,7 +274,7 @@ def handle_update(service, bot, update):
             failures += 1
             continue
         for doc in rows:
-            preview(bot, service.settings, chat_id, kind, doc)
+            preview(bot, service.settings, chat_id, kind, doc, service=service)
             count += 1
     if failures or not count:
         bot.call(

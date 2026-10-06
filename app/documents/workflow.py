@@ -16,6 +16,7 @@ from app.documents.costs import (
 )
 from app.documents.policy import actor, fail, identifier, invalid, require, stores_for, table
 from app.documents.reads import summary
+from app.documents.telegram_cleanup import approved
 
 
 def validate(db, kind, body):
@@ -391,6 +392,7 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
             result["cost_estimate"] = displayed_estimate(doc.get("cost_estimate"))
         finish(db, key, result, "queued" if queue else "done")
         if queue:
+            approved(db, kind, doc)
             rows = db.execute(
                 f"SELECT product_id,amount FROM {child} WHERE {kind}_id=%s ORDER BY id",
                 (doc["id"],),

@@ -44,6 +44,7 @@ def database():
         db.execute(Path("migrations/documents/0001_native_runtime.sql").read_text())
         db.execute(Path("migrations/documents/0004_receipt_discrepancies.sql").read_text())
         db.execute(Path("migrations/documents/0002_telegram_link.sql").read_text())
+        db.execute(Path("migrations/documents/0007_telegram_cleanup.sql").read_text())
     database = DocumentDatabase(test_url)
     yield database
     database.close()

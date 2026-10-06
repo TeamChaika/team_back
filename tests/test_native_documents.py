@@ -100,6 +100,7 @@ def database():
         db.execute(Path("migrations/documents/0001_native_runtime.sql").read_text())
         db.execute(Path("migrations/documents/0004_receipt_discrepancies.sql").read_text())
         db.execute(Path("migrations/documents/0005_writeoff_cost_estimates.sql").read_text())
+        db.execute(Path("migrations/documents/0007_telegram_cleanup.sql").read_text())
     database = DocumentDatabase(test_url)
     yield database
     database.close()
@@ -110,7 +111,8 @@ def service(database):
     with database.connection() as db:
         db.execute(
             "TRUNCATE stores,authentication_user,portal_access,writeoffs_reasons,"
-            "native_catalog,native_jobs,native_bot_updates RESTART IDENTITY CASCADE"
+            "native_catalog,native_jobs,native_bot_updates,native_telegram_messages,"
+            "native_telegram_cleanup RESTART IDENTITY CASCADE"
         )
         db.execute(
             "INSERT INTO stores (id,name) VALUES (%s,'Sender'),(%s,'Receiver')", (SOURCE, TARGET)
@@ -510,9 +512,18 @@ def test_notifications_do_not_resend_unknown_or_already_queued(service):
     assert deliver_notification(service, bot)
     assert not deliver_notification(service, bot)
     assert bot.calls == 1
-    act(service, create(service))
-    assert deliver_notification(service, bot)
+    queued = act(service, create(service))
+    saved = detail(service, queued)
+    # Approval proactively retires pending notices in its own transaction.
+    assert not deliver_notification(service, bot)
     assert bot.calls == 1
+    with service.database.connection(readonly=True) as db:
+        assert db.execute(
+            "SELECT state FROM portal_documents_notification WHERE document_id=%s",
+            (queued["id"],),
+        ).fetchone()["state"] == "obsolete"
+    assert detail(service, queued) == saved
+    assert saved["submission_state"] == "queued"
 
 
 def test_old_telegram_buttons_do_not_approve_and_new_buttons_enqueue(service):
