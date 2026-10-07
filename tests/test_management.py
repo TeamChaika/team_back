@@ -106,7 +106,7 @@ def test_admin_mutation_checks_origin_before_writing(restricted):
     "fields",
     [
         dict(sections=["unknown"]),
-        dict(sections=["sales"]),
+        dict(sections=["sales"], warehouse_scope_mode="all", warehouse_ids=[]),
         dict(sections=["deposits"], deposits_create=True),
         dict(sections=[], deposits_all=True),
         dict(sections=["deposits", "deposits"]),

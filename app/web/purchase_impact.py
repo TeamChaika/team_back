@@ -339,6 +339,9 @@ def analysis_scope(scope, price_department, selling_ids, selected=None, all_depa
 def read_purchase_impact(
     db, scope, spec, selection, analysis_department_id=None, all_departments=False
 ):
+    from app.web.warehouse_analytics import require_department_report
+
+    require_department_report(scope)
     start, end = recent_period()
     product_id, store_id, _, _ = selection
     if store_id is not None and store_id not in scope.store_ids:

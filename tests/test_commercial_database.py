@@ -29,6 +29,7 @@ def database():
             with psycopg.connect(url, autocommit=True) as db:
                 db.execute("CREATE ROLE chaika_iiko_app")
                 db.execute("CREATE SCHEMA chaika_iiko_documents")
+                db.execute("CREATE SCHEMA chaika")
                 db.execute("SET search_path=chaika_iiko_documents,pg_catalog")
                 db.execute("CREATE TABLE stores(id uuid PRIMARY KEY,name text)")
                 db.execute(
@@ -40,6 +41,12 @@ def database():
                     "is_portal_admin boolean,sections jsonb)"
                 )
                 db.execute(
+                    "CREATE VIEW chaika.portal_warehouse_access AS SELECT id AS user_id, "
+                    "'all'::text AS warehouse_scope_mode,NULL::text AS source_id,"
+                    "NULL::uuid AS store_id "
+                    "FROM chaika_iiko_documents.portal_access WHERE active"
+                )
+                db.execute(
                     "CREATE TABLE portal_documents_userlink(user_id bigint PRIMARY KEY,"
                     "supabase_id uuid)"
                 )
@@ -48,6 +55,9 @@ def database():
                     "updated_at timestamptz DEFAULT now())"
                 )
                 db.execute(Path("migrations/documents/0008_commercial_invoices.sql").read_text())
+                db.execute(
+                    Path("migrations/documents/0009_commercial_counterparties.sql").read_text()
+                )
             database = DocumentDatabase(url)
             yield database
             database.close()

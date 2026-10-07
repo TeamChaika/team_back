@@ -70,6 +70,9 @@ def summarize_prices(prices, graph, sales, products, coverage, start, end, recip
 
 
 def add_weekly_impacts(db, scope, report):
+    from app.web.warehouse_analytics import require_department_report
+
+    require_department_report(scope)
     """Enrich authorized price rows without per-product database or iiko requests."""
     start, end = recent_period()
     prices = report["rows"]

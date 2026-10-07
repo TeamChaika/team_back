@@ -16,7 +16,12 @@ from app.sync_indicator_filters import read_filters
 from app.web.balances import product_suggestions, read_balances
 from app.web.coverage import partial_days
 from app.web.overview import read_overview
-from app.web.permissions import ANALYTICS_SECTIONS, IIKO_SECTIONS, sections_for
+from app.web.permissions import (
+    ANALYTICS_SECTIONS,
+    IIKO_SECTIONS,
+    require_warehouse_section,
+    sections_for,
+)
 from app.web.purchase_impact import read_purchase_impact
 from app.web.purchase_impact_summary import add_weekly_impacts
 from app.web.purchase_prices import read_purchase_prices
@@ -35,10 +40,15 @@ class Scope:
     rms_ids: tuple[str, ...]
 
     @property
+    def warehouse_restricted(self):
+        return self.user.get("warehouse_scope_mode", "all") == "selected"
+
+    @property
     def unrestricted(self):
         return (
             self.user.get("all_departments", self.user["role"] == "owner")
             and not self.selection_ids
+            and not self.warehouse_restricted
         )
 
     @property
@@ -75,6 +85,9 @@ class Repository:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        from app.web.warehouse_sales import WarehouseSales
+
+        self.warehouse_sales = WarehouseSales(settings)
         self._pool = ConnectionPool(
             settings.database_url.get_secret_value(),
             kwargs={
@@ -125,7 +138,7 @@ class Repository:
             # Queue independent reads before fetching: one network round trip, fresh permissions.
             users = db.execute(
                 "SELECT id,display_name,role,sections,is_portal_admin,all_departments,"
-                "password_change_required FROM "
+                "password_change_required,warehouse_scope_mode FROM "
                 "chaika.web_users WHERE id=%s AND active",
                 (user_id,),
             )
@@ -139,7 +152,7 @@ class Repository:
                 (user_id,),
             )
             store_rows = db.execute(
-                "SELECT id,parent_id FROM chaika.stores WHERE source_id='primary'"
+                "SELECT id,parent_id,name FROM chaika.stores WHERE source_id='primary'"
             )
             rms_rows = db.execute(
                 "SELECT source_id,department_id FROM chaika.rms_bindings WHERE "
@@ -153,23 +166,48 @@ class Repository:
             if not IIKO_SECTIONS.intersection(sections_for(user)):
                 raise HTTPException(403, "Этой учётной записи доступны только депозиты.")
             nodes = node_rows.fetchall()
-            if user.get("all_departments", user["role"] == "owner"):
-                allowed = {
-                    n["id"]
-                    for n in nodes
-                    if n["type"] in {"DEPARTMENT", "CENTRALSTORE", "MANUFACTURE"}
+            stores = store_rows.fetchall()
+            parents = {n["id"]: n["parent_id"] for n in nodes + stores}
+            department_grants = {r["department_id"] for r in grants.fetchall()}
+            all_departments = user.get("all_departments", user["role"] == "owner")
+            department_nodes = {
+                n["id"] for n in nodes if n["type"] in {"DEPARTMENT", "CENTRALSTORE", "MANUFACTURE"}
+            }
+            allowed = department_nodes if all_departments else department_grants
+            restricted = user.get("warehouse_scope_mode", "all") == "selected"
+            warehouse_ids = set()
+            if restricted:
+                warehouse_ids = {
+                    r["store_id"]
+                    for r in db.execute(
+                        "SELECT store_id FROM chaika.web_warehouse_access WHERE user_id=%s "
+                        "AND source_id='primary'",
+                        (user_id,),
+                    ).fetchall()
                 }
-            else:
-                allowed = {r["department_id"] for r in grants.fetchall()}
-            if not allowed or not set(selection).issubset(allowed):
+                # Warehouse grants provide parent names for navigation only. Existing
+                # explicit department grants remain an upper bound when present.
+                containing = {
+                    department
+                    for department in department_nodes
+                    if any(has_store_scope(store, parents, {department}) for store in warehouse_ids)
+                }
+                allowed = (
+                    containing & allowed if (all_departments or department_grants) else containing
+                )
+                user["warehouse_ids"] = sorted(warehouse_ids, key=str)
+            if (not allowed and not restricted) or not set(selection).issubset(allowed):
                 raise HTTPException(403, "Нет доступа к выбранному ресторану.")
             departments = tuple(
                 sorted((n for n in nodes if n["id"] in allowed), key=lambda n: n["name"] or "")
             )
-            stores = store_rows.fetchall()
-            parents = {n["id"]: n["parent_id"] for n in nodes + stores}
             visible = set(selection) if selection else allowed
-            store_ids = tuple(s["id"] for s in stores if has_store_scope(s["id"], parents, visible))
+            store_ids = tuple(
+                s["id"]
+                for s in stores
+                if has_store_scope(s["id"], parents, visible)
+                and (not restricted or s["id"] in warehouse_ids)
+            )
             rms = rms_rows.fetchall()
             rms_ids = tuple(r["source_id"] for r in rms if r["department_id"] in visible)
             return Scope(
@@ -198,7 +236,7 @@ class Repository:
         with self.connection() as db:
             user = db.execute(
                 "SELECT id,display_name,role,sections,is_portal_admin,all_departments,"
-                "password_change_required FROM "
+                "password_change_required,warehouse_scope_mode FROM "
                 "chaika.web_users WHERE id=%s AND active",
                 (user_id,),
             ).fetchone()
@@ -208,9 +246,11 @@ class Repository:
             return Scope(user, (), None, (), ())
         if not IIKO_SECTIONS.intersection(sections_for(user)):
             return Scope(user, (), None, (), ())
-        if not ANALYTICS_SECTIONS.intersection(sections_for(user)) and not user.get(
-            "all_departments", user["role"] == "owner"
-        ):
+        if user.get("warehouse_scope_mode", "all") == "selected":
+            return self.scope(user_id)
+        if not (ANALYTICS_SECTIONS - {"invoices", "outgoing"}).intersection(
+            sections_for(user)
+        ) and not user.get("all_departments", user["role"] == "owner"):
             with self.connection() as db:
                 analytics_grant = db.execute(
                     "SELECT department_id FROM chaika.web_department_access WHERE user_id=%s "
@@ -244,11 +284,11 @@ class Repository:
             )
 
     def metadata(self, scope):
-        if not scope.departments:
+        if not scope.departments or scope.warehouse_restricted:
             return serial(
                 {
                     "user": scope.user,
-                    "departments": [],
+                    "departments": scope.departments,
                     "sales_dates": [],
                     "balance_dates": [],
                 }
@@ -273,6 +313,9 @@ class Repository:
         )
 
     def overview(self, scope, start: date, end: date, granularity: str, *, live_bundle=None):
+        require_warehouse_section(scope, "overview")
+        if scope.warehouse_restricted:
+            return serial(self.warehouse_sales.overview(scope, start, end, granularity))
         with self.connection(repeatable=True) as db:
             return serial(
                 read_overview(db, scope, start, end, granularity, live_bundle=live_bundle)
@@ -289,44 +332,54 @@ class Repository:
         dish_name=None,
         live_bundle=None,
     ):
+        require_warehouse_section(scope, "sales")
         if kind not in {"daily", "dishes", "payments", "discounts", "returns", "waiters", "hours"}:
             raise HTTPException(404, "Отчёт не найден.")
-        with self.connection() as db:
-            coverage = db.execute(
-                "SELECT d.business_date,s.checks,r.observed_at FROM chaika.sales_report_days d "
-                "JOIN chaika.sales_report_sets s ON s.id=d.current_set_id "
-                "JOIN chaika.sales_reports r ON r.set_id=d.current_set_id "
-                "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s "
-                "AND r.kind=%s ORDER BY d.business_date",
-                (start, end, kind),
-            ).fetchall()
-            loaded_dates = [row["business_date"] for row in coverage]
-            result = db.execute(
-                "SELECT d.business_date,r.id AS report_id,r.observed_at,s.reviewed,r.request, "
-                "x.ordinal,x.department_id,n.name AS department,x.revenue,x.cost,x.checks,x.guests,"
-                "x.discount,x.return_sum,x.quantity,x.dimensions "
-                "FROM chaika.sales_report_days d JOIN chaika.sales_report_sets s ON "
-                "s.id=d.current_set_id "
-                "JOIN chaika.sales_reports r ON r.set_id=s.id JOIN "
-                "chaika.sales_report_rows x ON x.report_id=r.id "
-                "LEFT JOIN chaika.corporate_nodes n ON n.source_id=d.source_id AND "
-                "n.id=x.department_id "
-                "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s AND r.kind=%s "
-                "AND x.department_id=ANY(%s::uuid[]) "
-                "AND (r.kind<>'discounts' OR "
-                "NULLIF(BTRIM(x.dimensions->>'ItemSaleEventDiscountType'),'') IS NOT NULL "
-                "OR COALESCE(x.discount,0)<>0) "
-                "AND (%s::text IS NULL OR x.dimensions->>'DishId'=%s) "
-                "AND (%s::text IS NULL OR (NULLIF(x.dimensions->>'DishId','') IS NULL "
-                "AND COALESCE(x.dimensions->>'DishName','')=%s)) "
-                "ORDER BY d.business_date,x.ordinal "
-                "LIMIT 20001",
-                (start, end, kind, scope.ids, dish_id, dish_id, dish_name, dish_name),
-            ).fetchall()
-            if len(result) > 20000:
-                raise HTTPException(
-                    413, "Слишком много строк. Выберите меньший период или один ресторан."
-                )
+        if scope.warehouse_restricted:
+            coverage, result = self.warehouse_sales.sales(
+                scope, kind, start, end, dish_id=dish_id, dish_name=dish_name
+            )
+            loaded_dates = sorted({row["business_date"] for row in coverage})
+            live_bundle = None
+        else:
+            with self.connection() as db:
+                coverage = db.execute(
+                    "SELECT d.business_date,s.checks,r.observed_at FROM chaika.sales_report_days d "
+                    "JOIN chaika.sales_report_sets s ON s.id=d.current_set_id "
+                    "JOIN chaika.sales_reports r ON r.set_id=d.current_set_id "
+                    "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s "
+                    "AND r.kind=%s ORDER BY d.business_date",
+                    (start, end, kind),
+                ).fetchall()
+                loaded_dates = [row["business_date"] for row in coverage]
+                result = db.execute(
+                    "SELECT d.business_date,r.id AS report_id,r.observed_at,s.reviewed,r.request, "
+                    "x.ordinal,x.department_id,n.name AS department,"
+                    "x.revenue,x.cost,x.checks,x.guests,"
+                    "x.discount,x.return_sum,x.quantity,x.dimensions "
+                    "FROM chaika.sales_report_days d JOIN chaika.sales_report_sets s ON "
+                    "s.id=d.current_set_id "
+                    "JOIN chaika.sales_reports r ON r.set_id=s.id JOIN "
+                    "chaika.sales_report_rows x ON x.report_id=r.id "
+                    "LEFT JOIN chaika.corporate_nodes n ON n.source_id=d.source_id AND "
+                    "n.id=x.department_id "
+                    "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s "
+                    "AND r.kind=%s "
+                    "AND x.department_id=ANY(%s::uuid[]) "
+                    "AND (r.kind<>'discounts' OR "
+                    "NULLIF(BTRIM(x.dimensions->>'ItemSaleEventDiscountType'),'') IS NOT NULL "
+                    "OR COALESCE(x.discount,0)<>0) "
+                    "AND (%s::text IS NULL OR x.dimensions->>'DishId'=%s) "
+                    "AND (%s::text IS NULL OR (NULLIF(x.dimensions->>'DishId','') IS NULL "
+                    "AND COALESCE(x.dimensions->>'DishName','')=%s)) "
+                    "ORDER BY d.business_date,x.ordinal "
+                    "LIMIT 20001",
+                    (start, end, kind, scope.ids, dish_id, dish_id, dish_name, dish_name),
+                ).fetchall()
+                if len(result) > 20000:
+                    raise HTTPException(
+                        413, "Слишком много строк. Выберите меньший период или один ресторан."
+                    )
         if live_bundle is not None:
             from app.web.live_sales import report_coverage, report_rows
 
@@ -483,6 +536,7 @@ class Repository:
 
     def resource_query(self, scope, resource):
         """All expressions below are fixed code; external values are bound parameters."""
+        require_warehouse_section(scope, resource)
         stores, params = list(scope.store_ids), []
         guard = "true"
         columns = []
@@ -769,7 +823,21 @@ class Repository:
             ),
         }
         items, columns, provenance = [], [], None
-        with self.connection() as db:
+        with self.connection(repeatable=True) as db:
+            if scope.warehouse_restricted:
+                # The list/header read used another connection. Recheck against the
+                # same snapshot as all detail rows in case a sync moved a document
+                # to another warehouse between these reads.
+                spec = self.resource_query(scope, resource)
+                visible_now = db.execute(
+                    "SELECT t.id FROM "
+                    + spec["base"]
+                    + " WHERE t.source_id='primary' AND t.id=%s AND "
+                    + spec["guard"],
+                    [item_id, *spec["params"]],
+                ).fetchone()
+                if not visible_now:
+                    raise HTTPException(404, "Документ не найден или недоступен.")
             if resource in specs:
                 table, parent, order, fields, columns = specs[resource]
                 order = ",".join("i." + k for k in order.split(","))
@@ -844,6 +912,7 @@ class Repository:
             return serial(product_suggestions(db, scope, q, store_id))
 
     def events(self, scope, start, end, q="", offset=0):
+        require_warehouse_section(scope, "events")
         params = [list(scope.rms_ids), start, end]
         extra = ""
         if q:
@@ -906,6 +975,7 @@ class Repository:
             )
 
     def status(self, scope):
+        require_warehouse_section(scope, "status")
         with self.connection() as db:
             coverage = db.execute(
                 "SELECT d.source_id,n.name AS restaurant,min(d.event_date) AS date_from,"

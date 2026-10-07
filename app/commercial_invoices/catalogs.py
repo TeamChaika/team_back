@@ -91,6 +91,13 @@ def parse_counterparties(content):
 
 def refresh(service):
     """One license session, GET dictionaries only; a failed read preserves all old caches."""
+    timestamp = datetime.now(UTC)
+    if getattr(service, "counterparty_provider", None) is not None:
+        # Use the same clock as verified_at, including deployments on another host.
+        with service.database.connection(readonly=True) as db:
+            timestamp = db.execute("SELECT clock_timestamp() AS started_at").fetchone()[
+                "started_at"
+            ]
     with service.provider.session() as (client, token):
         products = _get(
             client,
@@ -107,8 +114,29 @@ def refresh(service):
         counterparties = _get(client, token, "suppliers", (("includeDeleted", "false"),))
     product_rows = parse_products(products, units)
     counterparty_rows = parse_counterparties(counterparties)
-    timestamp = datetime.now(UTC)
     with service.database.connection() as db:
+        if getattr(service, "counterparty_provider", None) is not None:
+            from app.commercial_invoices.counterparties import CATALOG_LOCK
+            from app.commercial_invoices.counterparty_transport import source_key
+
+            db.execute("SELECT pg_advisory_xact_lock(%s)", (CATALOG_LOCK,))
+            local = db.execute(
+                "SELECT data,verified_at FROM commercial_counterparties WHERE source_key=%s",
+                (source_key(service.counterparty_provider),),
+            ).fetchall()
+            by_id = {row["id"]: row for row in counterparty_rows}
+            for row in local:
+                data = row["data"]
+                if data["id"] in by_id:
+                    # Keep current iiko core fields; KPP/type were entered on the site.
+                    if data["inn"] == by_id[data["id"]]["inn"]:
+                        by_id[data["id"]].update(
+                            {key: data[key] for key in ("kpp", "entity_type", "local_fields")}
+                        )
+                elif row["verified_at"] >= timestamp:
+                    # A confirmation concurrent with this fetch must survive publication.
+                    by_id[data["id"]] = data
+            counterparty_rows = list(by_id.values())
         for name, rows in {
             "commercial_products": product_rows,
             "commercial_purchase_counterparties": counterparty_rows,

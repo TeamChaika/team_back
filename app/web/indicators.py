@@ -31,6 +31,7 @@ from app.services.iiko_auth import IikoAuthService
 from app.sync_references import reference_lock
 from app.sync_sales_history import FixedReport, error_code
 from app.web.coverage import ZONE
+from app.web.warehouse_analytics import warehouse_ids
 
 log = logging.getLogger(__name__)
 FILTERS = {
@@ -143,12 +144,17 @@ METRIC_INPUTS = {
 }
 
 
-def request_body(query, ids, fields, start, end):
+def request_body(query, ids, fields, start, end, *, stores=None):
     filters = {
         FILTERS[key][1]: {"filterType": "IncludeValues", "values": values}
         for key, values in query.effective_filters().items()
     }
     filters["Department.Id"] = {"filterType": "IncludeValues", "values": sorted(ids)}
+    if stores is not None:
+        if not stores:
+            raise HTTPException(403, "Нет доступных складов.")
+        # Authorization is injected after user filters and cannot be removed by them.
+        filters["Store.Id"] = {"filterType": "IncludeValues", "values": sorted(stores)}
     filters["OpenDate.Typed"] = {
         "filterType": "DateRange",
         "from": f"{start}T00:00:00",
@@ -237,12 +243,12 @@ def parse_totals(rows, inputs):
     return result
 
 
-def fetch_values(settings, query, ids, inputs):
+def fetch_values(settings, query, ids, inputs, *, stores=None):
     # Never average daily percentages or daily time averages: iiko aggregates the whole range.
     chunks = [inputs[i : i + 6] for i in range(0, len(inputs), 6)]
     periods = [(query.start, query.end), (query.previous_start, query.previous_end)]
     bodies = [
-        request_body(query, ids, [(BASE | EXTRA)[k] for k in chunk], start, end)
+        request_body(query, ids, [(BASE | EXTRA)[k] for k in chunk], start, end, stores=stores)
         for start, end in periods
         for chunk in chunks
     ]
@@ -254,6 +260,28 @@ def fetch_values(settings, query, ids, inputs):
             total.update(parse_totals(reports[index * len(chunks) + offset], chunk))
         values.append(calculate(total))
     return {"values": values, "observed_at": datetime.now(UTC)}
+
+
+def fetch_warehouse_options(settings, query, ids, stores, field):
+    """Capture only options represented in authorized sale rows, by UUID."""
+    body = request_body(query, ids, ["DishAmountInt"], query.start, query.end, stores=stores)
+    dimension = FILTERS[field][1]
+    body["filters"].pop(dimension, None)
+    body["groupByRowFields"] = ["Store.Id", dimension]
+    reports = collect_reports(settings, [body])
+    if len(reports) != 1 or len(reports[0]) > 20000:
+        raise ValueError("Invalid warehouse filter options")
+    values = set()
+    for row in reports[0]:
+        if str(row.get("Store.Id")) not in stores:
+            raise ValueError("Warehouse filter options scope mismatch")
+        value = row.get(dimension)
+        if value is not None:
+            value = str(value) if not isinstance(value, bool) else str(value).upper()
+            if not 1 <= len(value) <= 500:
+                raise ValueError("Invalid warehouse filter value")
+            values.add(value)
+    return {"values": sorted(values), "sync": {"observed_at": datetime.now(UTC)}}
 
 
 class IndicatorService:
@@ -268,16 +296,71 @@ class IndicatorService:
     def close(self):
         self.executor.shutdown(wait=True, cancel_futures=True)
 
-    def _fetch(self, query, ids, inputs):
+    def _fetch(self, query, ids, inputs, stores=None):
         if self.session_unknown:
             raise IikoError("iiko_session_unknown", "Выход из iiko не подтверждён.")
         try:
-            return self.fetch(self.settings, query, ids, inputs), self.clock()
+            options = {"stores": stores} if stores is not None else {}
+            return self.fetch(self.settings, query, ids, inputs, **options), self.clock()
         except Exception as error:
             if error_code(error) == "iiko_session_unknown":
                 self.session_unknown = True
             log.warning("Indicator unavailable: %s", error_code(error))
             raise
+
+    def _fetch_options(self, query, ids, stores, field):
+        if self.session_unknown:
+            raise IikoError("iiko_session_unknown", "Выход из iiko не подтверждён.")
+        try:
+            return fetch_warehouse_options(self.settings, query, ids, stores, field), self.clock()
+        except Exception as error:
+            if error_code(error) == "iiko_session_unknown":
+                self.session_unknown = True
+            raise
+
+    def warehouse_options(self, scope, query, field):
+        """Bounded asynchronous cache; pending/error results never use venue options."""
+        if field not in FILTERS:
+            raise HTTPException(422, "Неизвестный фильтр.")
+        stores = warehouse_ids(scope)
+        ids = sorted(str(value) for value in scope.ids)
+        if stores is None or not ids:
+            raise HTTPException(403, "Нет доступных складов.")
+        key = json.dumps(
+            ["warehouse_options", ids, stores, field, query.model_dump(mode="json")], sort_keys=True
+        )
+        with self.guard:
+            entry = self.cache.get(key)
+            if entry and entry[0].done():
+                future, failed_at = entry
+                if future.exception():
+                    failed_at = failed_at if failed_at is not None else self.clock()
+                    self.cache[key] = (future, failed_at)
+                    expired = self.clock() - failed_at > 30
+                else:
+                    expired = self.clock() - future.result()[1] > 300
+                if expired:
+                    del self.cache[key]
+                    entry = None
+            if not entry:
+                if sum(not future.done() for future, _ in self.cache.values()) >= 48:
+                    raise HTTPException(429, "Очередь iiko занята. Повторите через минуту.")
+                future = self.executor.submit(self._fetch_options, query, ids, stores, field)
+                self.cache[key] = entry = (future, None)
+            self.cache.move_to_end(key)
+            for old in list(self.cache):
+                if len(self.cache) <= 256:
+                    break
+                if self.cache[old][0].done():
+                    del self.cache[old]
+            future = entry[0]
+        if not future.done():
+            return {"values": [], "sync": None, "status": "loading", "retry_after": 2}
+        try:
+            result, _ = future.result()
+            return {**result, "status": "ready"}
+        except Exception:
+            return {"values": [], "sync": None, "status": "unavailable"}
 
     def _job(self, scope, query, metric):
         if metric is not None and metric not in METRIC_INPUTS:
@@ -285,10 +368,12 @@ class IndicatorService:
         ids = sorted(str(value) for value in scope.ids)
         if not ids:
             raise HTTPException(403, "Нет доступных ресторанов.")
+        stores = warehouse_ids(scope)
         inputs = tuple(sorted(METRIC_INPUTS[metric] if metric else BASE | EXTRA))
         key = json.dumps(
             [
                 ids,
+                stores,
                 query.model_dump(mode="json", exclude={"day", "direct", "filters"})
                 | {"filters": query.effective_filters()},
                 inputs,
@@ -320,7 +405,7 @@ class IndicatorService:
                 pending = sum(not f.done() for f, _ in self.cache.values())
                 if pending >= 48:
                     raise HTTPException(429, "Очередь iiko занята. Повторите через минуту.")
-                future = self.executor.submit(self._fetch, query, ids, inputs)
+                future = self.executor.submit(self._fetch, query, ids, inputs, stores)
                 self.cache[key] = entry = (future, None)
             self.cache.move_to_end(key)
             for old in list(self.cache):

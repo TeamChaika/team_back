@@ -5,7 +5,7 @@ import json
 
 from psycopg.types.json import Jsonb
 
-from app.documents.policy import fail, identifier, invalid, profile
+from app.documents.policy import fail, identifier, invalid, profile, warehouse_grant_guard
 
 SECTIONS = {"purchase": "invoices", "sale": "outgoing"}
 ACTIONS = {"view", "create", "edit", "submit"}
@@ -36,7 +36,7 @@ def stores_for(db, user_id, kind, action="view"):
         for r in db.execute(
             (
                 "SELECT store_id FROM commercial_invoice_grants WHERE user_id=%s "
-                "AND kind=%s AND actions @> %s"
+                "AND kind=%s AND actions @> %s" + warehouse_grant_guard("commercial_invoice_grants")
             ),
             (user_id, kind, Jsonb([action])),
         ).fetchall()

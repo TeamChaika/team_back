@@ -190,6 +190,9 @@ def build_overview(scope, start, end, grain, coverage, daily, dishes):
 
 
 def read_overview(db, scope, start: date, end: date, grain: str, *, live_bundle=None):
+    from app.web.warehouse_analytics import require_department_report
+
+    require_department_report(scope)
     previous_start = start - timedelta(days=(end - start).days + 1)
     base = (
         " FROM chaika.sales_report_days d "

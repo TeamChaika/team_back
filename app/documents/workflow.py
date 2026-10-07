@@ -14,9 +14,36 @@ from app.documents.costs import (
     improved_estimate,
     needs_current_estimate,
 )
-from app.documents.policy import actor, fail, identifier, invalid, require, stores_for, table
+from app.documents.policy import (
+    actor,
+    fail,
+    identifier,
+    invalid,
+    require,
+    stores_for,
+    table,
+    warehouse_grant_guard,
+)
 from app.documents.reads import summary
 from app.documents.telegram_cleanup import approved
+
+
+def has_receipt_approver(db, store_id):
+    """Discrepancies require a sender who still has effective edit authority."""
+    return bool(
+        db.execute(
+            "SELECT 1 FROM portal_documents_grant g "
+            "JOIN authentication_user u ON u.id=g.user_id "
+            "LEFT JOIN portal_documents_userlink l ON l.user_id=u.id "
+            "LEFT JOIN portal_access p ON p.id=l.supabase_id "
+            "WHERE g.kind='waybill' AND g.store_id=%s AND g.actions @> '[\"edit\"]'::jsonb "
+            "AND u.is_active AND ((l.supabase_id IS NULL AND u.telegram_id IS NOT NULL) "
+            "OR (p.active AND p.sections @> '[\"transfers\"]'::jsonb))"
+            + warehouse_grant_guard("portal_documents_grant", alias="g")
+            + " LIMIT 1",
+            (store_id,),
+        ).fetchone()
+    )
 
 
 def validate(db, kind, body):
@@ -210,19 +237,7 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
             discrepancy = any(
                 r["amount"] != o["amount"] for r, o in zip(receipt_rows, original, strict=True)
             )
-            if (
-                discrepancy
-                and not db.execute(
-                    "SELECT 1 FROM portal_documents_grant g "
-                    "JOIN authentication_user u ON u.id=g.user_id "
-                    "LEFT JOIN portal_documents_userlink l ON l.user_id=u.id "
-                    "LEFT JOIN portal_access p ON p.id=l.supabase_id "
-                    "WHERE g.kind='waybill' AND g.store_id=%s AND g.actions @> '[\"edit\"]'::jsonb "
-                    "AND u.is_active AND ((l.supabase_id IS NULL AND u.telegram_id IS NOT NULL) "
-                    "OR (p.active AND p.sections @> '[\"transfers\"]'::jsonb)) LIMIT 1",
-                    (doc["store_id"],),
-                ).fetchone()
-            ):
+            if discrepancy and not has_receipt_approver(db, doc["store_id"]):
                 fail(
                     409,
                     "У отправителя нет активного согласующего с правом изменения накладных. "

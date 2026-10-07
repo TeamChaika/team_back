@@ -3,6 +3,7 @@
 import json
 import logging
 
+from app.commercial_invoices.counterparty_transport import CounterpartyTransport
 from app.commercial_invoices.service import CommercialInvoiceService
 from app.commercial_invoices.transport import CommercialTransport
 
@@ -25,4 +26,6 @@ def build_service(documents, settings):
         CommercialTransport(settings),
         seller=seller,
         submit_enabled=settings.commercial_submit_enabled,
+        counterparty_enabled=settings.commercial_counterparty_create_enabled,
+        counterparty_provider=CounterpartyTransport(settings),
     )

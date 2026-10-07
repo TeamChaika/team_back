@@ -67,6 +67,28 @@ def actor(db, portal_id=None, *, telegram_id=None, kind, lock=False):
     return row
 
 
+def warehouse_grant_guard(grant_table, *, alias=None):
+    """An unlinked legacy worker retains its grants; linked users obey portal ACL.
+
+    grant_table is a fixed internal identifier, never supplied by a request.
+    The read-only view excludes inactive/missing portal identities, so they cannot
+    regain access through Telegram, exports, or a service call bypassing HTTP.
+    """
+    if grant_table not in {"portal_documents_grant", "commercial_invoice_grants"}:
+        raise ValueError("Unknown grant table")
+    if alias not in {None, "g"}:
+        raise ValueError("Unknown grant alias")
+    reference = alias or grant_table
+    return (
+        " AND (NOT EXISTS(SELECT 1 FROM portal_documents_userlink wl "
+        f"WHERE wl.user_id={reference}.user_id) OR EXISTS("
+        "SELECT 1 FROM portal_documents_userlink wl "
+        "JOIN chaika.portal_warehouse_access wa ON wa.user_id=wl.supabase_id "
+        f"WHERE wl.user_id={reference}.user_id AND (wa.warehouse_scope_mode='all' OR "
+        f"(wa.source_id='primary' AND wa.store_id={reference}.store_id))))"
+    )
+
+
 def stores_for(db, user_id, kind, action="view"):
     if action not in ACTIONS[kind]:
         return []
@@ -74,7 +96,8 @@ def stores_for(db, user_id, kind, action="view"):
         r["store_id"]
         for r in db.execute(
             "SELECT store_id FROM portal_documents_grant "
-            "WHERE user_id=%s AND kind=%s AND actions @> %s",
+            "WHERE user_id=%s AND kind=%s AND actions @> %s"
+            + warehouse_grant_guard("portal_documents_grant"),
             (user_id, kind, Jsonb([action])),
         ).fetchall()
     ]

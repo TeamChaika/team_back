@@ -165,3 +165,11 @@ chat_id/message_id из сохранённых native_bot_updates callbacks; н�
 невозможно восстановить через Bot API. Реальные сообщения не используются для тестирования.
 Регрессии: [test_telegram_cleanup.py](../../tests/test_telegram_cleanup.py), синтетическая отдельная
 БД `documents_native_tests`, Telegram HTTP-заглушки.
+
+## Глобальный предел складов
+
+`documents.policy.stores_for` и `commercial_invoices.policy.stores_for`
+пересекают прежние action grants с `chaika.portal_warehouse_access`. Ограничение
+действует в native runtime и Telegram независимо от HTTP Scope. Перед выпуском
+применить обе миграции и обновить worker по [контракту](../warehouse-access.md).
+Глобальный склад не создаёт право действия; профили, ссылки и история сохраняются.

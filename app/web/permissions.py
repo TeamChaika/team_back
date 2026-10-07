@@ -53,3 +53,40 @@ def section_for_path(path):
         "balance-products": "balances",
         "topology": "events",
     }.get(resource, resource)
+
+
+# These records have no verified warehouse attribution. Never substitute the
+# containing venue's data for a selected warehouse's data.
+WAREHOUSE_UNSUPPORTED_SECTIONS = frozenset(
+    {
+        "products",
+        "charts",
+        "cash-shifts",
+        "employees",
+        "events",
+        "status",
+        "deposits",
+    }
+)
+
+
+def require_warehouse_section(scope, section):
+    if not scope.warehouse_restricted:
+        return
+    if section in WAREHOUSE_UNSUPPORTED_SECTIONS:
+        raise HTTPException(
+            403, "Раздел недоступен при ограничении по складам: нет складской привязки данных."
+        )
+    if not scope.store_ids:
+        raise HTTPException(403, "Нет доступных складов.")
+
+
+def warehouse_capabilities(scope):
+    assigned = sections_for(scope.user)
+    unsupported = (
+        sorted(set(assigned) & WAREHOUSE_UNSUPPORTED_SECTIONS) if scope.warehouse_restricted else []
+    )
+    return {
+        "supported_sections": [section for section in assigned if section not in unsupported],
+        "unsupported_sections": unsupported,
+    }

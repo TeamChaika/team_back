@@ -21,10 +21,21 @@ def check_kind(kind):
 
 
 class CommercialInvoiceService:
-    def __init__(self, database, provider, *, seller=None, submit_enabled=False):
+    def __init__(
+        self,
+        database,
+        provider,
+        *,
+        seller=None,
+        submit_enabled=False,
+        counterparty_enabled=False,
+        counterparty_provider=None,
+    ):
         self.database, self.provider = database, provider
         self.seller = seller or {}
         self.submit_enabled = submit_enabled
+        self.counterparty_enabled = counterparty_enabled
+        self.counterparty_provider = counterparty_provider
 
     def _actor(self, db, portal_id, kind):
         check_kind(kind)
@@ -63,6 +74,8 @@ class CommercialInvoiceService:
         return row
 
     def options(self, db, user, kind):
+        from app.commercial_invoices.counterparties import permitted, serialize
+
         visible = stores_for(db, user["id"], kind, "view")
         create = stores_for(db, user["id"], kind, "create")
         edit = stores_for(db, user["id"], kind, "edit")
@@ -71,6 +84,21 @@ class CommercialInvoiceService:
             "SELECT id,name FROM stores WHERE id=ANY(%s) ORDER BY name", (visible,)
         ).fetchall()
         return {
+            "can_create_counterparty": self.counterparty_enabled
+            and permitted(db, user["id"], kind),
+            "counterparty_operations": [
+                serialize(db, row)["operation"]
+                for row in db.execute(
+                    "SELECT * FROM commercial_counterparty_operations "
+                    "WHERE actor_id=%s AND portal_id=%s AND kind=%s "
+                    "AND (state NOT IN ('confirmed','rejected') "
+                    "OR created_at>now()-interval '1 day') "
+                    "ORDER BY created_at DESC LIMIT 10",
+                    (user["id"], user["supabase_id"], kind),
+                ).fetchall()
+            ]
+            if self.counterparty_enabled
+            else [],
             "stores": [
                 {
                     "id": str(s["id"]),
@@ -109,7 +137,8 @@ class CommercialInvoiceService:
                     product_catalog(db) if action == "products" else counterparty_catalog(db, kind)
                 )
                 matches = [
-                    r for r in catalog
+                    r
+                    for r in catalog
                     if query in r["name"].casefold() or query in str(r.get("inn", ""))
                 ]
                 return {"items": sorted(matches, key=lambda r: r["name"])[:50]}

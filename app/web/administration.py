@@ -2,7 +2,7 @@
 
 import re
 from contextlib import contextmanager
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import httpx
@@ -28,6 +28,8 @@ class Account(Input):
     display_name: str = Field(min_length=1, max_length=150)
     active: bool = True
     sections: list[str] = Field(max_length=16)
+    warehouse_scope_mode: Literal["all", "selected"] | None = None
+    warehouse_ids: list[UUID] | None = Field(default=None, max_length=500)
     all_departments: bool = False
     department_ids: list[UUID] = Field(default_factory=list, max_length=100)
     deposits_all: bool = False
@@ -38,8 +40,18 @@ class Account(Input):
     def permissions(self):
         if len(set(self.sections)) != len(self.sections) or set(self.sections) - set(SECTIONS):
             raise ValueError("Unknown or duplicate section")
-        if ANALYTICS_SECTIONS.intersection(self.sections) and not (
-            self.all_departments or self.department_ids
+        if (self.warehouse_scope_mode is None) != (self.warehouse_ids is None):
+            raise ValueError("Warehouse mode and grants must be supplied together")
+        if self.warehouse_ids is not None and len(set(self.warehouse_ids)) != len(
+            self.warehouse_ids
+        ):
+            raise ValueError("Duplicate warehouse")
+        if self.warehouse_scope_mode == "all" and self.warehouse_ids:
+            raise ValueError("Full warehouse mode must not include selected grants")
+        if (
+            (ANALYTICS_SECTIONS - {"invoices", "outgoing"}).intersection(self.sections)
+            and self.warehouse_scope_mode == "all"
+            and not (self.all_departments or self.department_ids)
         ):
             raise ValueError("Select iiko restaurants")
         if len({g.venue for g in self.deposit_grants}) != len(self.deposit_grants):
@@ -57,6 +69,15 @@ class NewAccount(Account):
     request_id: UUID
     email: str = Field(min_length=3, max_length=254)
     password: SecretStr = Field(min_length=8, max_length=128)
+
+    @model_validator(mode="after")
+    def initial_department_scope(self):
+        if (ANALYTICS_SECTIONS - {"invoices", "outgoing"}).intersection(self.sections) and (
+            self.warehouse_scope_mode != "selected"
+            and not (self.all_departments or self.department_ids)
+        ):
+            raise ValueError("Select iiko restaurants")
+        return self
 
     @field_validator("email")
     @classmethod
@@ -148,6 +169,13 @@ class Administration:
                 "SELECT user_id,department_id FROM chaika.web_department_access WHERE "
                 "source_id='primary'"
             ).fetchall()
+            warehouses = db.execute(
+                "SELECT id,parent_id,name FROM chaika.stores WHERE source_id='primary' "
+                "ORDER BY name,id"
+            ).fetchall()
+            warehouse_grants = db.execute(
+                "SELECT user_id,store_id FROM chaika.web_warehouse_access WHERE source_id='primary'"
+            ).fetchall()
             deposits = db.execute(
                 "SELECT user_id,venue,is_all,can_create FROM chaika_deposits.user_venues"
             ).fetchall()
@@ -157,6 +185,9 @@ class Administration:
                 "BY name"
             ).fetchall()
         for user in users:
+            user["warehouse_ids"] = [
+                g["store_id"] for g in warehouse_grants if g["user_id"] == user["id"]
+            ]
             user["department_ids"] = [
                 g["department_id"] for g in grants if g["user_id"] == user["id"]
             ]
@@ -170,6 +201,7 @@ class Administration:
             {
                 "users": users,
                 "departments": departments,
+                "warehouses": warehouses,
                 "venues": [v["name"] for v in venues],
                 "sections": [{"id": k, "title": v} for k, v in SECTIONS.items()],
             }
@@ -194,11 +226,21 @@ class Administration:
                     raise HTTPException(422, "Нельзя отключить администратора через эту форму.")
             self.validate_scope(db, payload)
             role = current["role"] if current else "manager"
+            warehouse_mode = payload.warehouse_scope_mode or (
+                current.get("warehouse_scope_mode", "all") if current else "all"
+            )
+            if (ANALYTICS_SECTIONS - {"invoices", "outgoing"}).intersection(payload.sections) and (
+                warehouse_mode != "selected"
+                and not (payload.all_departments or payload.department_ids)
+            ):
+                raise HTTPException(422, "Выберите заведения iiko.")
             db.execute(
                 "INSERT INTO chaika.web_users(id,display_name,role,active,sections,"
-                "all_departments) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET "
+                "all_departments,warehouse_scope_mode) VALUES(%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT(id) DO UPDATE SET "
                 "display_name=EXCLUDED.display_name,active=EXCLUDED.active,"
                 "sections=EXCLUDED.sections,all_departments=EXCLUDED.all_departments,"
+                "warehouse_scope_mode=EXCLUDED.warehouse_scope_mode,"
                 "revision=chaika.web_users.revision+1",
                 (
                     user_id,
@@ -207,8 +249,17 @@ class Administration:
                     payload.active,
                     payload.sections,
                     payload.all_departments,
+                    warehouse_mode,
                 ),
             )
+            if payload.warehouse_ids is not None:
+                db.execute("DELETE FROM chaika.web_warehouse_access WHERE user_id=%s", (user_id,))
+                for warehouse_id in payload.warehouse_ids:
+                    db.execute(
+                        "INSERT INTO chaika.web_warehouse_access(user_id,source_id,store_id) "
+                        "VALUES(%s,'primary',%s)",
+                        (user_id, warehouse_id),
+                    )
             db.execute("DELETE FROM chaika.web_department_access WHERE user_id=%s", (user_id,))
             for department in set(payload.department_ids):
                 db.execute(
@@ -235,6 +286,13 @@ class Administration:
         return {"id": str(user_id)}
 
     def validate_scope(self, db, payload):
+        if payload.warehouse_ids is not None:
+            stores = db.execute(
+                "SELECT id FROM chaika.stores WHERE source_id='primary' AND id=ANY(%s::uuid[])",
+                (payload.warehouse_ids,),
+            ).fetchall()
+            if {row["id"] for row in stores} != set(payload.warehouse_ids):
+                raise HTTPException(422, "Выбран неизвестный склад iiko.")
         departments = db.execute(
             "SELECT id FROM chaika.corporate_nodes WHERE source_id='primary' AND type IN "
             "('DEPARTMENT','CENTRALSTORE','MANUFACTURE') AND id=ANY(%s::uuid[])",
