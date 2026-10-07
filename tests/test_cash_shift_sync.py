@@ -214,7 +214,7 @@ def test_restaurant_scope_applies_to_list_detail_and_unknown(db, sample):
     repo = Repository(config())
 
     @contextmanager
-    def connection():
+    def connection(*, repeatable=False):
         with db.cursor(row_factory=psycopg.rows.dict_row) as cursor:
             yield cursor
 

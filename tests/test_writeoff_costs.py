@@ -150,7 +150,6 @@ def test_real_snapshot_scope_duplicates_immutability_and_runtime_role(service): 
 
     snapshot, foreign = uuid4(), uuid4()
     with service.database.connection() as db:
-        db.execute("CREATE SCHEMA chaika")
         db.execute(
             "CREATE TABLE chaika.store_balance_reports (source_id text, "
             "accounting_timestamp timestamp,last_snapshot_id uuid,last_seen_at timestamptz)"
@@ -215,7 +214,7 @@ def test_real_snapshot_scope_duplicates_immutability_and_runtime_role(service): 
         assert service.provider.sends == []
     finally:
         with service.database.connection() as db:
-            db.execute("DROP SCHEMA chaika CASCADE")
+            db.execute("DROP TABLE chaika.store_balance_items,chaika.store_balance_reports")
 
 
 def test_recipe_runtime_role_and_observation_cutoff(service):  # noqa: F811
@@ -223,7 +222,6 @@ def test_recipe_runtime_role_and_observation_cutoff(service):  # noqa: F811
 
     ingredient, chart, snapshot, department, unit = [uuid4() for _ in range(5)]
     with service.database.connection() as db:
-        db.execute("CREATE SCHEMA chaika")
         for table, columns in {
             "store_balance_reports": (
                 "source_id text,accounting_timestamp timestamp,"
@@ -354,4 +352,8 @@ def test_recipe_runtime_role_and_observation_cutoff(service):  # noqa: F811
                 assert estimate(db, SOURCE, [{"product_id": PRODUCT, "amount": 1}])["total"] is None
     finally:
         with service.database.connection() as db:
-            db.execute("DROP SCHEMA chaika CASCADE")
+            db.execute(
+                "DROP TABLE chaika.store_balance_items,chaika.store_balance_reports,"
+                "chaika.products,chaika.stores,chaika.corporate_nodes,chaika.assembly_charts,"
+                "chaika.assembly_chart_items,chaika.assembly_chart_scopes"
+            )
