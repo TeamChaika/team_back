@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xs:schema version="1.0" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+    <xs:element name="documentValidationResult" type="documentValidationResult"/>
+ 
+    <!--
+    Результат валидации документа.
+    Некоторые документы возвращают более подробную информацию, смотрите:
+     * incomingInventoryValidationResult.xsd
+    -->
+    <xs:complexType name="documentValidationResult">
+        <xs:sequence>
+            <!-- Результат валидации. -->
+            <xs:element name="valid" type="xs:boolean"/>
+            <!-- Указывает на то, что ошибка не критичная и служит в качестве предупреждения. -->
+            <xs:element name="warning" type="xs:boolean"/>
+            <!-- Номер валидируемого документа. -->
+            <xs:element name="documentNumber" type="xs:string" minOccurs="0"/>
+            <!--
+            Новый номер для документа.
+            Отличен от null, если старый нарушает уникальность или не изменились влияющие на номер поля.
+            -->
+            <xs:element name="otherSuggestedNumber" type="xs:string" minOccurs="0"/>
+            <!--
+            Текст ошибки (или только заголовок, если задано additionalInfo).
+            Предназначен для показа пользователю, но в REST API не всегда локализован.
+            -->
+            <xs:element name="errorMessage" type="xs:string" minOccurs="0"/>
+            <!--
+            Для невалидного результата может быть указана дополнительная информация, содержащая детали ошибки.
+            Например, для случая списания в минус это поле содержит детальную информацию по каждой позиции документа,
+            приводящей к отрицательным остаткам.
+            -->
+            <xs:element name="additionalInfo" type="xs:string" minOccurs="0"/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>

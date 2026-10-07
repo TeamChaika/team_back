@@ -15,6 +15,9 @@ class DocumentSettings(BaseSettings):
     )
     native_enabled: bool = False
     worker_enabled: bool = False
+    commercial_enabled: bool = False
+    commercial_submit_enabled: bool = False
+    commercial_seller_json: SecretStr = SecretStr("")
     database_url: SecretStr = SecretStr("")
     dashboard_url: str = "https://dashboard.chaika.team"
     iiko_url: str = ""

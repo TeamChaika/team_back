@@ -16,6 +16,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.gzip import GZipMiddleware
 
+from app.commercial_invoices.historical import historical_pdf, historical_pdf_allowed
+from app.commercial_invoices.runtime import build_service as commercial_service
 from app.core.config import Settings
 from app.documents.config import DocumentSettings
 from app.documents.service import DocumentService
@@ -28,6 +30,7 @@ from app.web.administration import create_admin_router
 from app.web.assistant import AssistantSettings, Message, answer_question
 from app.web.assistant_store import AssistantStore
 from app.web.auth import ACCESS_COOKIE, REFRESH_COOKIE, Auth, Login, LoginLimiter, login_candidates
+from app.web.commercial_invoices import create_commercial_invoices_router
 from app.web.coverage import ZONE
 from app.web.deposits import DepositsClient, create_deposits_router
 from app.web.documents import DocumentsClient, create_documents_router
@@ -85,6 +88,7 @@ def create_portal(
                 web.documents_api_url, web.documents_enabled, transport=documents_transport
             )
         )
+        app.state.commercial_invoices = commercial_service(app.state.documents, document_config)
         scheduler = None
 
         async def start_background():
@@ -232,6 +236,7 @@ def create_portal(
 
     app.include_router(create_deposits_router(deposit_access, repo))
     app.include_router(create_documents_router(portal_access))
+    app.include_router(create_commercial_invoices_router(portal_access))
     app.include_router(create_admin_router(portal_access, repo, web))
     app.include_router(create_profile_router(portal_access, repo))
     app.include_router(create_recovery_router(repo, web, transport=auth_transport))
@@ -567,8 +572,26 @@ def create_portal(
         return repo.resources(scope, resource, start, end, q, offset, status=status)
 
     @app.get("/api/resources/{resource}/{item_id}")
-    def detail(resource: str, item_id: UUID, scope: Access):
-        return repo.detail(scope, resource, item_id)
+    def detail(resource: str, item_id: UUID, request: Request, scope: Access):
+        result = repo.detail(scope, resource, item_id)
+        if resource == "outgoing":
+            result["header"]["can_invoice_pdf"] = historical_pdf_allowed(
+                repo, request.app.state.commercial_invoices, scope, item_id
+            )
+        return result
+
+    @app.get("/api/commercial-invoices/existing-outgoing/{item_id}/pdf")
+    async def existing_invoice_pdf(item_id: UUID, request: Request, scope: PortalAccess):
+        require_section(scope.user, "outgoing")
+        analytical = await run_in_threadpool(repo.scope, scope.user["id"], None)
+        result = await run_in_threadpool(
+            historical_pdf, repo, request.app.state.commercial_invoices, analytical, item_id
+        )
+        return Response(
+            result, media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="invoice-{item_id}.pdf"',
+                     "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+        )
 
     @app.get("/api/topology")
     def topology(
