@@ -184,3 +184,25 @@ def test_worker_failure_has_safe_persistent_status(api, monkeypatch):
     assert [job.resource for job in requests] == ["writeoffs", "incoming_invoices"]
     assert all(job.mirror.parent == service.directory for job in requests)
     assert not (service.directory / "invoices-process.json").exists()
+
+
+def test_refresh_prepares_once_after_successful_whole_batch(api, monkeypatch):
+    from app import scheduler
+
+    client, service, _ = api
+    job_id = uuid4()
+    start(client, job_id)
+    events = []
+
+    def synchronize(*args, **kwargs):
+        assert (args[3] - args[2]).days == 59
+        events.append("source_published")
+
+    monkeypatch.setattr(sync_refresh, "synchronize_histories", synchronize)
+    monkeypatch.setattr(
+        scheduler, "prepare_purchase_impact", lambda *_: events.append("prepared")
+    )
+    sync_refresh.run_job(service, job_id, Event())
+    assert events == ["source_published", "prepared"]
+    manifest = json.loads((service.job_directory(job_id) / "job.json").read_text())
+    assert manifest["status"] == "succeeded"

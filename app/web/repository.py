@@ -23,7 +23,7 @@ from app.web.permissions import (
     sections_for,
 )
 from app.web.purchase_impact import read_purchase_impact
-from app.web.purchase_impact_summary import add_weekly_impacts
+from app.web.purchase_impact_prepared import add_prepared_impacts
 from app.web.purchase_prices import read_purchase_prices
 
 
@@ -518,7 +518,7 @@ class Repository:
                 recent_only=recent_only,
             )
             if selection is None and include_impact:
-                add_weekly_impacts(db, scope, report)
+                add_prepared_impacts(db, scope, report)
             return serial(report)
 
     def purchase_impact(self, scope, selection, analysis_department_id=None, all_departments=False):
