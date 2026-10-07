@@ -10,7 +10,7 @@ CREATE SCHEMA chaika_iiko_documents;
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
+-- transaction_timeout is left at its default for PostgreSQL 16/17 test compatibility.
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -1061,3 +1061,20 @@ ALTER TABLE ONLY chaika_iiko_documents.writeoffs
 
 
 CREATE TABLE chaika_iiko_documents.portal_access (id uuid PRIMARY KEY,active boolean,sections jsonb,is_portal_admin boolean);
+
+-- Synthetic equivalent of the read-only shared portal ACL. Missing override
+-- retains legacy all mode; selected + NULL store explicitly grants no stores.
+CREATE TABLE chaika_iiko_documents.portal_warehouse_scope_test (
+ user_id uuid REFERENCES chaika_iiko_documents.portal_access(id) ON DELETE CASCADE,
+ warehouse_scope_mode text NOT NULL CHECK(warehouse_scope_mode IN ('all','selected')),
+ store_id uuid
+);
+CREATE SCHEMA IF NOT EXISTS chaika;
+CREATE OR REPLACE VIEW chaika.portal_warehouse_access AS
+ SELECT p.id AS user_id,coalesce(w.warehouse_scope_mode,'all') AS warehouse_scope_mode,
+ 'primary'::text AS source_id,w.store_id
+ FROM chaika_iiko_documents.portal_access p
+ LEFT JOIN chaika_iiko_documents.portal_warehouse_scope_test w ON w.user_id=p.id
+ WHERE p.active;
+GRANT USAGE ON SCHEMA chaika TO chaika_iiko_app;
+GRANT SELECT ON chaika.portal_warehouse_access TO chaika_iiko_app;

@@ -14,6 +14,9 @@ from app.web.repository import serial
 def access_hash(scope):
     identity = {
         "role": scope.user["role"],
+        "warehouse_scope_mode": scope.user.get("warehouse_scope_mode", "all"),
+        "sections": sorted(scope.user.get("sections", [])),
+        "warehouse_policy_version": 1,
         "departments": sorted(str(i) for i in scope.ids),
         "stores": sorted(str(i) for i in scope.store_ids),
         "rms": sorted(scope.rms_ids),

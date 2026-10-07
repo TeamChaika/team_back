@@ -99,6 +99,58 @@ def create_commercial_invoices_router(access):
     async def options(kind: Kind, request: Request, scope: Access):
         return await call(request, scope, kind, action="options")
 
+    @router.get("/admin/counterparty-grants")
+    async def counterparty_grants(request: Request, scope: Access):
+        from app.commercial_invoices.counterparties import grants
+
+        service = getattr(request.app.state, "commercial_invoices", None)
+        if service is None:
+            raise HTTPException(503, "Ввод накладных ещё не включён.")
+        return await run_in_threadpool(grants, service.database, scope.user["id"])
+
+    @router.post("/admin/counterparty-grants/{user_id}")
+    async def save_counterparty_grants(user_id: int, request: Request, scope: Access):
+        from app.commercial_invoices.counterparties import grants
+
+        service = getattr(request.app.state, "commercial_invoices", None)
+        if service is None:
+            raise HTTPException(503, "Ввод накладных ещё не включён.")
+        try:
+            body = json.loads(await bounded_body(request, 4096))
+        except ValueError:
+            raise HTTPException(422, "Проверьте формат прав.") from None
+        return await run_in_threadpool(
+            grants,
+            service.database,
+            scope.user["id"],
+            user_id=user_id,
+            body=body,
+        )
+
+    @router.post("/{kind}/counterparties", status_code=202)
+    async def create_counterparty(kind: Kind, request: Request, scope: Access):
+        from app.commercial_invoices.counterparties import command
+
+        service = getattr(request.app.state, "commercial_invoices", None)
+        if service is None:
+            raise HTTPException(503, "Ввод накладных ещё не включён.")
+        try:
+            body = json.loads(await bounded_body(request, 16384))
+        except ValueError:
+            raise HTTPException(422, "Проверьте формат контрагента.") from None
+        return await run_in_threadpool(command, service, scope.user["id"], kind, body)
+
+    @router.get("/{kind}/counterparty-operations/{operation_id}")
+    async def counterparty_operation(
+        kind: Kind, operation_id: UUID, request: Request, scope: Access
+    ):
+        from app.commercial_invoices.counterparties import operation
+
+        service = getattr(request.app.state, "commercial_invoices", None)
+        if service is None:
+            raise HTTPException(503, "Ввод накладных ещё не включён.")
+        return await run_in_threadpool(operation, service, scope.user["id"], kind, operation_id)
+
     @router.get("/{kind}/products")
     async def products(kind: Kind, request: Request, scope: Access):
         return await call(request, scope, kind, action="products")

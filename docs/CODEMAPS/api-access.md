@@ -22,3 +22,12 @@
 Схемы: [portal_and_olap.sql](../../supabase/migrations/20260911013009_chaika_portal_and_olap.sql) создаёт профиль/назначения; [portal_administration.sql](../../supabase/migrations/20260928143000_portal_administration.sql) разрешает администрирование; [deposit_portal_role.sql](../../supabase/migrations/20260928094000_deposit_portal_role.sql) добавляет роль депозитов; [purchase_assistant.sql](../../supabase/migrations/20260914194141_purchase_assistant.sql) хранит диалоги; [employee_editing.sql](../../supabase/migrations/20260915233000_employee_editing.sql) хранит изменения сотрудников.
 
 Тесты по границе: [test_portal.py](../../tests/test_portal.py), [test_document_only_scope.py](../../tests/test_document_only_scope.py), [test_web_auth_resilience.py](../../tests/test_web_auth_resilience.py), [test_deposits.py](../../tests/test_deposits.py), [test_employee_editing.py](../../tests/test_employee_editing.py).
+
+## Выбранные склады
+
+[Единый предел по складам](../warehouse-access.md): `warehouse_scope_mode` и
+`web_warehouse_access` сужают прежние права; `Scope.unrestricted` не допускается
+для selected. Account API сохраняет предел при отсутствии новых полей в старом
+клиенте. `/api/me` возвращает warehouse_scope и warehouse_capabilities. Разделы
+без проверенной складской привязки закрывает `require_warehouse_section`,
+включая прямые запросы к деталям, экспорту и командам.

@@ -90,7 +90,13 @@ def test_other_analytics_sections_still_require_restaurants():
         repo.portal_scope(USER)
     assert failure.value.status_code == 403
     with pytest.raises(ValidationError):
-        EditAccount(display_name="Test", sections=db.sections, revision=1)
+        EditAccount(
+            display_name="Test",
+            sections=db.sections,
+            revision=1,
+            warehouse_scope_mode="all",
+            warehouse_ids=[],
+        )
 
 
 def test_document_only_account_can_be_saved_without_analytics_grants():

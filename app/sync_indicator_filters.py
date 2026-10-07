@@ -102,6 +102,14 @@ def synchronize_filters(settings, stop, *, full=False, end=None, collect=collect
 
 
 def read_filters(db, scope):
+    if getattr(scope, "warehouse_restricted", False):
+        # Existing dictionaries are grouped only by venue, so none of their values
+        # can be proven to belong to an authorized warehouse.
+        return {
+            "options": {key: [] for key in FILTERS},
+            "sync": {},
+            "unavailable_reason": "Варианты фильтров по выбранным складам ещё не собраны.",
+        }
     rows = db.execute(
         "SELECT field,value FROM chaika.indicator_filter_values WHERE source_id='primary' "
         "AND department_id=ANY(%s::uuid[]) GROUP BY field,value ORDER BY field,lower(value),value",

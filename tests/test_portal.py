@@ -230,6 +230,11 @@ def test_login_uses_database_role_and_safe_cookies(client):
         "documents_enabled": False,
         "live_sales_enabled": False,
         "today": datetime.now(ZONE).date().isoformat(),
+        "warehouse_scope": {"mode": "all", "warehouse_ids": [str(UUID(int=4))]},
+        "warehouse_capabilities": {
+            "supported_sections": list(SECTIONS),
+            "unsupported_sections": [],
+        },
     }
     assert "access_token" not in response.text
     assert response.headers["Cache-Control"] == "no-store"
@@ -326,6 +331,11 @@ def test_dashboard_login_refresh_and_logout_across_domains(split_domain_client):
         "documents_enabled": False,
         "live_sales_enabled": False,
         "today": datetime.now(ZONE).date().isoformat(),
+        "warehouse_scope": {"mode": "all", "warehouse_ids": [str(UUID(int=4))]},
+        "warehouse_capabilities": {
+            "supported_sections": list(SECTIONS),
+            "unsupported_sections": [],
+        },
     }
     assert client.post("/api/auth/refresh", headers=headers).status_code == 200
     assert client.post("/api/auth/logout", headers=headers).status_code == 200
@@ -461,7 +471,7 @@ def test_discount_details_require_origin_and_pass_only_visible_departments(clien
     calls = []
     monkeypatch.setattr(
         "app.portal.discount_details",
-        lambda settings, payload, ids: calls.append(ids) or {"rows": []},
+        lambda settings, payload, ids, **kwargs: calls.append(ids) or {"rows": []},
     )
     payload = {"report_id": str(OTHER), "ordinal": 0}
     assert client.post("/api/discount-details", json=payload).status_code == 401

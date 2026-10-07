@@ -18,6 +18,7 @@ from app.import_sales_review import METRICS, parse_review
 from app.sync_references import configured_sources, reference_lock
 from app.sync_sales_history import approved_templates, collect_day, error_code
 from app.web.coverage import ZONE
+from app.web.warehouse_analytics import require_department_report
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ class LiveSales:
 
 
 def report_rows(bundle, kind, scope, *, dish_id=None, dish_name=None):
+    require_department_report(scope)
     visible = {str(i) for i in scope.ids}
     names = {str(d["id"]): d.get("name") for d in scope.departments}
     report = bundle["reports"][kind]

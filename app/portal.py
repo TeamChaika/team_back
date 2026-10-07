@@ -43,8 +43,10 @@ from app.web.permissions import (
     IIKO_SECTIONS,
     require_admin,
     require_section,
+    require_warehouse_section,
     section_for_path,
     sections_for,
+    warehouse_capabilities,
 )
 from app.web.profile import create_profile_router
 from app.web.repository import Repository, Scope, serial
@@ -203,6 +205,7 @@ def create_portal(
         scope = await run_in_threadpool(repo.scope, user_id, selected)
         require_personal_password(scope.user)
         require_section(scope.user, section_for_path(request.url.path))
+        require_warehouse_section(scope, section_for_path(request.url.path))
         request.state.timings = [
             ("auth", (authenticated - started) * 1000),
             ("permissions", (perf_counter() - authenticated) * 1000),
@@ -232,6 +235,7 @@ def create_portal(
     async def deposit_access(request: Request):
         scope = await portal_access(request)
         require_section(scope.user, "deposits")
+        require_warehouse_section(scope, "deposits")
         return scope
 
     app.include_router(create_deposits_router(deposit_access, repo))
@@ -339,8 +343,15 @@ def create_portal(
             }
         return {
             **repo.metadata(scope),
+            "warehouse_scope": {
+                "mode": scope.user.get("warehouse_scope_mode", "all"),
+                "warehouse_ids": [str(store) for store in scope.store_ids],
+            },
+            "warehouse_capabilities": warehouse_capabilities(scope),
             "today": datetime.now(ZONE).date().isoformat(),
-            "live_sales_enabled": bool(live_sales)
+            "live_sales_enabled": (
+                bool(live_sales) or (scope.warehouse_restricted and bool(scope.store_ids))
+            )
             and bool(IIKO_SECTIONS.intersection(sections_for(scope.user))),
             "sections": sections_for(scope.user),
             "can_manage": bool(scope.user.get("is_portal_admin")),
@@ -365,7 +376,11 @@ def create_portal(
             kind != "dishes" or (dish_id is not None and dish_name is not None)
         ):
             raise HTTPException(422, "Фильтр блюда доступен только в отчёте по блюдам.")
-        if live_sales and start <= datetime.now(ZONE).date() <= end:
+        if (
+            live_sales
+            and not scope.warehouse_restricted
+            and start <= datetime.now(ZONE).date() <= end
+        ):
             bundle, metadata = live_sales.get()
             return {
                 **repo.sales(
@@ -403,6 +418,8 @@ def create_portal(
     @app.post("/api/indicators/options/{field}")
     def indicator_options(field: str, payload: IndicatorQuery, request: Request, scope: Access):
         request.app.state.auth.check_origin(request)
+        if scope.warehouse_restricted:
+            return serial(indicators.warehouse_options(scope, payload, field))
         data = repo.indicator_filters(scope)
         if field not in data["options"]:
             raise HTTPException(422, "Неизвестный фильтр.")
@@ -418,7 +435,11 @@ def create_portal(
         check_period(start, end)
         if start.toordinal() <= (end - start).days + 1:
             raise HTTPException(422, "Для выбранной даты невозможно определить предыдущий период.")
-        if live_sales and start <= datetime.now(ZONE).date() <= end:
+        if (
+            live_sales
+            and not scope.warehouse_restricted
+            and start <= datetime.now(ZONE).date() <= end
+        ):
             bundle, metadata = live_sales.get()
             return {
                 **repo.overview(scope, start, end, granularity, live_bundle=bundle),
@@ -500,7 +521,17 @@ def create_portal(
     @app.post("/api/discount-details")
     async def discount_drilldown(payload: DiscountDetailsQuery, request: Request, scope: Access):
         request.app.state.auth.check_origin(request)
-        return await run_in_threadpool(discount_details, settings, payload, scope.ids)
+        if scope.warehouse_restricted:
+            return serial(
+                await run_in_threadpool(repo.warehouse_sales.discount_details, scope, payload)
+            )
+        return await run_in_threadpool(
+            discount_details,
+            settings,
+            payload,
+            scope.ids,
+            allowed_store_ids=list(scope.store_ids) if scope.warehouse_restricted else None,
+        )
 
     @app.get("/api/balance-products")
     def balance_products(
@@ -588,9 +619,13 @@ def create_portal(
             historical_pdf, repo, request.app.state.commercial_invoices, analytical, item_id
         )
         return Response(
-            result, media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="invoice-{item_id}.pdf"',
-                     "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+            result,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="invoice-{item_id}.pdf"',
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.get("/api/topology")

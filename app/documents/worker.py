@@ -183,6 +183,16 @@ def process_jobs(service, bot, leader, commercial=None):
         except Exception as error:
             health["commercial_error"] = type(error).__name__
             log.warning("Commercial invoice queue unavailable (%s)", type(error).__name__)
+        if commercial.counterparty_enabled:
+            from app.commercial_invoices import counterparty_dispatch
+
+            try:
+                counterparty_dispatch.recover(service.database)
+                counterparty_dispatch.deliver_one(commercial)
+                counterparty_dispatch.reconcile_one(commercial)
+            except Exception as error:
+                health["counterparty_error"] = type(error).__name__
+                log.warning("Counterparty queue unavailable (%s)", type(error).__name__)
     leader.execute(
         "INSERT INTO native_jobs (name,data) VALUES ('heartbeat',%s) "
         "ON CONFLICT (name) DO UPDATE SET data=excluded.data,updated_at=now()",

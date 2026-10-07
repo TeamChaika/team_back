@@ -99,6 +99,8 @@ def create_documents_router(access):
             require_admin(scope.user)
         if request.method != "GET":
             request.app.state.auth.check_origin(request)
+        if scope.warehouse_restricted and not hasattr(request.app.state.documents, "dispatch"):
+            raise HTTPException(403, "Ограничение по складам требует нативного сервиса документов.")
         request.state.documents_identity = scope.user["id"]
         return scope
 

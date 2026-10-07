@@ -36,6 +36,11 @@ def query_for(context, order_id=None):
         "filterType": "IncludeValues",
         "values": [str(context["department_id"])],
     }
+    if context.get("allowed_store_ids") is not None:
+        stores = context["allowed_store_ids"]
+        if not stores:
+            raise SyncJobError("drilldown_not_found", "Нет доступных складов.", 403)
+        request["filters"]["Store.Id"] = {"filterType": "IncludeValues", "values": stores}
     request["aggregateFields"] = ["DishDiscountSumInt", "DiscountSum"]
     request["groupByColFields"] = []
     if order_id is None:
@@ -61,8 +66,12 @@ def query_for(context, order_id=None):
     return request
 
 
-def parse_rows(raw: bytes, request: dict, context: dict, order_id=None):
-    payload = json.loads(raw, parse_float=Decimal, object_pairs_hook=_unique_fields)
+def parse_rows(raw: bytes | dict, request: dict, context: dict, order_id=None):
+    payload = (
+        raw
+        if isinstance(raw, dict)
+        else json.loads(raw, parse_float=Decimal, object_pairs_hook=_unique_fields)
+    )
     if (
         not isinstance(payload, dict)
         or payload.get("summary") != []
@@ -184,7 +193,12 @@ def stored_capture(db, key):
 
 
 def load_capture(db, settings, context, order_id=None):
-    key = uuid5(NAMESPACE, f"{context['report_id']}:{context['ordinal']}:{order_id or 'orders'}:v1")
+    stores = context.get("allowed_store_ids")
+    scope_key = "all" if stores is None else ",".join(sorted(stores))
+    key = uuid5(
+        NAMESPACE,
+        f"{context['report_id']}:{context['ordinal']}:{order_id or 'orders'}:v2:{scope_key}",
+    )
     saved = stored_capture(db, key)
     if saved:
         return saved
@@ -252,9 +266,13 @@ def add_event_links(db, context, rows):
         )
 
 
-def discount_details(settings, query: DiscountDetailsQuery, allowed_departments):
+def discount_details(
+    settings, query: DiscountDetailsQuery, allowed_departments, *, allowed_store_ids=None
+):
     """Authorization must supply explicit department UUIDs; None is reserved for technical API."""
     try:
+        if allowed_store_ids is not None and not allowed_store_ids:
+            raise SyncJobError("drilldown_not_found", "Нет доступных складов.", 403)
         with psycopg.connect(
             settings.database_url.get_secret_value(),
             autocommit=True,
@@ -262,6 +280,21 @@ def discount_details(settings, query: DiscountDetailsQuery, allowed_departments)
             prepare_threshold=None,
         ) as db:
             context = read_context(db, query, allowed_departments)
+            if allowed_store_ids is not None:
+                # A historical venue-wide discount row cannot authorize a warehouse
+                # drilldown, even if its outbound query would be filtered afterward.
+                captured = context["request"].get("filters", {}).get("Store.Id", {})
+                captured_stores = captured.get("values", [])
+                permitted = {str(store) for store in allowed_store_ids}
+                if (
+                    captured.get("filterType") != "IncludeValues"
+                    or not captured_stores
+                    or not set(captured_stores) <= permitted
+                ):
+                    raise SyncJobError(
+                        "drilldown_not_found", "Строка скидки не найдена или недоступна.", 404
+                    )
+                context["allowed_store_ids"] = sorted(set(captured_stores))
             orders = load_capture(db, settings, context)
             selected = None
             data = orders

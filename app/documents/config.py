@@ -17,6 +17,7 @@ class DocumentSettings(BaseSettings):
     worker_enabled: bool = False
     commercial_enabled: bool = False
     commercial_submit_enabled: bool = False
+    commercial_counterparty_create_enabled: bool = False
     commercial_seller_json: SecretStr = SecretStr("")
     database_url: SecretStr = SecretStr("")
     dashboard_url: str = "https://dashboard.chaika.team"

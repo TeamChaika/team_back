@@ -10,7 +10,7 @@ from app.documents.costs import (
     improved_estimate,
     needs_current_estimate,
 )
-from app.documents.policy import fail, identifier, invalid, stores_for, table
+from app.documents.policy import fail, identifier, invalid, stores_for, table, warehouse_grant_guard
 
 ZONE = ZoneInfo("Europe/Simferopol")
 
@@ -273,9 +273,12 @@ def detail(db, user, kind, document_id, params):
 
 def options(db, user, kind):
     grants = db.execute(
-        "SELECT store_id,actions FROM portal_documents_grant WHERE user_id=%s AND kind=%s",
+        "SELECT store_id,actions FROM portal_documents_grant WHERE user_id=%s AND kind=%s"
+        + warehouse_grant_guard("portal_documents_grant"),
         (user["id"], kind),
     ).fetchall()
+    if not grants:
+        return {"stores": [], "recipients": [], "reasons": [], "grants": []}
     return {
         "stores": db.execute(
             "SELECT id,name FROM stores WHERE id=ANY(%s) ORDER BY name",

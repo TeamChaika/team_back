@@ -272,3 +272,22 @@ def test_telegram_sender_confirmation_and_permission_revocation(service):
         ]
         == "queued"
     )
+
+
+def test_revoked_global_sender_warehouse_prevents_orphaned_discrepancy(service):
+    from tests.test_native_documents import TARGET
+
+    doc = create(service)
+    with service.database.connection() as db:
+        db.execute(
+            "INSERT INTO portal_warehouse_scope_test VALUES(%s,'selected',%s)",
+            (SENDER, TARGET),
+        )
+    with pytest.raises(HTTPException) as error:
+        receive(service, doc)
+    assert error.value.status_code == 409
+    assert "согласующего" in error.value.detail
+    current = detail(service, doc)
+    assert current["version"] == 1 and current["receipt_state"] == "none"
+    with service.database.connection() as db:
+        assert db.execute("SELECT count(*) AS n FROM native_dispatch").fetchone()["n"] == 0

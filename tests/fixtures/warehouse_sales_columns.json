@@ -1,0 +1,45 @@
+{
+  "source": "iiko SALES columns captured 2026-10-06; finance-discounts-probe-20261006/columns.json",
+  "columns": {
+    "Store.Id": {
+      "name": "ID склада",
+      "type": "ID_STRING",
+      "aggregationAllowed": false,
+      "groupingAllowed": true,
+      "filteringAllowed": true,
+      "tags": [
+        "Организация"
+      ]
+    },
+    "Store.Name": {
+      "name": "Со склада",
+      "type": "STRING",
+      "aggregationAllowed": false,
+      "groupingAllowed": true,
+      "filteringAllowed": true,
+      "tags": [
+        "Организация"
+      ]
+    },
+    "UniqOrderId": {
+      "name": "Чеков",
+      "type": "INTEGER",
+      "aggregationAllowed": true,
+      "groupingAllowed": false,
+      "filteringAllowed": false,
+      "tags": [
+        "Заказ"
+      ]
+    },
+    "GuestNum": {
+      "name": "Количество гостей",
+      "type": "AMOUNT",
+      "aggregationAllowed": true,
+      "groupingAllowed": true,
+      "filteringAllowed": true,
+      "tags": [
+        "Гости"
+      ]
+    }
+  }
+}
