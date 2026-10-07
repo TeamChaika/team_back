@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from threading import Event
 
+import pytest
 from test_reference_sync import db as db
 
 from app import scheduler
@@ -24,6 +25,10 @@ def test_sales_history_continues_after_each_prefetch_cleanup(monkeypatch, tmp_pa
     monkeypatch.setattr(stop, "wait", lambda _: False)
     monkeypatch.setattr(sync_jobs, "ROOT", tmp_path)
     windows, published = [], []
+    prepared_after = []
+    monkeypatch.setattr(
+        scheduler, "prepare_purchase_impact", lambda *_: prepared_after.append(len(published))
+    )
 
     def capture(settings, first, last, capture_stop, **kwargs):
         windows.append((first, last))
@@ -45,6 +50,61 @@ def test_sales_history_continues_after_each_prefetch_cleanup(monkeypatch, tmp_pa
     assert published[0] == slot.date() - timedelta(days=60)
     assert published[-1] == slot.date() - timedelta(days=1)
     assert not stop.is_set()
+    assert prepared_after == [60]
+
+
+@pytest.mark.parametrize("job_key,expected_days", [("documents", 2), ("document_history", 60)])
+def test_document_batch_prepares_once_after_all_days(monkeypatch, tmp_path, job_key, expected_days):
+    from app import sync_invoices
+    from app.services import sync_jobs
+
+    monkeypatch.setattr(sync_jobs, "ROOT", tmp_path)
+    completed, prepared_after = [], []
+    monkeypatch.setattr(
+        sync_invoices, "synchronize_histories", lambda *args: completed.append(args[2])
+    )
+    monkeypatch.setattr(
+        scheduler, "prepare_purchase_impact", lambda *_: prepared_after.append(len(completed))
+    )
+    scheduler.run_job(
+        scheduler.Job(job_key, "Documents"),
+        datetime(2026, 10, 7, 10, tzinfo=scheduler.ZONE),
+        None,
+        Event(),
+    )
+    assert len(completed) == expected_days
+    assert prepared_after == [expected_days]
+
+
+def test_preparation_failure_keeps_source_sync_success_but_retry_job_fails(monkeypatch, caplog):
+    from app import purchase_impact_precompute
+
+    def fail(*args, **kwargs):
+        raise ValueError("private connection details")
+
+    monkeypatch.setattr(purchase_impact_precompute, "ensure_prepared", fail)
+    scheduler.prepare_purchase_impact(None, Event())
+    assert "ValueError" in caplog.text and "private connection" not in caplog.text
+    with pytest.raises(ValueError):
+        scheduler.prepare_purchase_impact(None, Event(), strict=True)
+
+
+def test_stopped_preparation_does_not_start_and_busy_job_retries(monkeypatch):
+    from app import purchase_impact_precompute
+
+    calls = []
+    monkeypatch.setattr(
+        purchase_impact_precompute,
+        "ensure_prepared",
+        lambda *args, **kwargs: calls.append(1) or {"status": "busy"},
+    )
+    stop = Event()
+    stop.set()
+    scheduler.prepare_purchase_impact(None, stop)
+    assert not calls
+    with pytest.raises(scheduler.SyncError, match="purchase_impact_preparation_busy"):
+        scheduler.prepare_purchase_impact(None, Event(), strict=True)
+    assert calls == [1]
 
 
 def test_capture_stop_observes_shutdown_without_stopping_other_captures():

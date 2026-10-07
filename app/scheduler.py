@@ -50,6 +50,7 @@ class Job:
 
 
 JOBS = (
+    Job("purchase_impact", "Недельное влияние закупочных цен", minute=0),
     Job("sales", "Продажи OLAP · вчера", 6, 0),
     Job("documents", "Накладные, списания и перемещения · вчера и сегодня", minute=10),
     Job("events", "События всех RMS · последние 7 дней", minute=20),
@@ -62,6 +63,28 @@ JOBS = (
     Job("money_balances", "Денежные балансы", 7, 0),
     Job("sales_history", "Продажи OLAP · открытые 60 дней", 2, 0),
 )
+
+PURCHASE_IMPACT_INPUT_JOBS = frozenset(
+    ("documents", "document_history", "sales", "sales_history", "inventory", "references")
+)
+
+
+def prepare_purchase_impact(settings, stop, *, strict=False):
+    """Prepare once after a source batch; an estimate failure must not undo its sync."""
+    if stop.is_set():
+        return
+    from app.purchase_impact_precompute import ensure_prepared
+
+    try:
+        result = ensure_prepared(settings, stop=stop)
+        if result["status"] == "busy" and strict:
+            raise SyncError("purchase_impact_preparation_busy")
+    except Exception as error:
+        from app.sync_sales_history import error_code
+
+        log.warning("Purchase impact preparation failed: %s", error_code(error))
+        if strict:
+            raise
 
 
 class CaptureStop:
@@ -88,7 +111,9 @@ def run_job(job, slot, settings, stop, *, namespace="scheduled"):
     stamp = "%Y%m%dT%H%M" if namespace == "scheduled" else "%Y%m%dT%H%M%S%f"
     root = ROOT / namespace / job.key / slot.strftime(stamp)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if job.key in {"sales", "sales_history"}:
+    if job.key == "purchase_impact":
+        prepare_purchase_impact(settings, stop, strict=True)
+    elif job.key in {"sales", "sales_history"}:
         from app.sync_sales_history import synchronize_history
 
         # Release the shared iiko lock between weekly captures.
@@ -190,6 +215,10 @@ def run_job(job, slot, settings, stop, *, namespace="scheduled"):
             if stop.is_set():
                 raise SyncError("scheduled_sync_interrupted")
             fn(settings, API)
+
+    if job.key in PURCHASE_IMPACT_INPUT_JOBS:
+        # Source loaders have committed the whole batch and released their iiko sessions.
+        prepare_purchase_impact(settings, stop)
 
 
 def run_due(db, settings, stop, *, now=None, execute=run_job, manual=False):

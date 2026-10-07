@@ -9,7 +9,7 @@
 | Показатели | `/api/indicators/query` и `/metric/{metric}` → [app/web/indicators.py](../../app/web/indicators.py) `IndicatorService` → прямой OLAP iiko и кеш. Их суммы не читаются из сохранённых отчётов продаж; временное расхождение возможно из-за источника, фильтров и времени наблюдения |
 | Значения фильтров | [app/sync_indicator_filters.py](../../app/sync_indicator_filters.py) собирает варианты OLAP в `chaika.indicator_filter_values` и статус в `indicator_filter_sync`; [app/web/repository.py](../../app/web/repository.py) выдаёт варианты только для `Scope.ids` |
 | Закупочная цена | `/api/purchase-prices` → [app/web/purchase_prices.py](../../app/web/purchase_prices.py): обработанные приходные строки, история и прежняя цена по продукту/складу/единице; связанные расходные накладные учитываются отдельно |
-| Недельный прогноз | `include_impact=true` → [app/web/purchase_impact_summary.py](../../app/web/purchase_impact_summary.py) загружает один набор цен, техкарт и продаж за 30 завершённых дней → [app/web/purchase_impact.py](../../app/web/purchase_impact.py) считает `weekly_delta`; неполные продажи блокируют недельную оценку |
+| Недельный прогноз в списке | `include_impact=true` → [app/web/purchase_impact_prepared.py](../../app/web/purchase_impact_prepared.py) читает готовые расходы ингредиентов и умножает на изменение цены в разрешённой области. [app/purchase_impact_precompute.py](../../app/purchase_impact_precompute.py) готовит эти факты после синхронизации; HTTP не читает продажи и не разбирает техкарты. Неполные продажи блокируют оценку |
 | Одна позиция | `/api/purchase-prices/impact` → [app/web/purchase_impact.py](../../app/web/purchase_impact.py): цепочка техкарт с подразделением, размером, прямым списанием и проверкой неоднозначности. Это сценарная оценка, не фактическое списание |
 | Детали скидки | `/api/discount-details` → [app/services/sales_drilldown.py](../../app/services/sales_drilldown.py), отдельное чтение iiko с проверкой выбранных подразделений |
 | Документы/остатки/события | `/api/resources/{resource}` → `resource_query`/`resources`/`detail` в [app/web/repository.py](../../app/web/repository.py), списки из `chaika.*`; `/api/topology` проверяет `rms_id` и идёт в [app/services/order_topology.py](../../app/services/order_topology.py) |
@@ -17,6 +17,29 @@
 При пустом сегодняшнем отчёте начните с `LiveSales.get` и метаданных ответа. Отсутствие строки в PostgreSQL не доказывает отсутствие продажи в iiko. В показателях сохранённый справочник вариантов фильтров не означает, что прямой OLAP-запрос завершился.
 
 Проверки: [test_live_sales.py](../../tests/test_live_sales.py), [test_sales_coverage.py](../../tests/test_sales_coverage.py), [test_indicator_filters.py](../../tests/test_indicator_filters.py), [test_purchase_prices.py](../../tests/test_purchase_prices.py), [test_purchase_impact.py](../../tests/test_purchase_impact.py).
+
+## Подготовленный недельный прогноз (07.10.2026)
+
+Миграция `20261007180000_purchase_impact_prepared.sql` добавляет закрытые таблицы
+`purchase_impact_prepared` и `purchase_impact_prepared_products`. Подготовка вызывается
+один раз после всего пакета накладных, продаж, номенклатуры/техкарт или справочников.
+Отдельная задача `purchase_impact` проверяет актуальность каждый час, при старте и после
+сбоев. Если ревизии источников и местная дата прежние, тяжёлой работы нет.
+
+В БД сохраняются расходы по каждому блюду и заведению, причины исключения сохраняются
+в прежней детальной модели. Денежные значения зависят от текущих разрешённых приходов:
+готовые расходы умножаются на их дельту в HTTP. Нельзя сохранять один общий денежный
+итог на все складские области. Чтение фильтрует JSON фактов по `Scope.ids` в SQL;
+складской прогноз для `warehouse_restricted` по-прежнему закрыт.
+
+Поколение публикуется атомарно под транзакционной advisory lock. Ревизия содержит
+день расчёта, указатели срезов 30 завершённых дней и завершённые inventory/references/
+dictionaries синхронизации. Если поколения нет или оно устарело, цены доступны,
+но `weekly_delta=null`, `impact_period.status=pending`; синхронного fallback нет.
+Готовое поколение возвращает `status=ready` и `prepared_at`. Ошибки подготовки не
+отменяют успешную загрузку исходных документов. Детализация `/impact` остаётся
+отдельным расчётом одного товара с исходными строками и цепочками техкарт.
+Проверки: `tests/test_purchase_impact_precompute.py`, `test_scheduler.py`, `test_sync_jobs.py`.
 
 ## Ограничение аналитики складами (локальная разработка 07.10.2026)
 

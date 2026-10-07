@@ -69,6 +69,9 @@ def run_job(service: SyncJobsService, job_id: UUID, stop: Event) -> None:
             on_ready=announce,
         )
         status = "succeeded"
+        from app.scheduler import prepare_purchase_impact
+
+        prepare_purchase_impact(service.settings, stop)
     except Exception as error:
         error_code = str(error) if isinstance(error, SyncError) else type(error).__name__
         raise
