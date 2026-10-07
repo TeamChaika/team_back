@@ -77,7 +77,11 @@ def test_document_batch_prepares_once_after_all_days(monkeypatch, tmp_path, job_
 
 
 def test_preparation_failure_keeps_source_sync_success_but_retry_job_fails(monkeypatch, caplog):
-    from app import purchase_impact_precompute
+    from app import purchase_impact_precompute, purchase_prices_precompute
+
+    monkeypatch.setattr(
+        purchase_prices_precompute, "ensure_prepared", lambda *a, **kw: {"status": "ready"}
+    )
 
     def fail(*args, **kwargs):
         raise ValueError("private connection details")
@@ -90,7 +94,11 @@ def test_preparation_failure_keeps_source_sync_success_but_retry_job_fails(monke
 
 
 def test_stopped_preparation_does_not_start_and_busy_job_retries(monkeypatch):
-    from app import purchase_impact_precompute
+    from app import purchase_impact_precompute, purchase_prices_precompute
+
+    monkeypatch.setattr(
+        purchase_prices_precompute, "ensure_prepared", lambda *a, **kw: {"status": "ready"}
+    )
 
     calls = []
     monkeypatch.setattr(
@@ -105,6 +113,30 @@ def test_stopped_preparation_does_not_start_and_busy_job_retries(monkeypatch):
     with pytest.raises(scheduler.SyncError, match="purchase_impact_preparation_busy"):
         scheduler.prepare_purchase_impact(None, Event(), strict=True)
     assert calls == [1]
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_price_preparation_failure_still_attempts_weekly_impact(monkeypatch, strict, caplog):
+    from app import purchase_impact_precompute, purchase_prices_precompute
+
+    calls = []
+
+    def prices(*args, **kwargs):
+        calls.append("prices")
+        raise ValueError("private database details")
+
+    monkeypatch.setattr(purchase_prices_precompute, "ensure_prepared", prices)
+    monkeypatch.setattr(
+        purchase_impact_precompute, "ensure_prepared",
+        lambda *a, **kw: calls.append("impact") or {"status": "ready"},
+    )
+    if strict:
+        with pytest.raises(ValueError):
+            scheduler.prepare_purchase_impact(None, Event(), strict=True)
+    else:
+        scheduler.prepare_purchase_impact(None, Event())
+    assert calls == ["prices", "impact"]
+    assert "private database details" not in caplog.text
 
 
 def test_capture_stop_observes_shutdown_without_stopping_other_captures():
