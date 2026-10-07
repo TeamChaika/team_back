@@ -6,6 +6,7 @@ from decimal import Decimal, localcontext
 from uuid import UUID
 
 from app.web.coverage import ZONE
+from app.web.purchase_prices_prepared import prepared_receipts_query
 
 # Confirmed Chain group "ХОЗНУЖДЫ". Match its identity, including renamed/deleted
 # descendants, rather than guessing a product's purpose from its name.
@@ -153,9 +154,10 @@ def read_purchase_prices(
     if kind != "all":
         clauses.append(LINKED + "=%s")
         params.append(kind == "linked")
+    excluded_products = household_product_ids(db) if exclude_household else None
     if exclude_household:
         clauses.append("NOT (i.product_id=ANY(%s::uuid[]))")
-        params.append(household_product_ids(db))
+        params.append(excluded_products)
     if selection:
         product_id, store_id, unit_id, linked = selection
         clauses.extend(["i.product_id=%s", "i.amount_unit_id=%s", LINKED + "=%s"])
@@ -194,7 +196,22 @@ def read_purchase_prices(
                 if item:
                     changes.append(item)
         else:
-            summary_params = [*params, HISTORY_SIZE + 1]
+            prepared = prepared_receipts_query(db, scope, kind, excluded_products)
+            receipts_sql, receipt_params = prepared or (
+                "SELECT i.product_id,NULL::uuid AS store_id,i.amount_unit_id AS unit_id,"
+                + LINKED
+                + " AS linked,"
+                + STAMP
+                + " AS date,"
+                "sum(i.amount) AS amount,sum(i.sum) AS sum,"
+                "bool_and(i.amount IS NOT NULL AND i.amount>0 AND i.sum>=0) AS valid FROM "
+                + JOIN
+                + " WHERE "
+                + where
+                + " GROUP BY 1,2,3,4,5",
+                params,
+            )
+            summary_params = [*receipt_params, HISTORY_SIZE + 1]
             recency = ""
             if recent_only:
                 recency = " HAVING max(date)>=%s AND max(date)<%s"
@@ -202,17 +219,7 @@ def read_purchase_prices(
                     [recent_since.isoformat(), (today + timedelta(days=1)).isoformat()]
                 )
             summaries = db.execute(
-                "WITH receipts AS (SELECT i.product_id,NULL::uuid "
-                "AS store_id,i.amount_unit_id AS unit_id,"
-                + LINKED
-                + " AS linked,"
-                + STAMP
-                + " AS date,sum(i.amount) AS amount,sum(i.sum) AS sum,"
-                "bool_and(i.amount IS NOT NULL AND i.amount>0 AND i.sum>=0) AS valid FROM "
-                + JOIN
-                + " WHERE "
-                + where
-                + " GROUP BY 1,2,3,4,5), ranked AS ("
+                "WITH receipts AS (" + receipts_sql + "), ranked AS ("
                 "SELECT *,row_number() OVER (PARTITION BY product_id,unit_id,linked "
                 "ORDER BY date DESC) AS position FROM receipts) "
                 "SELECT product_id,store_id,unit_id,linked,"

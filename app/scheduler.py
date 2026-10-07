@@ -50,7 +50,7 @@ class Job:
 
 
 JOBS = (
-    Job("purchase_impact", "Недельное влияние закупочных цен", minute=0),
+    Job("purchase_impact", "Закупочные цены и недельное влияние", minute=0),
     Job("sales", "Продажи OLAP · вчера", 6, 0),
     Job("documents", "Накладные, списания и перемещения · вчера и сегодня", minute=10),
     Job("events", "События всех RMS · последние 7 дней", minute=20),
@@ -70,21 +70,26 @@ PURCHASE_IMPACT_INPUT_JOBS = frozenset(
 
 
 def prepare_purchase_impact(settings, stop, *, strict=False):
-    """Prepare once after a source batch; an estimate failure must not undo its sync."""
+    """Prepare prices and impact after a batch without undoing a successful source sync."""
     if stop.is_set():
         return
-    from app.purchase_impact_precompute import ensure_prepared
+    from app.purchase_impact_precompute import ensure_prepared as prepare_impact
+    from app.purchase_prices_precompute import ensure_prepared as prepare_prices
+    from app.sync_sales_history import error_code
 
-    try:
-        result = ensure_prepared(settings, stop=stop)
-        if result["status"] == "busy" and strict:
-            raise SyncError("purchase_impact_preparation_busy")
-    except Exception as error:
-        from app.sync_sales_history import error_code
-
-        log.warning("Purchase impact preparation failed: %s", error_code(error))
-        if strict:
-            raise
+    failure = None
+    for name, prepare in (("purchase_prices", prepare_prices), ("purchase_impact", prepare_impact)):
+        if stop.is_set():
+            break
+        try:
+            result = prepare(settings, stop=stop)
+            if result["status"] == "busy" and strict:
+                raise SyncError(f"{name}_preparation_busy")
+        except Exception as error:
+            log.warning("%s preparation failed: %s", name, error_code(error))
+            failure = failure or error
+    if strict and failure is not None:
+        raise failure
 
 
 class CaptureStop:
