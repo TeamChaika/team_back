@@ -17,6 +17,7 @@
 | Показатели и их фильтры | [Аналитика](CODEMAPS/analytics.md) | [app/web/indicators.py](../app/web/indicators.py) |
 | Закупочная цена и недельное влияние | [Аналитика](CODEMAPS/analytics.md) | [app/web/purchase_impact.py](../app/web/purchase_impact.py) |
 | Аналитические списки документов/остатков/событий | [Аналитика](CODEMAPS/analytics.md) | [app/web/repository.py](../app/web/repository.py) |
+| Приход в iiko, реализация и счёт PDF | [Контракт и запуск](commercial-invoices.md) | `app/commercial_invoices/`, `app/web/commercial_invoices.py`; отдельные права, миграция documents/0008 |
 | Нативные накладные, списания, согласование | [Документы](CODEMAPS/documents.md) | [app/documents/workflow.py](../app/documents/workflow.py) |
 | Складские права и Telegram документов | [Документы](CODEMAPS/documents.md) | [app/documents/policy.py](../app/documents/policy.py) |
 | Очередь документов и сверка `unknown` | [Документы](CODEMAPS/documents.md) | [app/documents/dispatch.py](../app/documents/dispatch.py) |

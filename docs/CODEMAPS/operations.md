@@ -56,3 +56,7 @@ Worker может работать отдельно от HTTP-приложени
 | Git обновлён, сайт прежний | SHA merge → SHA успешного Timeweb deploy → загруженный frontend asset / API; отдельно версия worker |
 
 Подробные инструкции: [документы и очередь](../documents.md), [Timeweb](../timeweb.md), [домены](../domains.md), [расписания](../scheduled-sync.md), [агент Timeweb](../timeweb-ai.md).
+
+## Коммерческие накладные
+
+`app/commercial_invoices/` включается отдельно флагами `CHAIKA_DOCUMENTS_COMMERCIAL_ENABLED` и `CHAIKA_DOCUMENTS_COMMERCIAL_SUBMIT_ENABLED` у API и фактического worker. Нужны миграция documents/0008, закрытый `CHAIKA_DOCUMENTS_COMMERCIAL_SELLER_JSON`, свежие каталоги и явные складские права. [Контракт, состояния и проверка](../commercial-invoices.md). Отключение submit останавливает новые отправки; неизвестный исход разрешается только чтением и сверкой.

@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xs:schema version="1.0" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+    <xs:element name="document" type="outgoingInvoiceDto"/>
+ 
+    <xs:complexType name="outgoingInvoiceDto">
+        <xs:sequence>
+            <!--
+            Id документа(только чтение)
+            @since 5.4
+            -->
+            <xs:element name="id" type="xs:string" minOccurs="0"/>
+            <xs:element name="documentNumber" type="xs:string" minOccurs="0"/>
+            <!--
+            Учетная дата-время документа.
+            Если не заполнено, используется дата-время сервера.
+            Поддерживаемые форматы:
+            yyyy-MM-ddTHH:mm:ss, yyyy-MM-dd (dd.MM.yyyy не рекомендуется).
+            -->
+            <xs:element name="dateIncoming" type="xs:dateTime" minOccurs="0"/>
+            <!--
+            false (по умолчанию): использовать переданные дату-время dateIncoming как есть.
+            true: использовать настройки проведения документов, заданные в подразделении:
+             * В режиме "текущее время" - дату и время из dateIncoming;
+             * "фиксированное время" или "время закрытия кассовой смены" - дату из dateIncoming, а время из настроек.
+            -->
+            <xs:element name="useDefaultDocumentTime" type="xs:boolean" minOccurs="0" default="false"/>
+            <xs:element name="status" type="documentStatus" minOccurs="0"/>
+            <!-- Счет для списания товаров (расходный счет). По умолчанию "5.01" ("Расход продуктов"). -->
+            <xs:element name="accountToCode" type="xs:string" minOccurs="0"/>
+            <!-- Счет выручки. По умолчанию "4.01" ("Торговая выручка"). -->
+            <xs:element name="revenueAccountCode" type="xs:string" minOccurs="0"/>
+            <!--
+            Склад (id или код). При создании накладных с проведением обязателен.
+            Заполняется либо в документе, либо в каждой строке отдельно, но не одновременно.
+            Если заполнен в документе, в бекофисе будет отмечена галочка "Отгрузить со склада".
+            -->
+            <xs:element name="defaultStoreId" type="xs:string" minOccurs="0"/>
+            <xs:element name="defaultStoreCode" type="xs:string" minOccurs="0"/>
+            <!-- Контрагент -->
+            <xs:element name="counteragentId" type="xs:string" minOccurs="0"/>
+            <xs:element name="counteragentCode" type="xs:string" minOccurs="0"/>
+            <!-- Концепция -->
+            <xs:element name="conceptionId" type="xs:string" minOccurs="0"/>
+            <xs:element name="conceptionCode" type="xs:string" minOccurs="0"/>
+            <!-- Комментарий -->
+            <xs:element name="comment" type="xs:string" minOccurs="0"/>
+            <!--
+            UUID связанной расходной накладной
+            (только чтение)
+            @since 5.4
+            -->
+            <xs:element name="linkedOutgoingInvoiceId" type="xs:string" minOccurs="0"/>
+            <xs:element name="items">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="item" type="outgoingInvoiceItemDto" minOccurs="0" maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        </xs:sequence>
+    </xs:complexType>
+ 
+    <xs:complexType name="outgoingInvoiceItemDto">
+        <xs:sequence>
+            <!-- Элемент номенклатуры (id или код (артикул))-->
+            <xs:element name="productId" type="xs:string" minOccurs="0"/>
+            <xs:element name="productArticle" type="xs:string" minOccurs="0"/>
+            <!--
+            Склад (id или код). При создании накладных с проведением обязателен.
+            Заполняется либо в документе, либо в каждой строке отдельно, но не одновременно.
+            -->
+            <xs:element name="storeId" type="xs:string" minOccurs="0"/>
+            <xs:element name="storeCode" type="xs:string" minOccurs="0"/>
+            <!-- Фасовка (id или код(артикул)) -->
+            <xs:element name="containerId" type="xs:string" minOccurs="0"/>
+            <xs:element name="containerCode" type="xs:string" minOccurs="0"/>
+            <!-- Цена за фасовку с учетом скидки -->
+            <xs:element name="price" type="xs:decimal" minOccurs="1"/>       
+            <!--
+            Цена без НДС за фасовку с учетом скидки
+            (только чтение)
+            @since 6.2
+            -->
+            <xs:element name="priceWithoutVat" type="xs:decimal" minOccurs="0"/>
+            <!-- Количество в базовых единицах измерения -->
+            <xs:element name="amount" type="xs:decimal" minOccurs="1"/>
+            <!--
+            Cумма строки без учета скидки.
+            Как правило sum == amount * price / container + discountSum + vatSum
+             -->
+            <xs:element name="sum" type="xs:decimal" minOccurs="1"/>
+            <!-- Cумма скидки -->
+            <xs:element name="discountSum" type="xs:decimal" minOccurs="0"/>
+            <!--
+            Величина процента НДС и сумма НДС для строки документа.
+            Если не задана сумма, она вычисляется по проценту.
+            Если не задан процент, он берется из карточки товара.
+            Нельзя задать только сумму, не задавая процент.
+            @since 5.0
+             -->
+            <xs:element name="vatPercent" type="xs:decimal" minOccurs="0"/>
+            <xs:element name="vatSum" type="xs:decimal" minOccurs="0"/>
+        </xs:sequence>
+    </xs:complexType>
+ 
+    <xs:simpleType name="documentStatus">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="NEW"/>
+            <xs:enumeration value="PROCESSED"/>
+            <xs:enumeration value="DELETED"/>
+        </xs:restriction>
+    </xs:simpleType>
+</xs:schema>

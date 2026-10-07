@@ -10,6 +10,7 @@ from time import monotonic
 import httpx
 from psycopg.types.json import Jsonb
 
+from app.commercial_invoices.runtime import build_service as commercial_service
 from app.core.logging import configure_http_logging
 from app.documents.config import DocumentSettings
 from app.documents.dispatch import deliver_one, recover_uncertain
@@ -141,7 +142,7 @@ def drain_cleanup(service, bot):
             break
 
 
-def process_jobs(service, bot, leader):
+def process_jobs(service, bot, leader, commercial=None):
     recover_uncertain(service.database)
     health = {}
     if bot:
@@ -170,6 +171,18 @@ def process_jobs(service, bot, leader):
             log.warning("Document Telegram unavailable (%s)", health)
     # Existing cleanup and approvals received in this cycle precede slow iiko calls.
     deliver_one(service)
+    if commercial:
+        from app.commercial_invoices.dispatch import deliver_one as commercial_deliver
+        from app.commercial_invoices.dispatch import recover_uncertain as commercial_recover
+        from app.commercial_invoices.reconcile import reconcile_one
+
+        try:
+            commercial_recover(service.database)
+            commercial_deliver(commercial)
+            reconcile_one(commercial)
+        except Exception as error:
+            health["commercial_error"] = type(error).__name__
+            log.warning("Commercial invoice queue unavailable (%s)", type(error).__name__)
     leader.execute(
         "INSERT INTO native_jobs (name,data) VALUES ('heartbeat',%s) "
         "ON CONFLICT (name) DO UPDATE SET data=excluded.data,updated_at=now()",
@@ -189,9 +202,14 @@ def main():
     if not args.refresh_catalogs and (not settings.native_enabled or not settings.worker_enabled):
         raise SystemExit("Native document worker is disabled")
     service = DocumentService(settings)
+    commercial = commercial_service(service, settings)
     if args.refresh_catalogs:
         try:
             refresh_catalogs(service)
+            if commercial:
+                from app.commercial_invoices.catalogs import refresh as refresh_commercial
+
+                refresh_commercial(commercial)
             print("Document catalogs refreshed")
         finally:
             service.close()
@@ -225,11 +243,15 @@ def main():
                         try:
                             if catalog_due(service, now):
                                 refresh_catalogs(service)
+                            if commercial:
+                                from app.commercial_invoices.catalogs import refresh_if_due
+
+                                refresh_if_due(commercial, now)
                         except Exception as error:
                             log.warning(
                                 "Document catalog refresh failed (%s)", type(error).__name__
                             )
-                    healthy = process_jobs(service, bot, leader)
+                    healthy = process_jobs(service, bot, leader, commercial)
                 if not healthy:
                     stop.wait(5)
             except Exception as error:
