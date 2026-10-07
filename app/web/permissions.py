@@ -10,7 +10,7 @@ SECTIONS = {
     "cash-shifts": "Кассовые смены",
     "invoices": "Приходные накладные",
     "purchase-prices": "Закупочные цены",
-    "outgoing": "Расходные накладные",
+    "outgoing": "Реализация",
     "transfers": "Перемещения",
     "writeoffs": "Списания",
     "products": "Номенклатура",
