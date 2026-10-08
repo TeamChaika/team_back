@@ -14,7 +14,7 @@ PASSWORD = "long-test-password-12345"
 
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(tmp_path / "data")
+    app = create_app(tmp_path / "data", repository=Repository(tmp_path / "data"))
     app.state.repository.bootstrap("owner", PASSWORD, "Owner")
     with TestClient(app, base_url=ORIGIN) as client:
         client.headers["Origin"] = ORIGIN
@@ -158,7 +158,9 @@ def test_static_assets(tmp_path):
     dist.mkdir()
     (dist / "saas-admin.html").write_text("<html>owner</html>")
     (dist / "index.html").write_text("<html>tenant</html>")
-    with TestClient(create_app(tmp_path / "db", dist), base_url=ORIGIN) as client:
+    with TestClient(
+        create_app(tmp_path / "db", dist, repository=Repository(tmp_path / "db")), base_url=ORIGIN
+    ) as client:
         assert "owner" in client.get("/").text
         assert "owner" in client.get("/companies/123").text
         assert client.get("/assets/missing.js").status_code == 404
@@ -233,7 +235,9 @@ def test_spa_fallback_cannot_follow_external_symlink(tmp_path):
     outside = tmp_path / "private.txt"
     outside.write_text("private-secret-marker")
     (dist / "saas-admin.html").symlink_to(outside)
-    with TestClient(create_app(tmp_path / "db", dist), base_url=ORIGIN) as client:
+    with TestClient(
+        create_app(tmp_path / "db", dist, repository=Repository(tmp_path / "db")), base_url=ORIGIN
+    ) as client:
         for path in ["/", "/companies/123", "/saas-admin.html"]:
             response = client.get(path)
             assert response.status_code == 404
@@ -245,7 +249,9 @@ def test_assets_cannot_traverse_into_other_dist_files(tmp_path):
     (dist / "assets").mkdir(parents=True)
     (dist / "index.html").write_text("private-other-entry")
     (dist / "assets" / "app.js").write_text("safe-asset")
-    with TestClient(create_app(tmp_path / "db", dist), base_url=ORIGIN) as client:
+    with TestClient(
+        create_app(tmp_path / "db", dist, repository=Repository(tmp_path / "db")), base_url=ORIGIN
+    ) as client:
         assert client.get("/assets/app.js").text == "safe-asset"
         response = client.get("/assets/%2e%2e/index.html")
         assert response.status_code == 404

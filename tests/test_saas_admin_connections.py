@@ -21,7 +21,7 @@ URL = "https://unit.iiko.it/resto/api"
 
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(tmp_path / "data")
+    app = create_app(tmp_path / "data", repository=Repository(tmp_path / "data"))
     app.state.repository.bootstrap("owner", "owner-long-password", "Owner")
     with TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as client:
         response = client.post(

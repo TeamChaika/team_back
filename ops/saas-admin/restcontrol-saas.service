@@ -12,6 +12,7 @@ Group=restcontrol-saas
 WorkingDirectory=/opt/restcontrol-saas/current/backend
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/restcontrol-saas/runtime.env
 UMask=0077
 ExecStart=/opt/restcontrol-saas/venv/bin/python -m app.saas_admin serve --mode production --origin https://rc.chaika.team --data-dir /opt/restcontrol-saas/data --dist-dir /opt/restcontrol-saas/current/frontend --uds /opt/supabase/volumes/proxy/caddy/restcontrol-run/saas.sock
 Restart=on-failure

@@ -1,6 +1,9 @@
-# Standalone control plane only; no dashboard, PostgreSQL or scheduler runtime.
+# Standalone Supabase PostgreSQL/Auth control plane; no dashboard or scheduler.
 fastapi==0.141.1
 uvicorn==0.52.4
 pydantic==2.13.5
 cryptography==48.0.1
 certifi==2026.7.22
+pydantic-settings==2.15.0
+httpx==0.28.1
+psycopg[binary]==3.3.5

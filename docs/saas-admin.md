@@ -1,88 +1,90 @@
 # Отдельный кабинет владельца SaaS
 
-Первый самостоятельный реестр компаний, код `app/saas_admin/`. Не импортирует
-`app.portal`, web-auth, планировщик, настройки tenant PostgreSQL и iiko.
-Публичный origin — `https://rc.chaika.team`; DNS, TLS и постоянный диск настраиваются отдельно.
-Сам код production-режима не подтверждает состоявшийся выпуск.
+Самостоятельный control plane `app/saas_admin/`: существующий Supabase PostgreSQL,
+приватная схема `restcontrol` и существующий Supabase Auth. Runtime не открывает SQLite,
+не импортирует `app.portal`, настройки dashboard, планировщик и worker документов.
+Публичный origin — `https://rc.chaika.team`. Наличие кода не подтверждает выпуск.
 
-## Запуск
+## Настройка и запуск
 
-Из корня backend, в окружении с FastAPI, Pydantic 2, Uvicorn, cryptography 48.0.1 и certifi 2026.7.22:
+Установить `requirements-saas-admin.txt`. На сервере service читает приватный
+`/opt/restcontrol-saas/runtime.env` (root:root, 0600) с четырьмя параметрами:
 
-```sh
-python -m app.saas_admin bootstrap --data-dir /private/path/registry \
-  --username owner --display-name 'Владелец' --password-file /private/path/password.txt
-python -m app.saas_admin serve --data-dir /private/path/registry \
-  --dist-dir /path/to/frontend/dist-saas-admin --port 8210
+```text
+CHAIKA_SAAS_DATABASE_URL=postgresql://restricted-role-connection
+CHAIKA_SAAS_SUPABASE_URL=https://trusted-supabase-origin
+CHAIKA_SAAS_ANON_KEY=<existing-anon-key>
+CHAIKA_SAAS_AUTH_ADMIN_KEY=<existing-auth-admin-key>
 ```
 
-Перед запуском собрать отдельный интерфейс из каталога frontend: `npx vite build --mode saas-admin`.
-Обычная сборка dashboard в `dist` не содержит `saas-admin.html`.
+Значения секретов задаются оператором вне исходников. Runtime connection должен
+работать как `restcontrol_backend`, без superuser/BYPASSRLS и без доступа к таблицам
+других продуктов. `auth_identities` предоставляет только UUID/email/маркер создания.
+Auth admin key используется исключительно сервером, браузеру не передаётся.
+Remote Auth URL требует HTTPS; HTTP допустим только для localhost/127.0.0.1.
 
-Файл пароля должен иметь права 0600; минимум 14 символов. Bootstrap одноразовый,
-пароль не печатается и не передаётся аргументом процесса. После bootstrap удалить
-исходный парольный файл после безопасного сохранения пароля владельцем.
-SQLite содержит scrypt с индивидуальной солью; сессии — только SHA-256 случайного
-256-битного токена. Cookie HttpOnly, SameSite=Strict, срок 8 часов, отдельный API-path.
-В local Secure отсутствует для loopback HTTP; в production обе cookie имеют Secure,
-включая удаление, и не задают Domain (host-only).
+Оператор применяет `supabase/migrations/20261008135638_restcontrol_supabase_registry.sql`
+к существующему Supabase. Миграция добавочная: dashboard/auth пароли и их grants
+не изменяются. Владелец — существующий Auth UUID с отдельным активным
+`restcontrol.platform_memberships`; обычная учётная запись dashboard доступа SaaS
+не получает. CLI `bootstrap` отклоняется: новый локальный пароль не создаётся.
 
-В local вход через `http://127.0.0.1:8210`, в production — через настроенный HTTPS origin.
-Host должен точно совпадать. Изменения,
-включая login, требуют точного Origin; после входа изменения требуют X-CSRF-Token.
-Нет доверия X-Forwarded-For, CORS, общих cookies или пользователей рабочего сайта.
-Login ограничен 10 неудачами на peer и 50 глобально за 15 минут; лимиты сохраняются
-в отдельной БД. Ответы входа не раскрывают наличие пользователя.
-
-## Production на постоянном VPS
-
-Отдельный процесс, один экземпляр, SQLite на постоянном локальном диске. Не размещать
-реестр в контейнерном слое Timeweb Apps или на сетевом filesystem. Не импортировать
-`app.portal`, не добавлять пользователей SaaS в Chaika. Business modules пока не подключены.
+В data-dir остаётся только исходный `credentials.key`: каталог 0700, ключ 0600.
+Ключ не генерируется при запуске и не заменяется при потере. Перенос старого SQLite
+выполняется отдельно через `app.saas_admin.import_registry`: ID компаний, история,
+реквизиты и membership сохраняются; старые хеши паролей и сессии не импортируются.
+Модули `repository.py`, `lifecycle.py`, `tenant_access.py` сохранены для миграции
+и синтетических regression-тестов, не являются runtime или плановым backup.
 
 ```sh
 python -m app.saas_admin serve --mode production --origin https://rc.chaika.team \
-  --data-dir /private/persistent/registry --dist-dir /release/dist-saas-admin \
-  --uds /private/run/saas.sock
+  --data-dir /opt/restcontrol-saas/data --dist-dir /release/frontend \
+  --uds /opt/supabase/volumes/proxy/caddy/restcontrol-run/saas.sock
 ```
 
-`--uds` принимает абсолютный путь вне data/dist, только production, несовместим с `--port`.
-Без него bind всегда `127.0.0.1`, port по умолчанию 8210. Сервис работает непривилегированным
-пользователем; владелец инфраструктуры даёт Caddy доступ к каталогу/socket и проверяет его
-после restart. Caddy завершает TLS, передаёт исходный точный Host и Origin, проксирует
-SPA и API одним origin. Публичного backend-порта нет, CORS не включается. Uvicorn
-`proxy_headers=False`: forwarded Host/IP игнорируются. Per-peer лимит за proxy общий;
-глобальные лимиты владельца и tenant сохраняются. `--origin` обязателен, canonical HTTPS
-DNS hostname без port/path/query/userinfo. Запросы с другим/дублированным Host или Origin
-отклоняются; Origin проверяется у изменений, CSRF дополнительно после входа.
+Frontend собирается отдельно: `npx vite build --mode saas-admin`, entry
+`saas-admin.html` и `assets/`. Data/static не пересекаются. Unix socket только для
+production, абсолютный путь вне data/static, несовместим с `--port`.
+Без socket сервис слушает 127.0.0.1:8210. `--origin` в production обязателен:
+canonical HTTPS DNS origin без port/path/query/userinfo. Перед стартом проверяются
+ключ, роль PostgreSQL, активный platform membership и расшифровка connections.
 
-Production до открытия Repository проверяет существующий data-dir 0700, БД/ключ 0600,
-схему 3, целостность/FK, владельца и расшифровку всех ciphertext. Нет автоматического
-пустого bootstrap при потере диска/ключа. Обязательны собранные saas-admin.html и assets.
-Ответы содержат HSTS; health и tenant workspace показывают `mode:"production"`.
+Caddy завершает TLS и передаёт точные Host/Origin; Uvicorn не доверяет forwarded headers.
+Cookie HttpOnly, SameSite=Strict, в production Secure и host-only, максимум 8 часов.
+BFF хранит хеш cookie-токена и зашифрованные Auth access/refresh tokens в PostgreSQL;
+каждый доступ проверяет Auth identity и отдельный SaaS membership. Изменения требуют
+Origin и после входа X-CSRF-Token. Нет CORS или общих cookies dashboard.
+Лимиты 10 неудач на peer/50 глобально за 15 минут хранятся в PostgreSQL.
 
-### Снимок, перенос и восстановление
+## Резервная копия и восстановление
 
 ```sh
-python -m app.saas_admin backup --data-dir /private/local/registry \
-  --output /private/backups/new-snapshot --clear-sessions
+python -m app.saas_admin backup --data-dir /opt/restcontrol-saas/data \
+  --output /opt/restcontrol-saas/backups/new-snapshot --clear-sessions
+# Отдельное операторское окружение, никогда не runtime.env:
+# CHAIKA_SAAS_RESTORE_DATABASE_URL=<operator-connection>
 python -m app.saas_admin restore --input /private/backups/new-snapshot \
-  --data-dir /private/persistent/new-registry
+  --data-dir /private/recovery/new-key-directory
 ```
 
-Оба целевых каталога должны отсутствовать; существующие никогда не заменяются.
-SQLite backup API создаёт согласованный снимок с WAL, рядом сохраняется оригинальный
-credentials.key. Проверяются integrity/FK/схема/owner и расшифровка, секреты не печатаются.
-Backup без `--clear-sessions` сохраняет сессии; export с флагом и любой restore удаляют
-owner/tenant sessions только из копии. Компании, ID, аудит, пользователи, password hashes,
-зашифрованные реквизиты и ключ сохраняются; локальный источник не изменяется.
+Backup берёт единый REPEATABLE READ READ ONLY снимок всех таблиц `restcontrol`,
+метаданные колонок, количества, SHA-256 и согласованный ключ. Формат — приватные
+`registry.json`, `manifest.json`, `credentials.key`; directory 0700/files 0600.
+Сессии всегда исключаются (флаг `--clear-sessions` оставлен для совместимости).
+Исходные данные/сессии не изменяются. SQLite и таблицы Auth не копируются.
 
-Снимки приватны и содержат ключ вместе с БД: хранить их в закрытом backup storage,
-отдельно от публичной сборки, предусмотреть защищённую внешнюю копию. Для отката остановить
-процесс, восстановить в новый каталог, проверить соответствие версии кода схеме, переключить
-путь и запустить один экземпляр. Проверить вход и сохранность данных после restart/redeploy.
-Не копировать работающий registry.sqlite3 обычным cp, не совмещать два writable экземпляра.
+Restore требует отдельный операторский DSN, новую директорию ключа, заранее
+мигрированную точно совпадающую **пустую** схему. Все таблицы блокируются перед
+проверкой пустоты. Runtime role restore выполнить не может. Восстановление строк
+идёт в одной транзакции, сохранение ключа происходит до commit; ошибка откатывает
+строки и удаляет новый каталог. Auth UUID должны уже существовать в целевом Auth;
+пароли Auth не восстанавливаются и не изменяются. После восстановления нужен новый
+вход. Restore в занятую рабочую схему запрещён, даже после остановки service.
 
+Копия содержит ciphertext и ключ вместе: хранить целиком в закрытом storage и
+сделать дополнительную приватную внешнюю копию. Для отката кода переключить
+совместимый release, не восстанавливать старые бизнес-данные. Recovery требует
+отдельной пустой схемы/базы и согласованного переключения DSN после проверки.
 
 ## API
 
@@ -123,26 +125,20 @@ Subscription state вычисляется при чтении.
 
 ## Хранение и проверки
 
-Пустой реестр по умолчанию, без seed/demo. Единственный источник — закрытый data-dir
-(0700) с registry.sqlite3 (0600); CLI устанавливает umask 077. FK, WAL, busy_timeout,
-user_version=3 (добавочные миграции со схем 1/2 сохраняют карточки/историю). Изменение карточки и audit фиксируются в одной транзакции BEGIN
-IMMEDIATE. История содержит автора, время, действие, названия изменённых полей;
-пароли и значения полей в audit не копируются. Сессии и лимиты также переживают restart.
+Источник данных — PostgreSQL `restcontrol`; JSONB карточка и отдельные колонки
+связаны CHECK constraints. Карточка, connections и audit фиксируются одной транзакцией.
+Версия проверяется под блокировкой строки; уникальность slug/domain включает архив.
+Audit append-only для runtime; platform memberships и migration manifest runtime
+может только читать. Browser роли anon/authenticated не имеют доступа к схеме;
+RLS ограничивает DB роль, API дополнительно проверяет компанию/роль пользователя.
 
-Отдельный SPA entry — `saas-admin.html`, assets из `assets/`; неизвестный asset
-возвращает 404, navigation route — этот entry, неизвестный API не получает HTML.
-Разрешённый resolved-путь asset ограничен подкаталогом assets, а SPA entry — dist.
-Пересечение data-dir/dist, включая symlink на data-dir, запрещает запуск до создания БД.
-Поиск учитывает название без регистра (включая кириллицу), slug и нормализованный домен.
-
-Проверки: `python -m pytest tests/test_saas_admin*.py -q` и
-`ruff check app/saas_admin tests/test_saas_admin*.py`. Проверяются вход/CSRF/Host,
-валидация, IDNA, конфликты версий и уникальности включая архив, сохранность данных,
-атомарный rollback при отказе audit, гонка обновлений, throttling, production prerequisites.
-`tests/test_saas_admin_production.py`: HTTPS/Host/Origin/CSRF, Secure cookie владельца
-и tenant при входе/смене/выходе, потерянный/неверный ключ, снимок/restore с сохранением
-данных и отзывом только копируемых сессий; синтетические данные, без запросов в iiko.
-
+Проверки: `python -m pytest tests/test_saas_admin*.py tests/test_saas_supabase_auth.py
+ tests/test_saas_domain_boundary.py -q` и `ruff check app/saas_admin`.
+PostgreSQL suite поднимает одноразовый PostgreSQL через pgserver; production/tenant
+regression с явно переданным старым Repository проверяют HTTP-контракт без внешнего Auth.
+Нативные тесты проверяют импорт, права, CRUD, rollback/audit, гонки, backup/restore,
+отказ занятой схемы и отсутствующего Auth UUID. Настоящие Auth/browser входы на
+целевом сервере требуют отдельной проверки после выпуска.
 
 ## Логины, пароли и ручная проверка Chain/RMS
 
@@ -179,7 +175,7 @@ POST `/connections/test` принимает `{url,login,password}` для нес
 не проверит сохранённое подключение. На всех POST обязательны owner auth, Origin, CSRF.
 
 Credentials хранятся Fernet-шифротекстом в отдельной таблице connections. Ключ
-`credentials.key` — отдельный приватный файл 0600 в data-dir, никогда не в SQLite.
+`credentials.key` — отдельный приватный файл 0600 в data-dir, никогда не в таблицах PostgreSQL.
 Потеря ключа при существующем ciphertext закрывает запуск; новый ключ не подставляется.
 Для восстановления нужны согласованные резервные копии БД и ключа; доступ к ним
 следует разделять. Шифрование защищает отдельную копию БД, а не скомпрометированный хост.
@@ -225,59 +221,30 @@ auth/logout в диагностике не выполнялись, сохран�
 через loopback HTTP: законченный короткий ответ, обрыв Content-Length,
 включённая TLS-верификация и отдельные безопасные классы ошибок.
 
-## Доступ администратора компании (схема 3)
+## Доступ администратора компании
 
-Явное создание доступа владельцем — отдельное действие после сохранения контакта.
-Сохранение `primary_admin` никогда не создаёт пользователя. Один администратор на
-компанию: email (без учёта регистра) и имя копируются при создании; последующие
-изменения контакта и сброс пароля не переименовывают учётную запись.
+Контакт `primary_admin` сохраняется независимо от создания доступа. Явное действие
+владельца связывает существующего Auth пользователя по email, сохраняя его пароль.
+При отсутствии email создаётся пользователь через Supabase Auth: случайный временный
+пароль выдаётся один раз, действует 72 часа; до смены доступна только auth-группа.
+Создание фиксирует marker до вызова Auth: при неопределённом результате повторное
+создание запрещено до сверки. Импортированные memberships без Auth UUID имеют
+статус `activation_required`. Отдельный tenant membership не даёт owner-доступ.
 
-- `GET /api/saas-admin/companies/{id}/admin-access` →
-  `{company_version,exists,login_path,admin}`. `admin` равен null либо содержит
-  `{id,username,display_name,must_change_password,temporary_expires_at,status}`.
-  Статусы: `temporary`, `expired`, `active`, `blocked`.
-- `POST` по тому же пути с `{expected_version}` создаёт доступ (201).
-- `POST .../admin-access/reset` с `{expected_version}` заменяет пароль и отзывает
-  все сессии этого администратора. UI требует подтверждения сброса.
-- Обе операции увеличивают версию компании, атомарно записывают audit и возвращают
-  дополнительно `temporary_password` только в этом ответе, с `Cache-Control: no-store`.
-  Пароль генерируется случайно (192 бита), хранится только как scrypt с солью,
-  действует 72 часа. GET, аудит и логи его не содержат. Повторно прочитать нельзя;
-  после потери ответа требуется явный сброс с актуальной версией.
+`GET /api/saas-admin/companies/{id}/admin-access` возвращает company_version,
+exists, login_path, admin, can_reset_password=false. `POST` с expected_version
+создаёт/активирует доступ. Reset общей identity запрещён с 409 shared_identity;
+пароль существующей учётной записи меняет только её владелец.
 
-Адрес — `/tenant/{slug}` на том же origin: loopback в local,
-`https://rc.chaika.team/tenant/{slug}` в production.
-Настроенный домен компании остаётся метаданными будущего развёртывания.
-Это отдельный кабинет компании; рабочие бизнес-модули ещё не подключены.
-Владелец не получает tenant-сессию автоматически и tenant не получает owner-сессию.
+Tenant API — `/api/saas-tenant/{slug}`: auth/login, auth/me, auth/logout,
+auth/password и workspace. Отдельная host-only cookie `saas_tenant_session`
+ограничена `/api/saas-tenant`. Смена пароля требует текущий пароль, Origin/CSRF,
+отзывает tenant сессии администратора и создаёт новую. Supabase Auth хранит пароли,
+BFF их хеши не сохраняет. Workspace содержит только компанию/модули и администратора,
+`business_modules_ready:false`; реквизиты iiko/заметки/dashboard недоступны.
+Suspended/archived запрещают вход; смена slug/приостановка/архив отзывает tenant sessions.
 
-Tenant API имеет префикс `/api/saas-tenant/{slug}`:
-
-- `POST /auth/login {username,password}` и `GET /auth/me` →
-  `{user:{id,username,display_name,company_id},company:{id,name,slug},must_change_password,csrf_token}`.
-- `POST /auth/password {current_password,new_password}` → тот же объект и новая
-  cookie/CSRF; новый пароль минимум 8 символов, отличается от текущего. Все старые
-  сессии отзываются. До смены доступна только auth-группа, workspace возвращает
-  `403 password_change_required`. Срок временного пароля проверяется и в сессии.
-- `POST /auth/logout` → 204.
-- `GET /workspace` → `{company:{id,name,slug,modules},admin:{id,username,display_name},
-  mode:"local"|"production",business_modules_ready:false}`. Ответ не содержит реквизитов iiko,
-  заметок, контактов, чужих компаний или бизнес-данных существующего dashboard.
-
-Отдельная HttpOnly/SameSite=Strict cookie `saas_tenant_session` ограничена путём
-`/api/saas-tenant`; токены хранятся только как SHA-256. Сессии до 8 часов (временные
-не дольше срока пароля). Company ID определяется сервером из сессии; slug должен
-соответствовать её компании. Изменения требуют Origin и X-CSRF-Token, login — Origin.
-Проверки Host/размера запросов общие. Login и неверный текущий пароль ограничены
-10 ошибками на peer / 50 глобально за 15 минут, отдельно от лимитов владельца.
-Draft допускает вход; suspended/archived запрещают его. При приостановке,
-архивировании или смене slug все tenant-сессии удаляются в транзакции изменения.
-Возобновление компании не восстанавливает отозванные сессии.
-
-Миграция 2→3 добавляет `tenant_admins`, `tenant_sessions`, `tenant_events` внутри
-транзакции; старые компании, история и зашифрованные подключения сохраняются.
-Перед обновлением действующего локального реестра сохранить согласованную SQLite
-backup и `credentials.key` в приватном каталоге. Отдельный tenant audit содержит
-только действие смены пароля, ID администратора/компании и время, без секретов.
-Синтетические тесты проверяют миграцию, конкурирующее создание, rollback audit,
-изоляцию компаний/owner, обязательную смену, ротацию, сброс, срок и блокировку.
+Общий URL — `https://rc.chaika.team/tenant/{slug}`. Настроенный company domain
+сервер разрешает только через точное совпадение domain активной неархивной компании:
+на таком host доступны context и tenant API/entry соответствующего slug; owner API
+запрещён. Запись домена не подтверждает DNS/TLS или реальную browser проверку.

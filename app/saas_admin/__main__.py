@@ -4,8 +4,7 @@ import argparse
 import os
 from pathlib import Path
 
-from .lifecycle import restore_registry, snapshot_registry
-from .repository import Repository
+from .postgres_backup import restore_postgres, snapshot_postgres
 
 
 def main():
@@ -34,18 +33,19 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     if args.command == "bootstrap":
-        path = Path(args.password_file)
-        if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
-            parser.error("Password file must be a regular private file (0600)")
-        password = path.read_text().rstrip("\r\n")
-        Repository(args.data_dir).bootstrap(args.username, password, args.display_name)
-        print("Owner initialized. No company records created.")
+        parser.error("Use existing Supabase Auth identity and operator-created platform membership")
     elif args.command == "backup":
-        snapshot_registry(args.data_dir, args.output, clear_sessions=args.clear_sessions)
-        print("Validated private registry backup created.")
+        dsn = os.environ.get("CHAIKA_SAAS_DATABASE_URL")
+        if not dsn:
+            parser.error("CHAIKA_SAAS_DATABASE_URL is required")
+        snapshot_postgres(dsn, args.data_dir, args.output)
+        print("Private PostgreSQL snapshot created; copied sessions omitted.")
     elif args.command == "restore":
-        restore_registry(args.input, args.data_dir)
-        print("Validated private registry restored; all sessions revoked.")
+        dsn = os.environ.get("CHAIKA_SAAS_RESTORE_DATABASE_URL")
+        if not dsn:
+            parser.error("CHAIKA_SAAS_RESTORE_DATABASE_URL operator connection is required")
+        restore_postgres(args.input, dsn, args.data_dir)
+        print("Private PostgreSQL snapshot restored; no Auth passwords or sessions restored.")
     else:
         import uvicorn
 

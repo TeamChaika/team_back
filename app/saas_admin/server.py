@@ -1,19 +1,20 @@
 """Dedicated owner API and SPA with explicit local and production boundaries."""
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import ConfigDict, Field, StrictInt, ValidationError, field_validator
+from starlette.concurrency import run_in_threadpool
 
 from .auth_validation import CredentialsModel, csrf_matches
-from .config import validate_origin
+from .config import SupabaseSettings, validate_origin, validate_private_key
 from .connection_check import check_connection
 from .connections import problem
-from .lifecycle import validate_registry
 from .models import CompanyWrite, ConnectionCredential, Model, metadata_url
-from .repository import Problem, Repository
+from .repository import Problem
 from .tenant_routes import mount_tenant_routes
 
 BASE = "/api/saas-admin"
@@ -57,11 +58,13 @@ def error_response(status, code, message, field=None):
     return JSONResponse({"detail": detail}, status_code=status)
 
 
-def create_app(data_dir, dist_dir=None, origin="http://127.0.0.1:8210", mode="local"):
+def create_app(
+    data_dir, dist_dir=None, origin="http://127.0.0.1:8210", mode="local", *, repository=None
+):
     allowed_host = validate_origin(origin, mode)
     secure = mode == "production"
     if secure:
-        validate_registry(data_dir)
+        validate_private_key(data_dir)
         if not dist_dir:
             raise ValueError("Production requires a built static directory")
         root = Path(dist_dir).resolve()
@@ -86,8 +89,31 @@ def create_app(data_dir, dist_dir=None, origin="http://127.0.0.1:8210", mode="lo
                 target = path.resolve()
                 if target.is_relative_to(data_root) or data_root.is_relative_to(target):
                     raise ValueError("Static symlinks must not expose the data directory")
-    repo = Repository(data_dir)
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    owned_repository = repository is None
+    if repository is None:
+        from .postgres_repository import PostgresRepository
+        from .supabase_auth import SupabaseAuthClient
+
+        settings = SupabaseSettings()
+        repository = PostgresRepository(
+            settings.database_url.get_secret_value(),
+            data_dir,
+            auth=SupabaseAuthClient(
+                settings.supabase_url + "/auth/v1",
+                settings.anon_key.get_secret_value(),
+                settings.auth_admin_key.get_secret_value(),
+            ),
+        )
+        repository.validate_ready()
+    repo = repository
+
+    @asynccontextmanager
+    async def lifespan(app):
+        yield
+        if owned_repository:
+            await run_in_threadpool(repo.auth.close)
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.repository = repo
     app.state.connection_tester = check_connection
     app.state.mode = mode
@@ -104,10 +130,36 @@ def create_app(data_dir, dist_dir=None, origin="http://127.0.0.1:8210", mode="lo
 
     @app.middleware("http")
     async def boundary(request, call_next):
-        if request.headers.getlist("host") != [allowed_host]:
+        hosts = request.headers.getlist("host")
+        if len(hosts) != 1:
             return error_response(403, "invalid_host", "Недопустимый адрес сервера")
+        host = hosts[0]
+        company = None
+        if host != allowed_host:
+            try:
+                validate_origin("https://" + host, mode="production")
+            except ValueError:
+                return error_response(403, "invalid_host", "Недопустимый адрес сервера")
+            if not secure or not hasattr(repo, "company_for_domain"):
+                return error_response(403, "invalid_host", "Недопустимый адрес сервера")
+            matched = await run_in_threadpool(repo.company_for_domain, host)
+            if matched is None:
+                return error_response(403, "invalid_host", "Домен компании не подключён")
+            company = {key: str(matched[key]) for key in ("id", "name", "slug")}
+            path = request.url.path
+            tenant_prefix = "/api/saas-tenant/" + company["slug"] + "/"
+            if (
+                path.startswith("/api/")
+                and path != "/api/saas-context"
+                and not path.startswith(tenant_prefix)
+            ):
+                return error_response(403, "tenant_boundary", "Этот раздел недоступен")
+            if path.startswith("/tenant/") and path.rstrip("/") != "/tenant/" + company["slug"]:
+                return error_response(403, "tenant_boundary", "Этот раздел недоступен")
+        request.state.saas_company = company
+        expected_origin = "https://" + host if secure else origin
         if request.method not in ("GET", "HEAD", "OPTIONS"):
-            if request.headers.getlist("origin") != [origin]:
+            if request.headers.getlist("origin") != [expected_origin]:
                 return error_response(403, "invalid_origin", "Недопустимый источник запроса")
             if request.headers.get("sec-fetch-site") == "cross-site":
                 return error_response(403, "invalid_origin", "Межсайтовый запрос запрещён")
@@ -144,6 +196,11 @@ def create_app(data_dir, dist_dir=None, origin="http://127.0.0.1:8210", mode="lo
         return session
 
     owner_dependency = Depends(owner)
+
+    @app.get("/api/saas-context")
+    def context(request: Request):
+        company = request.state.saas_company
+        return {"surface": "tenant" if company else "platform", "company": company}
 
     @app.get(BASE + "/health")
     def health():

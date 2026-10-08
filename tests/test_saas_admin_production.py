@@ -27,7 +27,7 @@ def registry(tmp_path):
 
 def client_for(registry):
     root, dist = registry
-    app = create_app(root, dist, ORIGIN, "production")
+    app = create_app(root, dist, ORIGIN, "production", repository=Repository(root))
     client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
     return client
 
@@ -196,7 +196,7 @@ def test_missing_wrong_key_and_uninitialized_storage_fail_closed(registry, tmp_p
     root, dist = registry
     (root / "credentials.key").write_bytes(Fernet.generate_key())
     with pytest.raises(ValueError, match="decrypt"):
-        create_app(root, dist, ORIGIN, "production")
+        validate_registry(root)
     (root / "credentials.key").unlink()
     with pytest.raises(ValueError):
         validate_registry(root)
@@ -248,6 +248,7 @@ def test_cli_uses_unix_socket_without_forwarded_trust(registry, tmp_path, monkey
     from app.saas_admin.__main__ import main
 
     root, dist = registry
+    monkeypatch.setattr("app.saas_admin.server.create_app", lambda *args: object())
     captured = {}
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
     socket = str(tmp_path / "run" / "saas.sock")

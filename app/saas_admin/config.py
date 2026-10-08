@@ -2,7 +2,46 @@
 
 import ipaddress
 import re
+from pathlib import Path
 from urllib.parse import urlsplit
+
+from pydantic import SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class SupabaseSettings(BaseSettings):
+    """Explicit credentials for the existing Supabase; no dashboard settings import."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="CHAIKA_SAAS_", extra="ignore", hide_input_in_errors=True
+    )
+    database_url: SecretStr
+    supabase_url: str
+    anon_key: SecretStr
+    auth_admin_key: SecretStr
+
+    @field_validator("supabase_url")
+    @classmethod
+    def auth_origin(cls, value):
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+            or (parsed.username or parsed.password or parsed.query or parsed.fragment)
+        ):
+            raise ValueError("Supabase URL must be a trusted HTTP(S) base URL")
+        if parsed.scheme == "http" and parsed.hostname not in ("127.0.0.1", "localhost"):
+            raise ValueError("Remote Supabase requires HTTPS")
+        return value.rstrip("/")
+
+
+def validate_private_key(directory):
+    directory = Path(directory)
+    key = directory / "credentials.key"
+    if directory.is_symlink() or not directory.is_dir() or directory.stat().st_mode & 0o077:
+        raise ValueError("A private existing key directory is required")
+    if key.is_symlink() or not key.is_file() or key.stat().st_mode & 0o077:
+        raise ValueError("Restore the original private credentials.key")
 
 
 def validate_origin(origin, mode):
