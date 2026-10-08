@@ -99,7 +99,7 @@ def test_extended_transport_enforces_explicit_body_limit(monkeypatch):
                 max_bytes=4,
                 read_timeout=30,
             )
-        assert failure.value.code == "unexpected_response"
+        assert failure.value.code == "response_too_large"
 
 
 def test_extended_transport_preserves_post_body(monkeypatch):

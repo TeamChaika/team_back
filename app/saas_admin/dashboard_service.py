@@ -185,10 +185,17 @@ class DashboardService:
             bodies = [
                 reports.query(before, end, ids, ["OpenDate.Typed", "Department.Id"], monetary),
                 reports.query(
-                    before,
+                    start,
                     end,
                     ids,
-                    ["OpenDate.Typed", "Department.Id", "DishId", "DishName"],
+                    ["Department.Id", "DishId", "DishName"],
+                    dish_fields,
+                ),
+                reports.query(
+                    before,
+                    start - timedelta(days=1),
+                    ids,
+                    ["Department.Id", "DishId", "DishName"],
                     dish_fields,
                 ),
                 reports.query(start, end, ids, [], fields),
@@ -207,14 +214,15 @@ class DashboardService:
                 grain,
                 parsed[0],
                 parsed[1],
-                reports.aggregate(parsed[2], available, count),
+                parsed[2],
                 reports.aggregate(parsed[3], available, count),
+                reports.aggregate(parsed[4], available, count),
                 observed,
                 available,
             )
             return {**result, "data_status": self.status(observed)}
 
-        return self._cached(source, ("overview-v1", str(start), str(end), tuple(ids), grain), load)
+        return self._cached(source, ("overview-v2", str(start), str(end), tuple(ids), grain), load)
 
     def sales(self, source, start, end, selected, kind, dish_id=None, dish_name=None):
         self.period(start, end)

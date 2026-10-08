@@ -156,10 +156,10 @@ def rows(body, request, start, end, ids):
     result = []
     seen = set()
     try:
-        for ordinal, value in enumerate(values):
+        for value in values:
             if not isinstance(value, dict):
                 invalid()
-            parsed = {"_ordinal": ordinal}
+            parsed = {}
             for field in request["groupByRowFields"]:
                 raw = value.get(field)
                 if field in ("DishId", "DishName") and raw in (None, ""):
@@ -248,7 +248,17 @@ def sales_rows(raw, kind, request, names, observed, report_id):
 
 
 def overview(
-    scope, start, end, grain, daily, dishes, current_total, previous_total, observed, available
+    scope,
+    start,
+    end,
+    grain,
+    daily,
+    current_dishes,
+    previous_dishes,
+    current_total,
+    previous_total,
+    observed,
+    available,
 ):
     previous_start = start - timedelta(days=(end - start).days + 1)
     coverage = [
@@ -280,24 +290,25 @@ def overview(
                 }
             )
     grouped = defaultdict(list)
-    for row in dishes:
-        grouped[
-            (
-                row["OpenDate.Typed"] >= start,
-                row["DishId"],
-                row["DishName"] if row["DishId"] is None else None,
-            )
-        ].append(row)
+    for current, dishes in ((True, current_dishes), (False, previous_dishes)):
+        for row in dishes:
+            grouped[
+                (current, row["DishId"], row["DishName"] if row["DishId"] is None else None)
+            ].append(row)
     dish_values = []
     for (current, dish_id, fallback_name), values in grouped.items():
-        # Match the saved dashboard's ORDER BY business_date DESC, ordinal DESC.
-        latest = max(values, key=lambda row: (row["OpenDate.Typed"], row["_ordinal"]))
+        # Period aggregates do not establish rename dates. Choose a stable label
+        # by its total revenue, never pretend source ordering means "latest".
+        names = defaultdict(Decimal)
+        for row in values:
+            names[row["DishName"]] += row["revenue"]
+        name = max(names, key=lambda candidate: (names[candidate], candidate or ""))
         dish_values.append(
             {
                 "is_current": current,
                 "dish_id": dish_id,
                 "fallback_name": fallback_name,
-                "dish_name": latest["DishName"],
+                "dish_name": name,
                 "revenue": sum((row["revenue"] for row in values), Decimal(0)),
                 "quantity": sum((row["quantity"] for row in values), Decimal(0))
                 if all(row["quantity"] is not None for row in values)

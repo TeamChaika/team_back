@@ -30,6 +30,7 @@ MESSAGES = {
     "unreachable": "Не удалось подключиться к серверу",
     "auth_failed": "Сервер не подтвердил логин и пароль",
     "unexpected_response": "Сервер вернул неподдерживаемый ответ",
+    "response_too_large": "Ответ сервера превышает допустимый размер",
     "logout_failed": "Вход выполнен, но освобождение сессии не подтверждено",
 }
 
@@ -161,7 +162,7 @@ def request(
                 break
             body.extend(part)
             if len(body) > max_bytes:
-                raise CheckFailure("unexpected_response")
+                raise CheckFailure("response_too_large")
         if response.length not in (None, 0):
             raise CheckFailure("unexpected_response")
         return response.status, bytes(body)

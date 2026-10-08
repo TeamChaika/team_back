@@ -143,8 +143,12 @@ def test_overview_contract_reuses_formula_and_uses_ungrouped_counters():
     assert set(value["trends"]) == {"day", "week", "month"}
     assert value["top_dishes"][0]["dish_id"] == DISH
     queries = provider.calls[-1][1]
-    assert queries[2][1]["groupByRowFields"] == []
     assert queries[3][1]["groupByRowFields"] == []
+    assert queries[4][1]["groupByRowFields"] == []
+    for index in (1, 2):
+        assert queries[index][1]["groupByRowFields"] == ["Department.Id", "DishId", "DishName"]
+    assert queries[1][1]["filters"]["OpenDate.Typed"]["from"] == "2026-10-07T00:00:00"
+    assert queries[2][1]["filters"]["OpenDate.Typed"]["to"] == "2026-10-07T00:00:00"
     assert value["data_status"]["cache_seconds"] == 300
 
 
@@ -448,20 +452,16 @@ def test_invalidated_session_deletion_is_committed_before_unauthorized():
     assert repo.committed
 
 
-def test_dish_name_uses_latest_business_date_then_source_ordinal():
+def test_dish_periods_are_explicit_without_fabricated_dates_or_order_dependent_names():
     start = date(2026, 10, 6)
     request = reports.query(
         start,
         START,
         [DEPARTMENT],
-        ["OpenDate.Typed", "Department.Id", "DishId", "DishName"],
+        ["Department.Id", "DishId", "DishName"],
         ["revenue", "quantity"],
     )
-    source_rows = [
-        {"OpenDate.Typed": "2026-10-07", "DishName": "Latest first"},
-        {"OpenDate.Typed": "2026-10-07", "DishName": "Latest last ordinal"},
-        {"OpenDate.Typed": "2026-10-06", "DishName": "Old upstream last"},
-    ]
+    source_rows = [{"DishName": "Dish Z"}, {"DishName": "Dish A"}]
     raw = [
         {
             **row,
@@ -473,6 +473,8 @@ def test_dish_name_uses_latest_business_date_then_source_ordinal():
         for row in source_rows
     ]
     parsed = reports.rows(json.dumps({"data": raw}).encode(), request, start, START, [DEPARTMENT])
+    assert all("OpenDate.Typed" not in row for row in parsed)
+    previous = [{**parsed[0], "revenue": Decimal("5.00"), "DishName": "Prior period name"}]
     empty_totals = reports.aggregate([], {"revenue", "cost", "checks", "guests"}, 2)
     value = reports.overview(
         SimpleNamespace(ids=[DEPARTMENT], departments=[{"id": DEPARTMENT, "name": "Restaurant"}]),
@@ -481,14 +483,31 @@ def test_dish_name_uses_latest_business_date_then_source_ordinal():
         "day",
         [],
         parsed,
+        previous,
         empty_totals,
         empty_totals,
         NOW,
         {"revenue", "quantity"},
     )
-    assert value["top_dishes"][0]["dish_name"] == "Latest last ordinal"
-    assert value["top_dishes"][0]["revenue"] == Decimal("30.75")
-    assert value["top_dishes"][0]["quantity"] == Decimal("3")
+    assert value["top_dishes"][0]["dish_name"] == "Dish Z"
+    assert value["top_dishes"][0]["revenue"] == Decimal("20.50")
+    assert value["top_dishes"][0]["previous_revenue"] == Decimal("5.00")
+    assert value["top_dishes"][0]["change"]["absolute"] == Decimal("15.50")
+    assert value["top_dishes"][0]["quantity"] == Decimal("2")
+    reversed_value = reports.overview(
+        SimpleNamespace(ids=[DEPARTMENT], departments=[{"id": DEPARTMENT, "name": "Restaurant"}]),
+        start,
+        START,
+        "day",
+        [],
+        list(reversed(parsed)),
+        previous,
+        empty_totals,
+        empty_totals,
+        NOW,
+        {"revenue", "quantity"},
+    )
+    assert reversed_value["top_dishes"] == value["top_dishes"]
     assert request["filters"]["OpenDate.Typed"] == {
         "filterType": "DateRange",
         "periodType": "CUSTOM",
