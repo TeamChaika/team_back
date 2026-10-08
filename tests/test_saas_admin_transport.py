@@ -86,6 +86,59 @@ def test_truncated_content_length_is_not_accepted_as_token(monkeypatch):
         assert failure.value.code == "unexpected_response"
 
 
+def test_extended_transport_enforces_explicit_body_limit(monkeypatch):
+    plain_http_transport(monkeypatch)
+    with local_response(b"longer-than-four") as port:
+        with pytest.raises(checker.CheckFailure) as failure:
+            checker.request(
+                "127.0.0.1",
+                port,
+                "127.0.0.1",
+                "/",
+                time.monotonic() + 1,
+                max_bytes=4,
+                read_timeout=30,
+            )
+        assert failure.value.code == "unexpected_response"
+
+
+def test_extended_transport_preserves_post_body(monkeypatch):
+    plain_http_transport(monkeypatch)
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append(self.rfile.read(int(self.headers["Content-Length"])))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+    thread.start()
+    try:
+        assert checker.request(
+            "127.0.0.1",
+            server.server_port,
+            "127.0.0.1",
+            "/sales",
+            time.monotonic() + 1,
+            method="POST",
+            body=b'{"x":1}',
+            max_bytes=100,
+            read_timeout=30,
+        ) == (200, b"{}")
+        assert received == [b'{"x":1}']
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
 def test_tls_context_uses_certifi_with_verification_enabled(monkeypatch):
     context_factory = ssl.create_default_context
     seen = []

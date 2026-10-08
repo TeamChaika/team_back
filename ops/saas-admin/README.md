@@ -1,16 +1,30 @@
 # Dedicated RestControl deployment
 
-This deployment runs only `app.saas_admin`, not `app.portal`, the scheduler or the
-documents worker. The SPA and API use `https://rc.chaika.team` and relative API
-URLs. There is no cross-origin API and no CORS wildcard. Host and Origin checks,
-CSRF and Secure host-only cookies are enforced by the application.
+Updated 2026-10-08. The dedicated VPS `5.42.103.76` runs `app.saas_admin`.
+The owner SPA/API remain same-origin at `https://rc.chaika.team`, with the existing
+Supabase PostgreSQL `restcontrol` registry and Supabase Auth.
+
+The first tenant slice uses the original React dashboard on shared Timeweb static
+App `254029`, without Chaika branding. On publication, `iiko.tdpay.ru` returns to
+that App; `api.iiko.tdpay.ru` serves its SaaS API on this VPS. Credentialed CORS
+accepts only the exact active registry frontend origin and its own tenant slug;
+host-only Secure SameSite=Strict cookies and CSRF are required. No wildcard or
+Chaika fallback is allowed. `VITE_PRIMARY_ORIGINS` retains the exact primary
+dashboard and technical hosts.
+
+Overview/Sales read only the company's own Chain, with a 300-second process cache.
+Other business modules are not ready. This slice and split-origin deployment await
+publication and real browser verification; earlier tenant login evidence does not
+prove this release. See [the contract](../../docs/tenant-dashboard.md).
 
 ## Layout
 
 - `/opt/restcontrol-saas/releases/<backend-sha>-<frontend-sha>/`: immutable source
-  (`backend/app/saas_admin` plus empty `app/__init__.py`) and built `frontend/`.
+  (`backend/app/saas_admin`, empty `app/__init__.py`, and pure helpers
+  `app/web/{__init__,overview,coverage}.py`) and built `frontend/`.
 - `/opt/restcontrol-saas/current`: symlink to the deployed release.
-- `/opt/restcontrol-saas/venv`: runtime from `requirements-saas-admin.txt`.
+- `/opt/restcontrol-saas/venv`: runtime from `requirements-saas-admin.txt`, including
+  `defusedxml==0.7.1`. The reused overview helpers do not activate portal SQL.
 - `/opt/restcontrol-saas/data`: original durable encryption key only; PostgreSQL holds the registry,
   directory 0700/files 0600, owned by unprivileged `restcontrol-saas`.
 - `/opt/restcontrol-saas/backups`: private consistent PostgreSQL JSON+manifest+key snapshots.
@@ -46,8 +60,12 @@ limits are shared behind this proxy; global limits remain active.
    reload using the same environment as Caddy's startup (its auth password is
    converted to bcrypt at startup). Preserve all existing sites and containers.
 6. Point the rc DNS record to this server, validate HTTPS and browser login.
-   Company Host routing is checked against the exact active company domain;
-   corresponding DNS/TLS and actual browser tests remain necessary.
+   Company routing is checked against the exact active registry domain/API host.
+   For the tenant release, build the normal shared React App for App `254029`,
+   route only `api.iiko.tdpay.ru` to this VPS and restore `iiko.tdpay.ru` to the App.
+   Verify DNS/TLS, exact credentialed CORS (including error responses/preflight),
+   own-slug isolation, CSRF, Strict cookie login/logout and real Overview/Sales.
+   These steps are pending for the new slice.
 7. Run a PostgreSQL backup with the runtime DSN: all registry tables are read
    in one repeatable-read snapshot; copied BFF sessions are always omitted.
    Restore only with CHAIKA_SAAS_RESTORE_DATABASE_URL in a separate operator

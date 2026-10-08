@@ -7,3 +7,4 @@ certifi==2026.7.22
 pydantic-settings==2.15.0
 httpx==0.28.1
 psycopg[binary]==3.3.5
+defusedxml==0.7.1

@@ -1,5 +1,7 @@
 """Tenant memberships, explicit Auth provisioning and company-scoped sessions."""
 
+import hashlib
+import json
 import secrets
 import time
 from datetime import UTC, datetime
@@ -8,12 +10,56 @@ from uuid import uuid4
 from psycopg.types.json import Jsonb
 
 from .auth_validation import csrf_matches
+from .dashboard_source import DashboardSource
 from .repository import Problem, digest, stamp
 
 TEMP_SECONDS = 72 * 3600
 
 
 class PostgresTenantAccess:
+    def tenant_dashboard_source(self, token, slug):
+        """Never accept a caller-supplied company or inherit dashboard owner access."""
+        with self.connect(True) as db:
+            row = self._verified(db, token, True, slug)
+            result = self._dashboard_source(db, row) if row else None
+        if result is None:
+            raise Problem(401, "unauthorized", "Требуется вход")
+        return result
+
+    def _dashboard_source(self, db, row):
+        if row["must_change"]:
+            raise Problem(403, "password_change_required", "Сначала смените временный пароль")
+        company = row["body"]
+        if company["status"] != "active":
+            raise Problem(403, "company_inactive", "Компания ещё не активирована")
+        if company.get("modules", {}).get("analytics") is not True:
+            raise Problem(403, "module_disabled", "Аналитика компании не подключена")
+        connection = db.execute(
+            "SELECT url,ciphertext FROM connections WHERE company_id=%s AND connection_id='chain'",
+            (row["company_id"],),
+        ).fetchone()
+        if (
+            not connection
+            or not company.get("chain_url")
+            or connection["url"] != company["chain_url"]
+        ):
+            raise Problem(503, "chain_required", "Сначала настройте iikoChain компании")
+        secret = json.loads(self.vault.decrypt(connection["ciphertext"]))
+        fingerprint = hashlib.sha256(
+            (connection["url"] + "\0" + connection["ciphertext"]).encode()
+        ).hexdigest()
+        return DashboardSource(
+            str(company["id"]),
+            company["name"],
+            str(row["id"]),
+            row["display_name"],
+            company["version"],
+            fingerprint,
+            connection["url"],
+            secret["login"],
+            secret["password"],
+        )
+
     @staticmethod
     def _revoke_company_sessions(db, company_id):
         db.execute(

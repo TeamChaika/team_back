@@ -15,6 +15,7 @@ from .connection_check import check_connection
 from .connections import problem
 from .models import CompanyWrite, ConnectionCredential, Model, metadata_url
 from .repository import Problem
+from .tenant_dashboard import mount_dashboard_routes
 from .tenant_routes import mount_tenant_routes
 
 BASE = "/api/saas-admin"
@@ -128,13 +129,14 @@ def create_app(
         field = ".".join(str(x) for x in item["loc"] if x != "body")
         return error_response(422, "validation_error", item["msg"], field)
 
-    @app.middleware("http")
-    async def boundary(request, call_next):
+    async def enforce_boundary(request, call_next):
         hosts = request.headers.getlist("host")
         if len(hosts) != 1:
             return error_response(403, "invalid_host", "Недопустимый адрес сервера")
         host = hosts[0]
         company = None
+        api_host = False
+        expected_origin = "https://" + host if secure else origin
         if host != allowed_host:
             try:
                 validate_origin("https://" + host, mode="production")
@@ -142,22 +144,52 @@ def create_app(
                 return error_response(403, "invalid_host", "Недопустимый адрес сервера")
             if not secure or not hasattr(repo, "company_for_domain"):
                 return error_response(403, "invalid_host", "Недопустимый адрес сервера")
-            matched = await run_in_threadpool(repo.company_for_domain, host)
+            # api.<registered domain> is an API-only sibling of the static frontend.
+            # The exact registry lookup is repeated on every request, including OPTIONS.
+            api_host = host.startswith("api.")
+            company_domain = host[4:] if api_host else host
+            matched = await run_in_threadpool(repo.company_for_domain, company_domain)
             if matched is None:
                 return error_response(403, "invalid_host", "Домен компании не подключён")
             company = {key: str(matched[key]) for key in ("id", "name", "slug")}
+            if api_host:
+                expected_origin = "https://" + company_domain
+                if request.headers.getlist("origin") != [expected_origin]:
+                    return error_response(403, "invalid_origin", "Недопустимый источник запроса")
+                # Set only after exact host, registry and Origin verification. The outer
+                # middleware also adds CORS to validation/auth/boundary error responses.
+                request.state.saas_cors_origin = expected_origin
+                if request.headers.get("sec-fetch-site") == "cross-site":
+                    return error_response(403, "invalid_origin", "Межсайтовый запрос запрещён")
             path = request.url.path
             tenant_prefix = "/api/saas-tenant/" + company["slug"] + "/"
-            if (
-                path.startswith("/api/")
-                and path != "/api/saas-context"
-                and not path.startswith(tenant_prefix)
-            ):
+            allowed_api_path = path == "/api/saas-context" or path.startswith(tenant_prefix)
+            if (api_host or path.startswith("/api/")) and not allowed_api_path:
                 return error_response(403, "tenant_boundary", "Этот раздел недоступен")
             if path.startswith("/tenant/") and path.rstrip("/") != "/tenant/" + company["slug"]:
                 return error_response(403, "tenant_boundary", "Этот раздел недоступен")
         request.state.saas_company = company
-        expected_origin = "https://" + host if secure else origin
+        if api_host:
+            if request.method == "OPTIONS":
+                methods = request.headers.getlist("access-control-request-method")
+                header_values = request.headers.getlist("access-control-request-headers")
+                if len(methods) != 1 or methods[0] not in ("GET", "POST"):
+                    return error_response(403, "invalid_preflight", "Недопустимый метод запроса")
+                if len(header_values) > 1:
+                    return error_response(403, "invalid_preflight", "Недопустимые заголовки")
+                if header_values:
+                    headers = [item.strip().lower() for item in header_values[0].split(",")]
+                    if any(item not in ("content-type", "x-csrf-token") for item in headers):
+                        return error_response(403, "invalid_preflight", "Недопустимые заголовки")
+                return Response(
+                    status_code=204,
+                    headers={
+                        "Access-Control-Allow-Methods": "GET, POST",
+                        "Access-Control-Allow-Headers": "content-type, x-csrf-token",
+                    },
+                )
+            if request.method not in ("GET", "POST"):
+                return error_response(403, "invalid_method", "Недопустимый метод запроса")
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             if request.headers.getlist("origin") != [expected_origin]:
                 return error_response(403, "invalid_origin", "Недопустимый источник запроса")
@@ -174,7 +206,14 @@ def create_app(
                     return error_response(422, "body_too_large", "Слишком большой запрос")
                 chunks.append(chunk)
             request._body = b"".join(chunks)
-        response = await call_next(request)
+        return await call_next(request)
+
+    def response_headers(request, response):
+        cors_origin = getattr(request.state, "saas_cors_origin", None)
+        if cors_origin:
+            response.headers["Access-Control-Allow-Origin"] = cors_origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers.append("Vary", "Origin")
         if secure:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
         response.headers["Cache-Control"] = "no-store"
@@ -187,6 +226,18 @@ def create_app(
             "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         )
         return response
+
+    @app.middleware("http")
+    async def boundary(request, call_next):
+        return response_headers(request, await enforce_boundary(request, call_next))
+
+    @app.exception_handler(Exception)
+    async def unexpected_error_handler(request, exc):
+        # Starlette re-raises server errors for server-side reporting after sending
+        # this sanitized response; the allowed frontend can still read its status.
+        return response_headers(
+            request, error_response(500, "internal_error", "Внутренняя ошибка сервера")
+        )
 
     def owner(request: Request):
         session = repo.session(request.cookies.get(COOKIE, ""))
@@ -340,6 +391,7 @@ def create_app(
         return repo.provision_admin(company_id, body.expected_version, session["user"], reset=True)
 
     mount_tenant_routes(app, repo, mode=mode)
+    mount_dashboard_routes(app, repo)
 
     if dist_dir:
         root = Path(dist_dir).resolve()

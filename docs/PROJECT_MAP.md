@@ -1,13 +1,15 @@
 # Карта backend Chaika Team
 
-Срез кода: **2026-10-03**, Git `7c48c412d5f8c225af34c99193206507fae4f0f1`.
+Основной срез кода: **2026-10-03**, Git `7c48c412d5f8c225af34c99193206507fae4f0f1`.
+SaaS-маршруты и runtime уточнены **2026-10-08**; новый tenant dashboard ожидает выпуска.
 Карта помогает выбрать нужный модуль; она не подтверждает текущую конфигурацию production.
 
 | Задача | Тематическая карта | Первый файл |
 | --- | --- | --- |
+| Клиентский dashboard: свои Overview/Sales из Chain | [Контракт первого среза](tenant-dashboard.md) | `app/saas_admin/tenant_dashboard.py`, `dashboard_service.py`, `dashboard_transport.py`, `dashboard_reports.py`; свой membership/module gate, кэш 300с в процессе, чистые функции `app/web/overview.py`; без chaika SQL/глобальных credentials |
 | Отдельный кабинет владельца SaaS, local/production реестр компаний | [Контракт и запуск](saas-admin.md) | `app/saas_admin/server.py`, `config.py`, `postgres_backup.py`, `__main__.py`, `postgres_repository.py`, `supabase_auth.py`, `connections.py`, `connection_check.py`; существующий Supabase PostgreSQL/Auth, приватная схема restcontrol, локальный Fernet key, точный HTTPS origin, Secure cookies, приватный backup/restore, loopback или Unix socket; без импортов app.portal |
-| Выпуск SaaS на постоянный сервер, TLS, резервные копии | [Изолированное развёртывание](../ops/saas-admin/README.md) | `requirements-saas-admin.txt`, `ops/saas-admin/restcontrol-saas.service`, `rc.caddy`, `restcontrol-backup.{service,timer}`; отдельный процесс и приватная БД, same-origin без cross-origin API |
-| Локальный администратор компании, временный пароль, изоляция tenant | [Контракт и запуск](saas-admin.md#доступ-администратора-компании-схема-3) | `app/saas_admin/pg_tenant_access.py`, `pg_auth.py`, `tenant_routes.py`; Supabase memberships, отдельные BFF сессии, кабинет на общем SaaS origin; бизнес-модули пока не подключены |
+| Выпуск SaaS на постоянный сервер, TLS, резервные копии | [Изолированное развёртывание](../ops/saas-admin/README.md) | `requirements-saas-admin.txt`, `ops/saas-admin/restcontrol-saas.service`, `rc.caddy`, `restcontrol-backup.{service,timer}`; отдельный процесс на VPS 5.42.103.76 и PostgreSQL restcontrol; rc same-origin, tenant API с точным credentials CORS |
+| Локальный администратор компании, временный пароль, изоляция tenant | [Контракт и запуск](saas-admin.md#доступ-администратора-компании-схема-3) | `app/saas_admin/pg_tenant_access.py`, `pg_auth.py`, `tenant_routes.py`; Supabase memberships, отдельные BFF сессии, общий React App на static App 254029 без бренда Чайки; Overview/Sales из своей Chain, остальные модули не готовы |
 | Вход, сессия, рестораны, разделы | [API и доступ](CODEMAPS/api-access.md) | [app/portal.py](../app/portal.py) |
 | Мой профиль, свой пароль, подключить Telegram | [API и доступ](CODEMAPS/api-access.md) | [app/web/profile.py](../app/web/profile.py), [app/documents/telegram_link.py](../app/documents/telegram_link.py) |
 | Восстановление через Telegram | [Сценарий и выпуск](telegram-password-recovery.md) | [app/web/password_recovery.py](../app/web/password_recovery.py), [app/documents/password_recovery.py](../app/documents/password_recovery.py) |
@@ -47,3 +49,17 @@
 Наличие этих процессов в коде не доказывает их фактический запуск на сервере.
 `/api/health` проверяет только HTTP-процесс. Для внешних интеграций и очереди
 нужны отдельные проверки из тематических карт.
+
+## Первый tenant dashboard — готовится к выпуску
+
+`iiko.tdpay.ru` после публикации возвращается на общий static App Timeweb `254029`;
+`api.iiko.tdpay.ru` обслуживается SaaS процессом на VPS `5.42.103.76`. Панель
+`rc.chaika.team`, PostgreSQL `restcontrol` и Supabase Auth сохраняются. Точные primary
+dashboard/technical host заданы через `VITE_PRIMARY_ORIGINS`. Tenant API проверяет
+реестр, точный frontend Origin и собственный slug; credentials CORS, host-only
+Secure SameSite=Strict cookie, CSRF. Нет wildcard или fallback к Чайке.
+
+Runtime включает `app/web/{__init__,overview,coverage}.py` только как чистые helpers
+и `defusedxml==0.7.1`; SQL-путь overview, `app.portal`, scheduler и documents worker
+не подключаются. Overview/Sales читают собственную Chain, кэш процесса 300 секунд.
+Наличие кода не доказывает deployment, DNS/TLS или реальную браузерную проверку.

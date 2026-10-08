@@ -100,7 +100,19 @@ class PinnedHTTPS(http.client.HTTPSConnection):
             raise
 
 
-def request(host, port, ip, path, deadline, headers=None):
+def request(
+    host,
+    port,
+    ip,
+    path,
+    deadline,
+    headers=None,
+    *,
+    method="GET",
+    body=None,
+    max_bytes=16384,
+    read_timeout=5,
+):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise CheckFailure("timeout")
@@ -124,10 +136,18 @@ def request(host, port, ip, path, deadline, headers=None):
     watchdog.start()
     try:
         connection.request(
-            "GET", path, headers={"Accept": "text/plain", "Connection": "close", **(headers or {})}
+            method,
+            path,
+            body=body,
+            headers={"Accept": "text/plain", "Connection": "close", **(headers or {})},
         )
         sock = connection.sock
         held_socket[0] = sock
+        if sock:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CheckFailure("timeout")
+            sock.settimeout(min(read_timeout, remaining))
         response = connection.getresponse()
         body = bytearray()
         while not response.isclosed():
@@ -135,12 +155,12 @@ def request(host, port, ip, path, deadline, headers=None):
             if remaining <= 0:
                 raise CheckFailure("timeout")
             if sock:
-                sock.settimeout(min(5, remaining))
+                sock.settimeout(min(read_timeout, remaining))
             part = response.read1(4096)
             if not part:
                 break
             body.extend(part)
-            if len(body) > 16384:
+            if len(body) > max_bytes:
                 raise CheckFailure("unexpected_response")
         if response.length not in (None, 0):
             raise CheckFailure("unexpected_response")

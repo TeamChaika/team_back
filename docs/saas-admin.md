@@ -248,3 +248,32 @@ Suspended/archived запрещают вход; смена slug/приостан
 сервер разрешает только через точное совпадение domain активной неархивной компании:
 на таком host доступны context и tenant API/entry соответствующего slug; owner API
 запрещён. Запись домена не подтверждает DNS/TLS или реальную browser проверку.
+
+### Общий frontend в Apps и отдельный API origin
+
+Для customer domain `iiko.tdpay.ru` общий статический frontend Apps использует
+`https://api.iiko.tdpay.ru/api/saas-context` и свой
+`/api/saas-tenant/{slug}/…`. API обслуживает тот же SaaS BFF; отдельный сервер
+или база для клиента не создаётся. Конвенция для следующих компаний —
+`api.<company.domain>`. Префикс `api.` зарезервирован для API: hostname после
+удаления ровно одного префикса должен точно совпасть с domain в реестре.
+Проверка реестра повторяется на каждом запросе и preflight; archived/suspended
+или отключённый домен теряет доступ сразу. `X-Forwarded-Host` не выбирает компанию.
+
+На API-host разрешены только context и API своего slug, без platform API,
+чужого tenant или статического entry. Каждый запрос требует единственный точный
+`Origin: https://<company.domain>`; hostname/Origin с портом, другой Origin,
+несколько Origin и `Sec-Fetch-Site: cross-site` отклоняются. CORS разрешает
+только этот проверенный origin, credentials и `Vary: Origin`; эти заголовки
+добавляются также к ошибкам auth, validation и границы tenant для верного origin.
+OPTIONS не требует сессии, но проверяет домен, origin и namespace; разрешены
+только GET/POST и заголовки content-type/x-csrf-token. Прочие методы/заголовки
+preflight получают 403. Вся прежняя проверка membership и CSRF для действий
+остаётся обязательной.
+
+Cookie сохраняет host-only, Secure, HttpOnly, SameSite=Strict и tenant path;
+Domain не расширяется. HTTPS frontend/API должны быть same-site поддоменами,
+чтобы браузер отправлял Strict cookie с `credentials: include`. Старый прямой
+company domain и общий `rc.chaika.team/tenant/{slug}` продолжают поддерживаться
+для перехода. Реальная работа требует отдельных DNS/TLS для frontend/API и
+браузерной проверки; локальные тесты не подтверждают выпуск или DNS.

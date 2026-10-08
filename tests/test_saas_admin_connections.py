@@ -261,6 +261,9 @@ def test_absolute_deadline_interrupts_slow_headers(monkeypatch):
     class FakeSocket:
         closed = False
 
+        def settimeout(self, timeout):
+            pass
+
         def shutdown(self, how):
             self.closed = True
 
