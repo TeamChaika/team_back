@@ -5,6 +5,9 @@
 
 | Задача | Тематическая карта | Первый файл |
 | --- | --- | --- |
+| Отдельный кабинет владельца SaaS, local/production реестр компаний | [Контракт и запуск](saas-admin.md) | `app/saas_admin/server.py`, `config.py`, `lifecycle.py`, `__main__.py`, `repository.py`, `connections.py`, `connection_check.py`; standalone SQLite/Fernet на постоянном диске, точный HTTPS origin, Secure cookies, приватный backup/restore, loopback или Unix socket; без импортов app.portal |
+| Выпуск SaaS на постоянный сервер, TLS, резервные копии | [Изолированное развёртывание](../ops/saas-admin/README.md) | `requirements-saas-admin.txt`, `ops/saas-admin/restcontrol-saas.service`, `rc.caddy`, `restcontrol-backup.{service,timer}`; отдельный процесс и приватная БД, same-origin без cross-origin API |
+| Локальный администратор компании, временный пароль, изоляция tenant | [Контракт и запуск](saas-admin.md#доступ-администратора-компании-схема-3) | `app/saas_admin/tenant_access.py`, `tenant_routes.py`; схема SQLite 3, отдельные сессии, кабинет на общем SaaS origin; бизнес-модули пока не подключены |
 | Вход, сессия, рестораны, разделы | [API и доступ](CODEMAPS/api-access.md) | [app/portal.py](../app/portal.py) |
 | Мой профиль, свой пароль, подключить Telegram | [API и доступ](CODEMAPS/api-access.md) | [app/web/profile.py](../app/web/profile.py), [app/documents/telegram_link.py](../app/documents/telegram_link.py) |
 | Восстановление через Telegram | [Сценарий и выпуск](telegram-password-recovery.md) | [app/web/password_recovery.py](../app/web/password_recovery.py), [app/documents/password_recovery.py](../app/documents/password_recovery.py) |

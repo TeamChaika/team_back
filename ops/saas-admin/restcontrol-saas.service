@@ -1,0 +1,38 @@
+[Unit]
+Description=RestControl SaaS registry
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=restcontrol-saas
+Group=restcontrol-saas
+WorkingDirectory=/opt/restcontrol-saas/current/backend
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStart=/opt/restcontrol-saas/venv/bin/python -m app.saas_admin serve --mode production --origin https://rc.chaika.team --data-dir /opt/restcontrol-saas/data --dist-dir /opt/restcontrol-saas/current/frontend --uds /opt/supabase/volumes/proxy/caddy/restcontrol-run/saas.sock
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/restcontrol-saas/data /opt/supabase/volumes/proxy/caddy/restcontrol-run
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+CapabilityBoundingSet=
+LimitCORE=0
+MemoryMax=384M
+CPUQuota=50%
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

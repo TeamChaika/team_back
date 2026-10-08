@@ -1,0 +1,8 @@
+rc.chaika.team {
+    encode zstd gzip
+    reverse_proxy unix//etc/caddy/restcontrol-run/saas.sock
+    header {
+        -Server
+        Strict-Transport-Security "max-age=2592000"
+    }
+}

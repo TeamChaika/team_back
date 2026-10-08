@@ -1,0 +1,20 @@
+[Unit]
+Description=Validated private RestControl registry backup
+
+[Service]
+Type=oneshot
+User=restcontrol-saas
+Group=restcontrol-saas
+WorkingDirectory=/opt/restcontrol-saas/current/backend
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+ExecStart=/bin/sh -c 'exec /opt/restcontrol-saas/venv/bin/python -m app.saas_admin backup --data-dir /opt/restcontrol-saas/data --output "/opt/restcontrol-saas/backups/registry-$(date -u +%%Y%%m%%dT%%H%%M%%S)" --clear-sessions'
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/restcontrol-saas/backups /opt/restcontrol-saas/data
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+LimitCORE=0
+MemoryMax=256M
