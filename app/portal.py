@@ -113,7 +113,9 @@ def create_portal(
                     await run_in_threadpool(live_sales.get)
                 except HTTPException:
                     pass  # LiveSales logs the fixed error code; requests can retry later.
-            if settings.sync_enabled:
+            # Tenant fleet starts its scheduler only after initial sync is ready.
+            # The portal must not create a second scheduler ahead of that check.
+            if settings.sync_enabled and runtime.mode == "legacy":
                 from app.scheduler import start_process
 
                 scheduler = start_process()

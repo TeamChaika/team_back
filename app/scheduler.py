@@ -307,10 +307,9 @@ def main():
         signal.signal(sig, lambda *_: stop.set())
     if load_runtime().mode == "tenant":
         load_runtime().runtime_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    external = (
-        load_runtime().mode == "tenant"
-        and os.environ.get("RESTCONTROL_TENANT_EXTERNAL_COLLECTOR") == "true"
-    )
+    # A company collector is owned by its runtime supervisor. Embedded portal
+    # schedulers must never bind over that socket, even without an operator flag.
+    external = load_runtime().mode == "tenant"
     if external:
         from app.tenancy.collector_probe import ExternalCollector
 

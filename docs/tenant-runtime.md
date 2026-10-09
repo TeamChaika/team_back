@@ -32,7 +32,13 @@ web из `RESTCONTROL_TENANT_WEB_*`, помощник из `RESTCONTROL_TENANT_A
 ненастроенными. Старые URL pay/documents не наследуются.
 
 Приватный collector использует `<runtime directory>/collector.sock`; при явном
-`COLLECTOR_PORT` HTTP обращается к своему loopback-порту. Распределение уникальных
+`COLLECTOR_PORT` HTTP обращается к своему loopback-порту. Tenant scheduler всегда
+использует отдельно запущенный collector и проверяет company/version через private
+health; отсутствие отдельного collector останавливает worker без запуска второго
+сборщика, без зависимости от `RESTCONTROL_TENANT_EXTERNAL_COLLECTOR`.
+Tenant portal не запускает встроенный scheduler: fleet запускает отдельный
+`run-scheduler` только после успешного `initial_sync`. В legacy portal встроенный
+scheduler сохраняется. Распределение уникальных
 портов контролирует процесс provisioning. Временные файлы и сохранённые расшифровки
 попадают в директорию компании. Advisory locks хешируют компанию, назначение и ресурс.
 Общий лимит лицензии одного физического iiko сервера требует дополнительного

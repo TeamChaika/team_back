@@ -171,3 +171,53 @@ def test_completed_slot_not_repeated_after_restart_and_failed_slot_retried(db, m
         "succeeded",
         2,
     )
+
+
+@pytest.mark.parametrize("flag", [None, "false", "true"])
+def test_tenant_scheduler_never_replaces_unavailable_external_collector(
+    monkeypatch, tmp_path, flag
+):
+    from types import SimpleNamespace
+
+    from app.tenancy import collector_probe
+
+    if flag is None:
+        monkeypatch.delenv("RESTCONTROL_TENANT_EXTERNAL_COLLECTOR", raising=False)
+    else:
+        monkeypatch.setenv("RESTCONTROL_TENANT_EXTERNAL_COLLECTOR", flag)
+    runtime = SimpleNamespace(mode="tenant", runtime_directory=tmp_path / "runtime")
+    settings = SimpleNamespace(
+        sync_enabled=True,
+        iiko_configured=True,
+        database_url=SimpleNamespace(get_secret_value=lambda: "test-dsn"),
+        sync_api_key=SimpleNamespace(get_secret_value=lambda: "test-api-key"),
+    )
+    monkeypatch.setattr(scheduler, "Settings", lambda: settings)
+    monkeypatch.setattr(scheduler, "load_runtime", lambda: runtime)
+    monkeypatch.setattr(scheduler.signal, "signal", lambda *args: None)
+    calls = []
+
+    class MissingCollector:
+        def __init__(self, actual_runtime):
+            assert actual_runtime is runtime
+            calls.append("external")
+
+        def poll(self):
+            calls.append("unavailable")
+            return 1
+
+        def terminate(self):
+            calls.append("release")
+
+        def wait(self, timeout):
+            pass
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Unverified external collector must not launch a process or perform sync")
+
+    monkeypatch.setattr(collector_probe, "ExternalCollector", MissingCollector)
+    monkeypatch.setattr(scheduler.subprocess, "Popen", unexpected)
+    monkeypatch.setattr(scheduler, "collector_client", unexpected)
+    monkeypatch.setattr(scheduler, "tenant_connect", unexpected)
+    scheduler.main()
+    assert calls == ["external", "unavailable", "release"]
