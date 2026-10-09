@@ -341,16 +341,32 @@ class FleetSupervisor:
         for key in list(self.children):
             if key[0] == str(path) and self.versions.get(key) != version:
                 self.stop(key)
-        self.start(path, "work", version)
         with self.preparer.repo.connect() as db:
             state = db.execute(
                 "SELECT checks,error_code,state,configuration_version "
                 "FROM runtime_provisioning WHERE company_id=%s",
                 (company["id"],),
             ).fetchone()
-        if not state or state["configuration_version"] != version:
+        from app.tenancy.migrations import migration_fingerprint
+
+        checks = state["checks"] if state and state["configuration_version"] == version else {}
+        migration = checks.get("migrations", {})
+        evidence = migration.get("evidence")
+        migrated = (
+            migration.get("ok") is True
+            and isinstance(evidence, dict)
+            and evidence.get("manifest_fingerprint") == migration_fingerprint()
+        )
+        if not migrated:
+            # Cached database-role success must not launch or retain clients while
+            # an upgraded migration needs exclusive table locks. Stop only owned
+            # company services, before allowing the operator to begin that work.
+            for key in list(self.children):
+                if key[0] == str(path) and key[1] != "work":
+                    self.stop(key)
+        self.start(path, "work", version)
+        if not migrated:
             return
-        checks = state["checks"]
         if checks.get("database_roles", {}).get("ok"):
             self.start(path, "run-collector", version)
             self.start(path, "run-portal", version)

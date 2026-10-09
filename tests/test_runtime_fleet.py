@@ -257,3 +257,62 @@ def test_supervisor_stops_own_process_group(monkeypatch, tmp_path):
     supervisor.start(path, "work", 1)
     supervisor.stop((str(path), "work"))
     assert groups == [(12345, signal.SIGTERM)]
+
+
+@pytest.mark.parametrize("proof", [None, "legacy", "outdated", "current"])
+def test_supervisor_quiesces_own_services_before_migration_upgrade(tmp_path, monkeypatch, proof):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from app.saas_admin.runtime_fleet import FleetSupervisor
+    from app.tenancy.migrations import migration_fingerprint
+
+    company = {"id": str(uuid4()), "status": "active", "version": 8}
+    state = {
+        "configuration_version": 8,
+        "state": "pending",
+        "error_code": None,
+        "checks": {"database_roles": {"ok": True}, "initial_sync": {"ok": True}},
+    }
+    if proof is not None:
+        evidence = {"migration_count": 11}
+        if proof != "legacy":
+            evidence["manifest_fingerprint"] = (
+                migration_fingerprint() if proof == "current" else "old"
+            )
+        state["checks"]["migrations"] = {"ok": True, "evidence": evidence}
+
+    @contextmanager
+    def connect():
+        yield SimpleNamespace(execute=lambda *_: SimpleNamespace(fetchone=lambda: state))
+
+    path = tmp_path / "own.json"
+    foreign = tmp_path / "foreign.json"
+    supervisor = FleetSupervisor(
+        SimpleNamespace(repo=SimpleNamespace(get=lambda _: company, connect=connect))
+    )
+    own = (str(path), "run-portal")
+    other = (str(foreign), "run-portal")
+    supervisor.children = {own: object(), other: object()}
+    supervisor.versions = {own: 8, other: 8}
+    calls = []
+    monkeypatch.setattr(supervisor, "start", lambda p, action, v: calls.append(("start", action)))
+
+    def stop(key):
+        calls.append(("stop", key[1]))
+        supervisor.children.pop(key)
+
+    monkeypatch.setattr(supervisor, "stop", stop)
+    monkeypatch.setattr(
+        "app.saas_admin.runtime_fleet.read_operator_json", lambda _: {"company_id": company["id"]}
+    )
+    supervisor.tick_company(path)
+    assert other in supervisor.children
+    if proof == "current":
+        assert calls == [
+            ("start", action) for action in ("work", "run-collector", "run-portal", "run-scheduler")
+        ]
+        assert own in supervisor.children
+    else:
+        assert calls == [("stop", "run-portal"), ("start", "work")]
+        assert own not in supervisor.children
