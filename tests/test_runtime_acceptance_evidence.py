@@ -53,9 +53,11 @@ def acceptance(tmp_path, monkeypatch):
         },
     )
     visited, failures = [], {}
+    operator.acceptance_requests = []
 
     def respond(request):
         visited.append(request.url.path)
+        operator.acceptance_requests.append(request)
         if request.url.path in failures:
             failure = failures[request.url.path]
             if failure == "network":
@@ -106,6 +108,7 @@ def test_pending_check_keeps_pinned_successful_probes_and_safe_service_evidence(
     details = caught.value.details
     assert details["company_id"] == company["id"]
     assert details["configuration_version"] == company["version"]
+    assert details["probe_period"] == {"start": "2026-10-02", "end": "2026-10-02"}
     assert all(isinstance(value, bool) for value in details["services"].values())
     assert {"/api/management/accounts", "/api/payment-settings", "/api/me"} <= set(visited)
     assert "/api/assistant/status" in details["missing"]
@@ -198,6 +201,39 @@ def test_optional_database_failure_is_safe_negative_evidence(monkeypatch):
         runtime_acceptance.heartbeat(SimpleNamespace(config={"runtime_dsn": "secret"}), "sql")
         is False
     )
+
+
+@pytest.mark.parametrize("history_from", ["2026-08-10", "2026-10-08"])
+def test_dated_acceptance_probes_sample_last_imported_day_without_changing_history(
+    acceptance, history_from
+):
+    from datetime import date
+
+    from app.saas_admin.initial_sync_plan import initial_sync_plan
+
+    operator, _, _, _ = acceptance
+    operator.config.update(history_from=history_from, history_to="2026-10-08")
+    full_history = initial_sync_plan(date.fromisoformat(history_from), date(2026, 10, 8))
+    with pytest.raises(PendingCheck) as caught:
+        runtime_acceptance.check_modules(operator)
+    dated = {
+        request.url.path: dict(request.url.params)
+        for request in operator.acceptance_requests
+        if "start" in request.url.params
+    }
+    assert set(dated) == {
+        "/api/overview",
+        "/api/sales/daily",
+        "/api/purchase-prices",
+        "/api/resources/invoices",
+        "/api/resources/cash-shifts",
+        "/api/resources/events",
+    }
+    assert all(params == {"start": "2026-10-08", "end": "2026-10-08"} for params in dated.values())
+    assert caught.value.details["probe_period"] == {"start": "2026-10-08", "end": "2026-10-08"}
+    assert operator.config["history_from"] == full_history["history_from"] == history_from
+    assert operator.config["history_to"] == full_history["history_to"] == "2026-10-08"
+    assert initial_sync_plan(date.fromisoformat(history_from), date(2026, 10, 8)) == full_history
 
 
 @pytest.mark.parametrize(

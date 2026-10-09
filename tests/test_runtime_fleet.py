@@ -68,6 +68,23 @@ def test_fleet_prepares_distinct_durable_credentials_without_authority(tmp_path)
     assert updated["runtime_dsn"] == before
     assert updated["document_settings"]["worker_enabled"] is True
     assert updated["document_settings"]["commercial_enabled"] is True
+    assert updated["document_settings"]["commercial_submit_enabled"] is True
+    assert updated["document_settings"]["commercial_counterparty_create_enabled"] is True
+
+    # Older prepared tenants gain the same capabilities as new tenants, without
+    # overriding an operator's explicit emergency stop or any actor/warehouse ACL.
+    from app.saas_admin.runtime_operator import atomic_private_json
+
+    updated["document_settings"].pop("commercial_submit_enabled")
+    updated["document_settings"]["commercial_counterparty_create_enabled"] = False
+    atomic_private_json(manifests[0], updated)
+    upgraded = private_json(fleet.prepare(companies[0]))
+    assert upgraded["document_settings"]["commercial_submit_enabled"] is True
+    assert upgraded["document_settings"]["commercial_counterparty_create_enabled"] is False
+    companies[0]["modules"]["commercial_invoices"] = False
+    disabled = private_json(fleet.prepare(companies[0]))
+    assert disabled["document_settings"]["commercial_enabled"] is False
+    assert disabled["document_settings"]["commercial_counterparty_create_enabled"] is False
 
 
 def test_discovery_accepts_new_binding_without_restart(tmp_path):

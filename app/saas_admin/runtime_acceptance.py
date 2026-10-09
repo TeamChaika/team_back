@@ -46,7 +46,10 @@ def check_modules(operator):
             company, feature, operation="create", staff_allowed=True, warehouse_allowed=True
         ).allowed
 
-    period = {"start": operator.config["history_from"], "end": operator.config["history_to"]}
+    # Portal reads have a shorter period limit than initial history collection.
+    # Sample the last imported accounting day; full coverage is proven separately
+    # by initial_sync, never by the size of this representative HTTP request.
+    period = {"start": operator.config["history_to"], "end": operator.config["history_to"]}
     catalog = {
         "analytics.overview": [("/api/overview", period)],
         "analytics.sales": [("/api/sales/daily", period)],
@@ -200,6 +203,7 @@ def check_modules(operator):
     details = {
         "company_id": str(operator.runtime.company_id),
         "configuration_version": operator.runtime.configuration_version,
+        "probe_period": period,
         "probes": evidence,
         "services": services,
     }

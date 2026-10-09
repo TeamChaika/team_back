@@ -91,6 +91,10 @@ class FleetPreparer:
                 settings["commercial_enabled"] = bool(
                     company.get("modules", {}).get("commercial_invoices")
                 )
+                # Module/actor/seller checks still gate writes. Retain an explicit
+                # operator stop while upgrading manifests created before these flags.
+                settings.setdefault("commercial_submit_enabled", True)
+                settings.setdefault("commercial_counterparty_create_enabled", True)
                 from .runtime_module_settings import apply_company_settings
 
                 apply_company_settings(saved, company, self.settings_service)
@@ -146,6 +150,8 @@ class FleetPreparer:
                     or company.get("modules", {}).get("commercial_invoices")
                 ),
                 "commercial_enabled": bool(company.get("modules", {}).get("commercial_invoices")),
+                "commercial_submit_enabled": True,
+                "commercial_counterparty_create_enabled": True,
             }
             from .runtime_module_settings import apply_company_settings
 

@@ -46,7 +46,13 @@ def apply_company_settings(configuration, company, settings_service):
         if k in {"requests_per_hour", "max_output_tokens"}
     }
     document.update(central["document_settings"])
-    assistant.update({"timeweb_agent_id": "", **central["assistant_settings"]})
+    assistant.update(central["assistant_settings"])
+    # Optional UUIDs must be absent rather than serialized as empty strings (or
+    # "None") in the child environment. The old operator value was discarded
+    # above, so omission cannot revive another provider's agent or credentials.
+    agent_id = assistant.get("timeweb_agent_id")
+    if agent_id is None or (isinstance(agent_id, str) and not agent_id.strip()):
+        assistant.pop("timeweb_agent_id", None)
     if set(document) - DOCUMENT_FIELDS or set(assistant) - ASSISTANT_FIELDS:
         raise ValueError("Unknown central company settings field")
     configuration["document_settings"] = document
