@@ -13,6 +13,7 @@ from app.documents.actors import audit, local_id, same_actor
 from app.documents.actors import snapshot as actor_snapshot
 from app.documents.context import lock_resource, runtime_of
 from app.documents.policy import fail, full_name, identifier, invalid
+from app.documents.product_search import search_products
 
 KINDS = {"purchase", "sale"}
 EDITABLE = {"draft", "rejected"}
@@ -142,6 +143,11 @@ class CommercialInvoiceService:
             if action in {"products", "counterparties"}:
                 if not stores_for(db, user["id"], kind, "view"):
                     fail(403, "Сначала получите доступ к складу.")
+                if action == "products":
+                    result = search_products(
+                        product_catalog(db), params.get("q", params.get("query", ""))
+                    )
+                    return {"items": result["rows"], "total": result["total"]}
                 query = params.get("q", params.get("query", "")).strip().casefold()
                 if len(query) > 200:
                     invalid()

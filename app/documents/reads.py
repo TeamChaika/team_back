@@ -3,7 +3,7 @@ import io
 from datetime import datetime, time, timedelta
 
 from app.documents.actors import owner_actor
-from app.documents.catalog import products
+from app.documents.catalog import product_suggestions, products
 from app.documents.context import local_zone, runtime_of
 from app.documents.costs import (
     displayed_estimate,
@@ -326,11 +326,6 @@ def options(db, user, kind):
 def suggestions(db, user, kind, params):
     if not stores_for(db, user["id"], kind):
         fail(403, "Сначала получите доступ к складу.")
-    search = params.get("query", "").strip().lower()
-    if len(search) > 200:
-        invalid()
-    rows = sorted(
-        [{"id": key, "name": name} for key, name in products(db).items() if search in name.lower()],
-        key=lambda r: r["name"],
-    )
-    return {"rows": rows[:50], "total": len(rows)}
+    from app.documents.product_search import search_products
+
+    return search_products(product_suggestions(db), params.get("query", ""))
