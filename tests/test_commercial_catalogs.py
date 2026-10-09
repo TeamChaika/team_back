@@ -128,3 +128,12 @@ def test_failed_daily_refresh_is_throttled(monkeypatch):
     assert catalogs.refresh_if_due(service, now)
     assert not catalogs.refresh_if_due(service, now + timedelta(minutes=1))
     assert len(attempts) == 1
+
+
+def test_products_preserve_real_article_and_do_not_invent_it():
+    rows = product_rows()
+    rows[0]["num"] = " 00123 "
+    result = catalogs.parse_products(json.dumps(rows), json.dumps(units()))
+    assert result[0]["article"] == "00123"
+    del rows[0]["num"]
+    assert "article" not in catalogs.parse_products(json.dumps(rows), json.dumps(units()))[0]
