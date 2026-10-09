@@ -9,6 +9,7 @@ from uuid import uuid4
 import httpx
 from psycopg import IntegrityError
 
+from app.documents.context import lock_resource, runtime_of
 from app.documents.policy import fail, identifier, profile
 
 TOKEN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
@@ -18,6 +19,10 @@ INVALID_LINK = "Ссылка недействительна или истекл�
 
 def _username(service):
     configured = service.settings.bot_username.strip().lstrip("@")
+    if runtime_of(getattr(service, "database", None)).mode == "tenant" and not USERNAME.fullmatch(
+        configured
+    ):
+        fail(503, "Бот Telegram компании ещё не настроен.")
     if configured and USERNAME.fullmatch(configured):
         return configured
     cached = getattr(service, "_telegram_username_cache", None)
@@ -45,14 +50,23 @@ def _username(service):
 
 
 def _available(service):
-    return bool(service.settings.native_enabled and service.settings.bot_token.get_secret_value())
+    available = bool(
+        service.settings.native_enabled and service.settings.bot_token.get_secret_value()
+    )
+    if runtime_of(getattr(service, "database", None)).mode == "tenant":
+        return available and bool(
+            service.settings.worker_enabled
+            and USERNAME.fullmatch(service.settings.bot_username.strip().lstrip("@"))
+        )
+    return available
 
 
 def _identity(db, portal_id, *, lock=False, create=False):
     if lock:
         # Same namespace as administration.save_access; serializes profile creation/relinking.
         db.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("link:" + str(portal_id),)
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (lock_resource(db, "link:" + str(portal_id)),),
         )
     profile(db, portal_id)
     row = db.execute(

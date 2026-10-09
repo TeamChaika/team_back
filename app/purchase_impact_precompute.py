@@ -12,6 +12,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.core.config import Settings
+from app.tenancy.connection import tenant_connect
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 from app.web.coverage import ZONE
 from app.web.purchase_impact import calculate_impact, load_graphs, recent_period
 
@@ -49,11 +51,11 @@ def source_revision(db, *, today=None):
     start, end = recent_period(today=today)
     runs = db.execute(
         "SELECT job,count(*) AS count,max(finished_at) AS finished_at "
-        "FROM chaika.sync_runs WHERE status='succeeded' "
+        f"FROM {DB}.sync_runs WHERE status='succeeded' "
         "AND job IN ('inventory','references','dictionaries') GROUP BY job ORDER BY job"
     ).fetchall()
     days = db.execute(
-        "SELECT business_date,current_set_id FROM chaika.sales_report_days "
+        f"SELECT business_date,current_set_id FROM {DB}.sales_report_days "
         "WHERE source_id='primary' AND business_date BETWEEN %s AND %s ORDER BY business_date",
         (start, end),
     ).fetchall()
@@ -121,27 +123,27 @@ def build_prepared(db, *, today=None, stop=None):
     targets = [
         r["product_id"]
         for r in db.execute(
-            "SELECT DISTINCT product_id FROM chaika.incoming_invoice_items "
+            f"SELECT DISTINCT product_id FROM {DB}.incoming_invoice_items "
             "WHERE source_id='primary' AND present_in_latest AND product_id IS NOT NULL"
         ).fetchall()
     ]
     recipe_day = db.execute(
-        "SELECT max(business_date) AS day FROM chaika.assembly_chart_scopes "
+        f"SELECT max(business_date) AS day FROM {DB}.assembly_chart_scopes "
         "WHERE source_id='primary' AND business_date<=%s",
         (today,),
     ).fetchone()["day"]
     products = {
         row["id"]: row
         for row in db.execute(
-            "SELECT id,main_unit_id FROM chaika.products "
+            f"SELECT id,main_unit_id FROM {DB}.products "
             "WHERE source_id='primary' AND id=ANY(%s::uuid[])",
             (targets,),
         ).fetchall()
     }
     coverage = db.execute(
-        "SELECT d.business_date,r.observed_at,s.checks FROM chaika.sales_report_days d "
-        "JOIN chaika.sales_report_sets s ON s.id=d.current_set_id "
-        "JOIN chaika.sales_reports r ON r.set_id=s.id AND r.kind='dishes' "
+        f"SELECT d.business_date,r.observed_at,s.checks FROM {DB}.sales_report_days d "
+        f"JOIN {DB}.sales_report_sets s ON s.id=d.current_set_id "
+        f"JOIN {DB}.sales_reports r ON r.set_id=s.id AND r.kind='dishes' "
         "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s",
         (start, end),
     ).fetchall()
@@ -149,9 +151,9 @@ def build_prepared(db, *, today=None, stop=None):
         "SELECT x.department_id,x.dimensions->>'DishId' AS dish_id,"
         "max(x.dimensions->>'DishName') AS dish,sum(x.quantity) AS quantity,"
         "bool_or(x.quantity IS NULL OR x.quantity<0) AS invalid_quantity "
-        "FROM chaika.sales_report_days d "
-        "JOIN chaika.sales_reports r ON r.set_id=d.current_set_id "
-        "JOIN chaika.sales_report_rows x ON x.report_id=r.id "
+        f"FROM {DB}.sales_report_days d "
+        f"JOIN {DB}.sales_reports r ON r.set_id=d.current_set_id "
+        f"JOIN {DB}.sales_report_rows x ON x.report_id=r.id "
         "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s "
         "AND r.kind='dishes' AND x.department_id IS NOT NULL GROUP BY 1,2",
         (start, end),
@@ -182,11 +184,11 @@ def publish_prepared(db, prepared):
     """Replace metadata and every product atomically, retaining the old set on error."""
     with db.transaction():
         db.execute(
-            "DELETE FROM chaika.purchase_impact_prepared WHERE source_id=%s",
+            f"DELETE FROM {DB}.purchase_impact_prepared WHERE source_id=%s",
             (prepared["source_id"],),
         )
         db.execute(
-            "INSERT INTO chaika.purchase_impact_prepared "
+            f"INSERT INTO {DB}.purchase_impact_prepared "
             "(id,source_id,prepared_at,period_start,period_end,recipe_day,revision,coverage,"
             "selling_department_ids) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -204,7 +206,7 @@ def publish_prepared(db, prepared):
         )
         with db.cursor() as cursor:
             cursor.executemany(
-                "INSERT INTO chaika.purchase_impact_prepared_products "
+                f"INSERT INTO {DB}.purchase_impact_prepared_products "
                 "(generation_id,product_id,product_exists,main_unit_id,has_graph,departments) "
                 "VALUES (%s,%s,%s,%s,%s,%s)",
                 [
@@ -224,8 +226,9 @@ def publish_prepared(db, prepared):
 def ensure_prepared(settings, stop=None):
     """Background entry point; unchanged sources skip all heavy calculations."""
     check_stop(stop)
-    with psycopg.connect(
+    with tenant_connect(
         settings.database_url.get_secret_value(),
+        connector=psycopg.connect,
         autocommit=True,
         connect_timeout=10,
         row_factory=dict_row,
@@ -242,7 +245,7 @@ def ensure_prepared(settings, stop=None):
                 return dict(status="busy")
             revision = source_revision(db)
             current = db.execute(
-                "SELECT id,revision,prepared_at FROM chaika.purchase_impact_prepared "
+                f"SELECT id,revision,prepared_at FROM {DB}.purchase_impact_prepared "
                 "WHERE source_id='primary'"
             ).fetchone()
             if current and current["revision"] == revision:

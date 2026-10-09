@@ -3,7 +3,9 @@
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-ZONE = ZoneInfo("Europe/Simferopol")
+from app.tenancy.config import load_runtime
+
+ZONE = ZoneInfo(load_runtime().timezone if load_runtime().mode == "tenant" else "Europe/Simferopol")
 
 
 def partial_days(reports):

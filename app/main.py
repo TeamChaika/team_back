@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.api.router import api_router
-from app.core.config import Settings
+from app.core.config import BACKEND_DIR, Settings
 from app.integrations.iiko.client import IikoClient
 from app.integrations.iiko.errors import IikoError
 from app.services.iiko_assembly import IikoAssemblyService
@@ -33,6 +33,9 @@ from app.services.iiko_topology import IikoTopologyService
 from app.services.iiko_transfers import IikoTransfersService
 from app.services.iiko_writeoffs import IikoWriteoffsService
 from app.services.sync_jobs import SyncJobError, SyncJobsService
+from app.tenancy.config import load_runtime
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import runtime_directory
 
 
 def create_app(
@@ -60,9 +63,35 @@ def create_app(
     sync_directory: Path | None = None,
 ) -> FastAPI:
     settings = settings if settings is not None else Settings()
+    # Every capture service receives the same tenant-local RAW root as its loader.
+    if load_runtime().mode == "tenant":
+        local = runtime_directory("local", BACKEND_DIR / ".local")
+        dictionaries_directory = local / "dictionaries"
+        products_directory = local / "products"
+        groups_directory = local / "groups"
+        assembly_directory = local / "assembly-charts"
+        invoices_directory = local / "incoming-invoices"
+        outgoing_directory = local / "outgoing-invoices"
+        stores_directory = local / "stores"
+        balances_directory = local / "counteragent-balances"
+        store_balances_directory = local / "store-balances"
+        employees_directory = local / "employees"
+        employee_roles_directory = local / "employee-roles"
+        writeoffs_directory = local / "writeoffs"
+        transfers_directory = local / "transfers"
+        cash_shifts_directory = local / "cash-shifts"
+        connections_directory = local / "connections"
+        olap_columns_directory = local / "olap-columns"
+        olap_sales_directory = local / "olap-sales"
+        topology_directory = local / "topology"
+        sync_directory = local / "sync"
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        if load_runtime().mode == "tenant":
+            # Reject a foreign/privileged database before making any iiko request.
+            with tenant_connect(settings.database_url.get_secret_value(), connect_timeout=5):
+                pass
         service = IikoAuthService(settings, IikoClient(settings, transport=iiko_transport))
         application.state.iiko_auth = service
         try:

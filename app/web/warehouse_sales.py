@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from app.import_sales_review import METRICS
 from app.sync_sales_history import approved_templates, error_code
+from app.tenancy.connection import tenant_connect
 from app.web.indicators import collect_reports
 from app.web.overview import build_overview, dates
 from app.web.warehouse_analytics import warehouse_ids
@@ -110,8 +111,11 @@ def parse_rows(raw_rows, body, scope, start, end, observed, kind):
 
 
 def fetch_reports(settings, scope, start, end, kinds):
-    with psycopg.connect(
-        settings.database_url.get_secret_value(), autocommit=True, connect_timeout=10
+    with tenant_connect(
+        settings.database_url.get_secret_value(),
+        connector=psycopg.connect,
+        autocommit=True,
+        connect_timeout=10,
     ) as db:
         _, templates = approved_templates(db)
     bodies = [scoped_request(templates[kind], scope, start, end) for kind in kinds]

@@ -5,9 +5,12 @@ from uuid import uuid4
 
 import httpx
 
+from app.documents.actors import stored_actor
+from app.documents.context import runtime_of
 from app.documents.policy import table
 from app.documents.reads import summary
 from app.documents.workflow import event, finish
+from app.tenancy.worker_policy import require_feature, require_queued_owner
 
 
 def retry_delay(attempts):
@@ -130,7 +133,7 @@ def complete(database, job, outcome):
             (outcome, None if outcome == "sent" else outcome, job["operation_id"]),
         )
         op = db.execute(
-            "SELECT actor_id FROM portal_documents_operation WHERE id=%s", (job["operation_id"],)
+            "SELECT * FROM portal_documents_operation WHERE id=%s", (job["operation_id"],)
         ).fetchone()
         finish(
             db,
@@ -138,7 +141,7 @@ def complete(database, job, outcome):
             summary(job["kind"], doc),
             "unknown" if outcome == "unknown" else "done",
         )
-        event(db, job["kind"], doc, op["actor_id"], "iiko_" + outcome)
+        event(db, job["kind"], doc, stored_actor(op), "iiko_" + outcome)
 
 
 def deliver_one(service):
@@ -150,6 +153,19 @@ def deliver_one(service):
     try:
         # Failed authentication/connectivity is provably before the document POST.
         with service.provider.session() as (client, token):
+            if runtime_of(service.database).mode == "tenant":
+                with service.database.connection(readonly=True) as db:
+                    operation = db.execute(
+                        "SELECT actor,actor_id FROM portal_documents_operation WHERE id=%s",
+                        (job["operation_id"],),
+                    ).fetchone()
+                require_queued_owner(service, operation)
+            require_feature(service, "documents.dispatch")
+            if runtime_of(service.database).mode == "tenant":
+                feature = {"waybill": "documents.waybills", "writeoff": "documents.writeoffs"}[
+                    job["kind"]
+                ]
+                require_feature(service, feature)
             reserved = reserve(service.database, job)
             if not reserved:
                 return True
@@ -191,7 +207,7 @@ def recover_uncertain(database):
                 (doc["id"],),
             ).fetchone()
             op = db.execute(
-                "SELECT actor_id FROM portal_documents_operation WHERE id=%s",
+                "SELECT * FROM portal_documents_operation WHERE id=%s",
                 (job["operation_id"],),
             ).fetchone()
             db.execute(
@@ -200,4 +216,4 @@ def recover_uncertain(database):
                 (job["operation_id"],),
             )
             finish(db, job["operation_id"], summary(job["kind"], doc), "unknown")
-            event(db, job["kind"], doc, op["actor_id"], "iiko_unknown")
+            event(db, job["kind"], doc, stored_actor(op), "iiko_unknown")

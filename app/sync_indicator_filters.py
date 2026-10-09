@@ -8,6 +8,8 @@ import psycopg
 
 from app.core.config import Settings
 from app.sync_references import SyncError
+from app.tenancy.connection import tenant_connect
+from app.tenancy.sql import ANALYTICS_SCHEMA
 from app.web.coverage import ZONE
 from app.web.indicators import FILTERS, collect_reports
 
@@ -47,19 +49,22 @@ def publish_filter(db, field, start, end, rows, *, replace):
     with db.transaction():
         if replace:
             db.execute(
-                "DELETE FROM chaika.indicator_filter_values WHERE source_id='primary' AND field=%s",
+                (
+                    f"DELETE FROM {ANALYTICS_SCHEMA}.indicator_filter_values WHERE "
+                    f"source_id='primary' AND field=%s"
+                ),
                 (field,),
             )
         with db.cursor() as cursor:
             cursor.executemany(
-                "INSERT INTO chaika.indicator_filter_values VALUES(%s,%s,%s,%s) "
+                f"INSERT INTO {ANALYTICS_SCHEMA}.indicator_filter_values VALUES(%s,%s,%s,%s) "
                 "ON CONFLICT DO NOTHING",
                 sorted(values, key=str),
             )
         db.execute(
-            "INSERT INTO chaika.indicator_filter_sync"
+            f"INSERT INTO {ANALYTICS_SCHEMA}.indicator_filter_sync"
             "(source_id,field,period_start,period_end,value_count) "
-            "SELECT 'primary',%s,%s,%s,count(*) FROM chaika.indicator_filter_values "
+            f"SELECT 'primary',%s,%s,%s,count(*) FROM {ANALYTICS_SCHEMA}.indicator_filter_values "
             "WHERE source_id='primary' AND field=%s "
             "ON CONFLICT(source_id,field) DO UPDATE SET "
             "period_start=LEAST(indicator_filter_sync.period_start,excluded.period_start),"
@@ -80,11 +85,14 @@ def synchronize_filters(settings, stop, *, full=False, end=None, collect=collect
     for field in FILTERS:
         if stop.is_set():
             raise SyncError("filter_sync_interrupted")
-        with psycopg.connect(
-            settings.database_url.get_secret_value(), autocommit=True, connect_timeout=10
+        with tenant_connect(
+            settings.database_url.get_secret_value(),
+            autocommit=True,
+            connect_timeout=10,
+            connector=psycopg.connect,
         ) as db:
             previous = db.execute(
-                "SELECT period_start,period_end FROM chaika.indicator_filter_sync "
+                f"SELECT period_start,period_end FROM {ANALYTICS_SCHEMA}.indicator_filter_sync "
                 "WHERE source_id='primary' AND field=%s",
                 (field,),
             ).fetchone()
@@ -94,8 +102,11 @@ def synchronize_filters(settings, stop, *, full=False, end=None, collect=collect
             else max(HISTORY_START, previous[1] - timedelta(days=7))
         )
         rows = collect(settings, [filter_request(field, start, end)])[0]
-        with psycopg.connect(
-            settings.database_url.get_secret_value(), autocommit=True, connect_timeout=10
+        with tenant_connect(
+            settings.database_url.get_secret_value(),
+            autocommit=True,
+            connect_timeout=10,
+            connector=psycopg.connect,
         ) as db:
             count = publish_filter(db, field, start, end, rows, replace=full or not previous)
         print(f"indicator_filter {field}: {count}", flush=True)
@@ -111,12 +122,14 @@ def read_filters(db, scope):
             "unavailable_reason": "Варианты фильтров по выбранным складам ещё не собраны.",
         }
     rows = db.execute(
-        "SELECT field,value FROM chaika.indicator_filter_values WHERE source_id='primary' "
+        f"SELECT field,value FROM {ANALYTICS_SCHEMA}.indicator_filter_values WHERE "
+        f"source_id='primary' "
         "AND department_id=ANY(%s::uuid[]) GROUP BY field,value ORDER BY field,lower(value),value",
         (scope.ids,),
     ).fetchall()
     status = db.execute(
-        "SELECT field,synced_at,period_start,period_end FROM chaika.indicator_filter_sync "
+        f"SELECT field,synced_at,period_start,period_end FROM "
+        f"{ANALYTICS_SCHEMA}.indicator_filter_sync "
         "WHERE source_id='primary'"
     ).fetchall()
     options = {key: [] for key in FILTERS}

@@ -28,4 +28,6 @@ def build_service(documents, settings):
         submit_enabled=settings.commercial_submit_enabled,
         counterparty_enabled=settings.commercial_counterparty_create_enabled,
         counterparty_provider=CounterpartyTransport(settings),
+        owner_authorizer=getattr(documents, "owner_authorizer", None),
+        feature_authorizer=getattr(documents, "feature_authorizer", None),
     )

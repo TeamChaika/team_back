@@ -7,6 +7,7 @@ import httpx
 from fastapi import HTTPException
 
 from app.documents import reads
+from app.documents.context import runtime_of
 from app.documents.messages import document_messages
 from app.documents.policy import actor, require
 from app.documents.telegram_cleanup import TelegramError, eligible, record_callback, record_sent
@@ -91,7 +92,7 @@ def preview(bot, settings, chat_id, kind, doc, *, service=None):
             },
         ]
     result = None
-    for text, page, total in document_messages(kind, doc):
+    for text, page, total in document_messages(kind, doc, getattr(service, "database", None)):
         if service is not None and not eligible(service, kind, doc):
             break
         payload = {
@@ -117,7 +118,9 @@ def deliver_notification(service, bot):
         if not notice:
             return False
         kind = notice["kind"]
-        doc = db.execute(reads.joined(kind) + " WHERE d.id=%s", (notice["document_id"],)).fetchone()
+        doc = db.execute(
+            reads.joined(kind, db) + " WHERE d.id=%s", (notice["document_id"],)
+        ).fetchone()
         state = "sending"
         recipient = db.execute(
             "SELECT telegram_id FROM authentication_user WHERE id=%s", (notice["recipient_id"],)
@@ -206,9 +209,11 @@ def handle_update(service, bot, update):
                 data,
                 callback.get("message"),
             )
+            runtime = runtime_of(service.database)
+            namespace = runtime.key if runtime.mode == "tenant" else "chaika"
             key = uuid5(
                 NAMESPACE_URL,
-                f"chaika:{user_id}:{callback['id']}:{kind}:{doc_id}:{version}:{action}",
+                f"{namespace}:{user_id}:{callback['id']}:{kind}:{doc_id}:{version}:{action}",
             )
             try:
                 result = service.bot_action(

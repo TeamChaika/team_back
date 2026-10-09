@@ -8,6 +8,9 @@ from uuid import uuid4
 from fastapi import HTTPException
 from psycopg.types.json import Jsonb
 
+from app.tenancy.config import load_runtime
+from app.tenancy.locks import advisory_lock_key
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 from app.web.repository import serial
 
 
@@ -34,13 +37,18 @@ class AssistantStore:
         with self.repo._pool.connection() as db, db.transaction():
             db.execute("SET LOCAL statement_timeout='10000ms'")
             db.execute(
-                "SELECT set_config('chaika.assistant_user',%s,true)", (str(scope.user["id"]),)
+                "SELECT set_config(%s,%s,true)",
+                (
+                    getattr(self.repo, "runtime", load_runtime()).analytics_schema
+                    + ".assistant_user",
+                    str(scope.user["id"]),
+                ),
             )
             yield db
 
     def _conversation(self, db, scope, conversation_id):
         row = db.execute(
-            "SELECT * FROM chaika.assistant_conversations WHERE id=%s AND user_id=%s",
+            f"SELECT * FROM {DB}.assistant_conversations WHERE id=%s AND user_id=%s",
             (conversation_id, scope.user["id"]),
         ).fetchone()
         if not row:
@@ -53,7 +61,7 @@ class AssistantStore:
         with self.connection(scope) as db:
             return serial(
                 db.execute(
-                    "SELECT id,title,context,created_at FROM chaika.assistant_conversations "
+                    f"SELECT id,title,context,created_at FROM {DB}.assistant_conversations "
                     "WHERE user_id=%s AND access_hash=%s ORDER BY created_at DESC LIMIT 20",
                     (scope.user["id"], access_hash(scope)),
                 ).fetchall()
@@ -63,7 +71,7 @@ class AssistantStore:
         with self.connection(scope) as db:
             row = self._conversation(db, scope, conversation_id)
             turns = db.execute(
-                "SELECT id,question,answer,sources,model,created_at FROM chaika.assistant_turns "
+                f"SELECT id,question,answer,sources,model,created_at FROM {DB}.assistant_turns "
                 "WHERE conversation_id=%s AND user_id=%s AND status='completed' "
                 "ORDER BY created_at,id LIMIT 10",
                 (conversation_id, scope.user["id"]),
@@ -75,9 +83,17 @@ class AssistantStore:
         context = payload.context.model_dump(mode="json")
         with self.connection(scope) as db:
             # Serializes budget checks across workers; released before any HTTP request.
-            db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,71934))", (str(user_id),))
+            if load_runtime().mode == "legacy":
+                db.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,71934))", (str(user_id),)
+                )
+            else:
+                db.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (advisory_lock_key(load_runtime(), "assistant-user", str(user_id)),),
+                )
             old = db.execute(
-                "SELECT conversation_id,status,question FROM chaika.assistant_turns "
+                f"SELECT conversation_id,status,question FROM {DB}.assistant_turns "
                 "WHERE id=%s AND user_id=%s",
                 (payload.request_id, user_id),
             ).fetchone()
@@ -90,7 +106,7 @@ class AssistantStore:
                 raise HTTPException(409, "Этот запрос уже отправлен. Обновите историю диалога.")
             budget = db.execute(
                 "SELECT count(*) AS count, count(*) FILTER (WHERE status='pending' AND "
-                "created_at>now()-interval '3 minutes') AS busy FROM chaika.assistant_turns "
+                f"created_at>now()-interval '3 minutes') AS busy FROM {DB}.assistant_turns "
                 "WHERE user_id=%s AND created_at>now()-interval '1 hour'",
                 (user_id,),
             ).fetchone()
@@ -104,7 +120,7 @@ class AssistantStore:
                 if row["context"] != context:
                     raise HTTPException(409, "Контекст изменился. Начните новый диалог.")
                 count = db.execute(
-                    "SELECT count(*) AS n FROM chaika.assistant_turns "
+                    f"SELECT count(*) AS n FROM {DB}.assistant_turns "
                     "WHERE conversation_id=%s AND status='completed'",
                     (conversation_id,),
                 ).fetchone()["n"]
@@ -112,7 +128,7 @@ class AssistantStore:
                     raise HTTPException(409, "В диалоге уже 10 ответов. Начните новый диалог.")
             else:
                 db.execute(
-                    "INSERT INTO chaika.assistant_conversations "
+                    f"INSERT INTO {DB}.assistant_conversations "
                     "(id,user_id,access_hash,context,title) VALUES (%s,%s,%s,%s,%s)",
                     (
                         conversation_id,
@@ -123,7 +139,7 @@ class AssistantStore:
                     ),
                 )
             db.execute(
-                "INSERT INTO chaika.assistant_turns (id,conversation_id,user_id,question) "
+                f"INSERT INTO {DB}.assistant_turns (id,conversation_id,user_id,question) "
                 "VALUES (%s,%s,%s,%s)",
                 (payload.request_id, conversation_id, user_id, payload.question),
             )
@@ -132,7 +148,7 @@ class AssistantStore:
     def finish(self, scope, request_id, result=None):
         with self.connection(scope) as db:
             db.execute(
-                "UPDATE chaika.assistant_turns SET status=%s,answer=%s,sources=%s,usage=%s,"
+                f"UPDATE {DB}.assistant_turns SET status=%s,answer=%s,sources=%s,usage=%s,"
                 "model=%s,finished_at=now() WHERE id=%s AND user_id=%s AND status='pending'",
                 (
                     "completed" if result else "failed",

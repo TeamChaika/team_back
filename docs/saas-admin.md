@@ -277,3 +277,151 @@ Domain не расширяется. HTTPS frontend/API должны быть sam
 company domain и общий `rc.chaika.team/tenant/{slug}` продолжают поддерживаться
 для перехода. Реальная работа требует отдельных DNS/TLS для frontend/API и
 браузерной проверки; локальные тесты не подтверждают выпуск или DNS.
+
+### Подписка и возможности (локальная основа, 08.10.2026)
+
+`app/saas_admin/entitlements.py` содержит серверный каталог стабильных feature ID,
+начальный набор планов `analytics`, `operations`, `full` и чистую функцию решения.
+Каталог не является публичным прайсом. Авторитетное хранение —
+`restcontrol.companies.body.subscription`, существующие версия карточки и аудит;
+клиент не может записать свой состав плана. `plans_v1` задаёт `plan_id`, статус,
+даты включительно в часовом поясе компании и отдельные allow/deny/inherit
+исключения с необязательным зональным `expires_at`. Неизвестные планы/возможности
+закрываются. Старые записи показывают явную политику `legacy`, сохраняющую
+прежние пять переключателей модулей и свободное имя тарифа до явного перехода.
+Исключение allow не преодолевает отключённый модуль, права сотрудника или склады.
+
+Серверные бизнес-обработчики должны явно применять `evaluate_feature`.
+Окончание подписки закрывает create, но сохраняет history в пределах купленных
+возможностей/модулей и прав. `reconcile` допускается только для ограниченного
+списка операций с ранее сохранённым намерением/очередью; аргумент
+`initiated_operation` определяется сервером по существующей записи, никогда
+из клиентского запроса. Нельзя помечать новый запрос оплаты как сверку.
+Глобальный владелец получает административную роль, но тот же состав подписки.
+Наличие этого контракта не означает, что весь существующий portal уже применяет
+его во всех маршрутах. Проверки: `tests/test_saas_entitlements.py`.
+
+### Глобальный владелец: одноразовый переход (локальная подготовка)
+
+`platform_sso.py` и `platform_sso_routes.py` добавляют POST `/api/saas-admin/sso/authorize`
+(owner session + CSRF) и POST `/api/saas-tenant/{slug}/auth/sso/exchange` только на
+зарегистрированном API компании. State/nonce/PKCE проверяются при обмене; короткий
+код хранится как hash, действует 60 секунд и потребляется атомарно. Назначение
+берётся из актуального реестра. Дочерняя opaque cookie имеет Path=/, host-only,
+Secure/HttpOnly/Strict и FK к центральной session: Auth/refresh токены не копируются.
+Авторизация каждого запроса проверяет центральную session и active platform grant.
+Смена домена/slug, блокировка компании, выход или отзыв владельца закрывают вход.
+
+Миграция `20261008185718_restcontrol_platform_sso.sql` создана через Supabase CLI;
+она добавляет private RLS tables codes/handles и append-only owner audit с настоящим
+Auth UUID. Backup сохраняет owner audit, исключая codes и все виды sessions.
+`ActorContext` (`app/tenancy/actor.py`) различает company_member и platform_owner.
+Полный portal принимает явно внедрённый `saas_auth_repository` и проверяет pinned
+company runtime; `Repository.actor_scope` даёт владельцу административную область
+без вставки в web_users/memberships. Нативным документам передаётся typed actor,
+а не реконструированный клиентский JSON. Worker revalidation доступна через
+`authorize_platform_actor(company_id, auth_user_id)`; callback надо внедрить при запуске.
+Это локальный механизм, не подтверждение production bootstrap, всех бизнес-модулей
+или реального перехода через опубликованные домены.
+
+Служебный `GET /api/saas-admin/entitlements/catalog` требует владельца. Создание
+новой компании через POST требует `subscription.policy=plans_v1` и известный
+plan_id; legacy доступен для прежних записей при изменении. Named plan label
+вычисляется сервером, свободное старое имя сохраняется только legacy.
+Ограниченные tenant reads Overview/Sales применяют feature decision до вызова iiko;
+`/dashboard/me` оставляет только приобретённые разделы. История после окончания
+подписки допускается отдельной операцией history, права источника/компании
+по-прежнему проверяются прежней tenant authorization.
+
+### Private full-portal gateway and durable preparation (local, not deployed)
+
+`server.create_app(..., runtime_registry=RuntimeRegistry(repository))` explicitly
+activates routing of the company API host's `/api/*` to its private `portal.sock`.
+Without this parameter the previous limited boundary is unchanged. Context adds
+`full_dashboard_ready` only when the durable record is ready, its configuration
+version equals the current company version, and every required check has successful
+nonempty evidence. Merely saving a company or registering a socket does not enable it.
+Unknown route families fail closed. The gateway verifies the current company,
+principal, CSRF and purchased feature, while the existing portal retains employee
+and warehouse ACLs. No service DSN or privileged headers reach the browser.
+
+`Provisioner(repository, adapters)` requires actual adapters for migrations,
+database roles, identity, connections, initial sync, modules, payments, DNS/TLS and
+runtime health. `enqueue(company, socket_path)` persists a job; a separate operator
+calls `run(company_id)`. A database session lock serializes a company's workers;
+successful stages commit separately and are skipped on restart. Failed stages store
+a safe code and remain unready. Adapters must be idempotent for company/version/step.
+Changing company version invalidates readiness and resets evidence on re-enqueue.
+No production adapters or ready state are manufactured by the default HTTP server.
+
+Private `create_verifier_app(repository, grants)` runs on an operator-owned Unix
+socket, outside the public gateway. Each random capability is pinned to one company
+and role. Portal capabilities can verify/revoke only their own tenant session;
+document/payment workers can only revalidate owner authority. Children receive no
+central registry DSN or global Auth administrator key. `RestrictedVerifier` supplies
+the existing portal authentication contract. Secrets and UDS directories must be
+private to the operator/company processes.
+
+Local evidence: `test_full_portal_proxy.py` verifies two-company routing with a
+synthetic upstream, CSRF, revoked login, feature restrictions and worker verifier
+scope. `test_provisioning_postgres.py` verifies real PostgreSQL durable failure,
+resume and version invalidation on a disposable local database. These tests are
+not proof that full dashboards, all modules, iiko or payment providers are ready.
+
+Owner onboarding requests: `provisioning_routes.py` mounts authenticated GET
+`/api/saas-admin/companies/{id}/provisioning` and CSRF-protected POST
+`…/start`, `…/retry` with `expected_version`. Requests persist pending jobs only;
+workers consume the existing private runtime provisioning table. Enqueue rechecks
+platform membership and company version transactionally and takes the same advisory
+lock as the worker. `create_app(provisioning_root=…, public_dns_targets=…)` requires
+trusted operator paths and public DNS answers; absent configuration stays explicit.
+Responses expose stage completion and safe failure code, never sockets or evidence.
+DNS records derive names from the registered company domain, with targets supplied
+by the operator; there are no invented defaults. `SaasProvisioning.tsx` shows stage
+progress, retry and polling in the company card. Terminal readiness remains explicit.
+
+The executable `serve --runtime-config /private/operator.json` now performs the
+explicit full gateway assembly from `deployment.py`: the same trusted verifier
+identity targets, runtime registry, private provisioning root and exact public DNS
+targets. Omitting the flag preserves limited startup. See the
+[operator lifecycle](../ops/tenant-runtime/README.md) for supervised processes and
+configuration inputs. Module acceptance reads the real company portal with an
+existing owner session; stage failures expose fixed configuration codes, never
+credentials or raw response bodies. Enabled payments still require a verifiable
+provider settlement contract; disabling that capability is recorded as such.
+
+Company recovery forwards only GET `/api/auth/recovery/telegram` and POST
+`/api/auth/recovery/reset` without a staff session, with the exact own frontend
+Origin still mandatory. The portal's private verifier capability may call central
+`recovery`; worker capabilities cannot. Proof claiming/password changes remain in
+CompanyAccounts under the trusted dedicated identity target.
+
+Fleet mode accepts the platform fleet JSON in the same `--runtime-config` option,
+without a seed company. Owner enqueue/retry captures a real SSO delegation in private
+central acceptance storage; the job renews it only within the running modules stage
+and while its parent session remains valid. Lazy private fleet discovery registers
+new company identities/capabilities, and the supervisor owns process groups and
+version replacement. UDS recovery rate limiting uses an explicit authenticated edge
+client-IP header pair; Caddy must overwrite both headers. See operator lifecycle.
+
+### Настройки модулей компании
+
+`app/saas_admin/company_module_settings.py` хранит реквизиты продавца, Telegram-бота
+и ИИ-провайдера в зашифрованной записи `restcontrol.company_module_settings`.
+Миграция: `20261009093000_restcontrol_company_module_settings.sql`; доступ к таблице
+имеет только управляющая роль `restcontrol_backend`, не tenant runtime и не browser roles.
+
+Владелец платформы читает и сохраняет настройки через
+`GET/PATCH /api/saas-admin/companies/{id}/module-settings`. PATCH требует обычную
+owner-сессию, Origin, CSRF и `expected_version`; атомарно повышает версию компании,
+поэтому подготовку runtime нужно повторить. GET возвращает реквизиты и метаданные,
+признаки `token_configured`, `key_configured`, `missing`, но не секреты. Пустой секрет
+сохраняет предыдущий; `clear_token`/`clear_key` удаляет его. Смена ИИ-провайдера без
+нового ключа удаляет прежний ключ, чтобы не отправить его другому провайдеру.
+`seller: null` очищает реквизиты. Указанная группа заменяет все её несекретные поля;
+неуказанные группы сохраняются. Аудит содержит только названия изменённых групп.
+
+Приватный `CompanyModuleSettings.runtime_settings(company_id)` возвращает
+разрешённые `document_settings`/`assistant_settings` для operator bootstrap; его
+результат не является HTTP-контрактом. Проверка сохранения не обращается к Telegram,
+ИИ или iiko и не подтверждает фактическую работоспособность этих подключений.

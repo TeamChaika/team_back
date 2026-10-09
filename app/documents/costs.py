@@ -2,11 +2,11 @@
 
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, DecimalException, localcontext
-from zoneinfo import ZoneInfo
 
+from app.documents.context import analytics_schema, local_zone
 from app.documents.recipe_costs import RecipeCosts, UnpricedRecipe
 
-ZONE = ZoneInfo("Europe/Simferopol")
+ZONE = local_zone()
 
 
 def stock_cost(stock):
@@ -24,38 +24,41 @@ def stock_cost(stock):
 
 
 def estimate(db, store_id, rows, *, at=None):
+    zone = local_zone(db)
     now = datetime.now(UTC)
     point = at or now
     if point.tzinfo is None:
-        point = point.replace(tzinfo=ZONE)
+        point = point.replace(tzinfo=zone)
     present = db.execute(
-        "SELECT to_regclass('chaika.store_balance_reports') AS reports, "
-        "to_regclass('chaika.store_balance_items') AS items, "
-        "to_regclass('chaika.products') AS products, "
-        "to_regclass('chaika.assembly_charts') AS charts, "
-        "to_regclass('chaika.assembly_chart_items') AS chart_items, "
-        "to_regclass('chaika.assembly_chart_scopes') AS scopes, "
-        "to_regclass('chaika.stores') AS stores, "
-        "to_regclass('chaika.corporate_nodes') AS nodes"
+        f"SELECT to_regclass('{analytics_schema(db)}.store_balance_reports') AS reports, "
+        f"to_regclass('{analytics_schema(db)}.store_balance_items') AS items, "
+        f"to_regclass('{analytics_schema(db)}.products') AS products, "
+        f"to_regclass('{analytics_schema(db)}.assembly_charts') AS charts, "
+        f"to_regclass('{analytics_schema(db)}.assembly_chart_items') AS chart_items, "
+        f"to_regclass('{analytics_schema(db)}.assembly_chart_scopes') AS scopes, "
+        f"to_regclass('{analytics_schema(db)}.stores') AS stores, "
+        f"to_regclass('{analytics_schema(db)}.corporate_nodes') AS nodes"
     ).fetchone()
     report = None
     if present["reports"] and present["items"]:
         # last_seen_at prevents using a subsequently replaced historical report.
         report = db.execute(
-            "SELECT last_snapshot_id,accounting_timestamp FROM chaika.store_balance_reports "
+            f"SELECT last_snapshot_id,accounting_timestamp "
+            f"FROM {analytics_schema(db)}.store_balance_reports "
             "WHERE source_id='primary' AND accounting_timestamp<=%s AND last_seen_at<=%s "
             "ORDER BY accounting_timestamp DESC LIMIT 1",
-            (point.astimezone(ZONE).replace(tzinfo=None), point),
+            (point.astimezone(zone).replace(tzinfo=None), point),
         ).fetchone()
     balances = {}
-    source_at = report["accounting_timestamp"].replace(tzinfo=ZONE) if report else None
+    source_at = report["accounting_timestamp"].replace(tzinfo=zone) if report else None
     stale = source_at is not None and point - source_at > timedelta(hours=48)
     if report and not stale:
         balances = {
             str(row["product_id"]): row
             for row in db.execute(
                 "SELECT product_id,sum(amount) AS amount,sum(sum) AS value "
-                "FROM chaika.store_balance_items WHERE snapshot_id=%s AND store_id=%s "
+                f"FROM {analytics_schema(db)}.store_balance_items "
+                f"WHERE snapshot_id=%s AND store_id=%s "
                 "AND product_id=ANY(%s::uuid[]) GROUP BY product_id",
                 (report["last_snapshot_id"], store_id, [str(r["product_id"]) for r in rows]),
             ).fetchall()
@@ -70,7 +73,7 @@ def estimate(db, store_id, rows, *, at=None):
         )
     ):
         recipes = RecipeCosts(
-            db, store_id, point.astimezone(ZONE), report["last_snapshot_id"], stock_cost
+            db, store_id, point.astimezone(zone), report["last_snapshot_id"], stock_cost
         )
     result, known, unpriced = [], Decimal(0), 0
     with localcontext() as context:

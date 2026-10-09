@@ -3,6 +3,8 @@
 from datetime import timedelta
 from decimal import Decimal, DecimalException
 
+from app.documents.context import analytics_schema
+
 
 class UnpricedRecipe(Exception):
     def __init__(self, reason):
@@ -44,7 +46,8 @@ class RecipeCosts:
     def product(self, product):
         if product not in self.products:
             self.products[product] = self.db.execute(
-                "SELECT type,main_unit_id FROM chaika.products WHERE source_id='primary' "
+                f"SELECT type,main_unit_id "
+                f"FROM {analytics_schema(self.db)}.products WHERE source_id='primary' "
                 "AND id=%s AND present_in_latest AND NOT deleted AND last_seen_at<=%s "
                 "AND last_seen_at>=%s",
                 (product, self.point, self.point - timedelta(hours=48)),
@@ -57,10 +60,11 @@ class RecipeCosts:
         row = self.db.execute(
             "WITH RECURSIVE parents AS ("
             "SELECT s.id,s.parent_id,'STORE'::text AS type,ARRAY[s.id] AS path "
-            "FROM chaika.stores s WHERE s.source_id='primary' AND s.id=%s "
+            f"FROM {analytics_schema(self.db)}.stores s WHERE s.source_id='primary' AND s.id=%s "
             "AND s.present_in_latest AND s.last_seen_at<=%s AND s.last_seen_at>=%s "
             "UNION ALL SELECT n.id,n.parent_id,n.type,p.path||n.id FROM parents p "
-            "JOIN chaika.corporate_nodes n ON n.source_id='primary' AND n.id=p.parent_id "
+            f"JOIN {analytics_schema(self.db)}.corporate_nodes n ON n.source_id='primary' "
+            f"AND n.id=p.parent_id "
             "WHERE n.present_in_latest AND n.last_seen_at<=%s AND n.last_seen_at>=%s "
             "AND NOT n.id=ANY(p.path) AND cardinality(p.path)<24 "
             "AND p.type NOT IN ('DEPARTMENT','CENTRALSTORE','MANUFACTURE')) "
@@ -92,7 +96,8 @@ class RecipeCosts:
         if metadata["type"] == "GOODS":
             stock = self.db.execute(
                 "SELECT product_id,sum(amount) AS amount,sum(sum) AS value "
-                "FROM chaika.store_balance_items WHERE snapshot_id=%s AND store_id=%s "
+                f"FROM {analytics_schema(self.db)}.store_balance_items "
+                f"WHERE snapshot_id=%s AND store_id=%s "
                 "AND product_id=%s GROUP BY product_id",
                 (self.snapshot, self.store, product),
             ).fetchone()
@@ -114,12 +119,15 @@ class RecipeCosts:
             "SELECT c.id,c.assembled_amount,c.details, "
             "COALESCE((SELECT jsonb_agg(jsonb_build_object('product_id',i.product_id, "
             "'amount_in',i.amount_in::text,'details',i.details) ORDER BY i.id) "
-            "FROM chaika.assembly_chart_items i WHERE i.source_id=c.source_id "
+            f"FROM {analytics_schema(self.db)}.assembly_chart_items i "
+            f"WHERE i.source_id=c.source_id "
             "AND i.chart_id=c.id AND i.present_in_latest),'[]'::jsonb) AS items "
-            "FROM chaika.assembly_charts c "
-            "JOIN chaika.assembly_chart_scopes s ON s.source_id=c.source_id AND s.chart_id=c.id "
+            f"FROM {analytics_schema(self.db)}.assembly_charts c "
+            f"JOIN {analytics_schema(self.db)}.assembly_chart_scopes s ON s.source_id=c.source_id "
+            f"AND s.chart_id=c.id "
             "WHERE c.source_id='primary' AND c.product_id=%s AND s.present_in_latest "
-            "AND s.business_date=(SELECT max(business_date) FROM chaika.assembly_chart_scopes "
+            f"AND s.business_date=(SELECT max(business_date) "
+            f"FROM {analytics_schema(self.db)}.assembly_chart_scopes "
             "WHERE source_id='primary' AND business_date<=%s AND present_in_latest) "
             "AND s.business_date>=%s AND c.date_from<=%s AND (c.date_to IS NULL OR c.date_to>%s) "
             "AND s.last_snapshot_id=c.last_snapshot_id AND c.last_seen_at<=%s "

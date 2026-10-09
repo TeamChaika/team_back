@@ -9,7 +9,6 @@ from itertools import batched
 from pathlib import Path
 from uuid import UUID, uuid4
 
-import httpx
 import psycopg
 from psycopg.types.json import Jsonb
 
@@ -26,6 +25,9 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_client, collector_url, runtime_directory
+from app.tenancy.sql import ANALYTICS_SCHEMA
 
 
 def capture_store_balances(
@@ -35,7 +37,11 @@ def capture_store_balances(
     response: dict,
     directory: Path | None = None,
 ) -> dict:
-    folder = directory if directory is not None else BACKEND_DIR / ".local/store-balances"
+    folder = (
+        directory
+        if directory is not None
+        else runtime_directory("local", BACKEND_DIR / ".local") / "store-balances"
+    )
     key = str(UUID(response["snapshot_id"]))
     metadata = json.loads((folder / f"{key}.meta.json").read_text())
     if metadata.pop("source_fingerprint") != source.fingerprint:
@@ -101,7 +107,7 @@ def publish_store_balances(db, snapshot: dict) -> dict:
             )
             for batch in batched(records, 1000):
                 cursor.executemany(
-                    "INSERT INTO chaika.store_balance_items"
+                    f"INSERT INTO {ANALYTICS_SCHEMA}.store_balance_items"
                     "(snapshot_id,line_num,store_id,product_id,amount,sum) "
                     "VALUES(%s,%s,%s,%s,%s,%s)",
                     batch,
@@ -111,19 +117,22 @@ def publish_store_balances(db, snapshot: dict) -> dict:
             known = {
                 r[0]
                 for r in db.execute(
-                    f"SELECT id FROM chaika.{table} WHERE source_id=%s AND id=ANY(%s::uuid[])",
+                    (
+                        f"SELECT id FROM {ANALYTICS_SCHEMA}.{table} WHERE source_id=%s AND "
+                        f"id=ANY(%s::uuid[])"
+                    ),
                     (snapshot["source_id"], list(ids)),
                 )
             }
             counts[f"unmatched_{table}"] = len(ids - known)
         db.execute(
-            "INSERT INTO chaika.store_balance_reports"
+            f"INSERT INTO {ANALYTICS_SCHEMA}.store_balance_reports"
             "(source_id,accounting_timestamp,last_snapshot_id,row_count,"
             "first_seen_at,last_seen_at) "
             "VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(source_id,accounting_timestamp) DO UPDATE SET "
             "last_snapshot_id=EXCLUDED.last_snapshot_id,row_count=EXCLUDED.row_count,"
             "last_seen_at=EXCLUDED.last_seen_at "
-            "WHERE chaika.store_balance_reports.last_seen_at <= EXCLUDED.last_seen_at",
+            f"WHERE {ANALYTICS_SCHEMA}.store_balance_reports.last_seen_at <= EXCLUDED.last_seen_at",
             (
                 snapshot["source_id"],
                 query.timestamp,
@@ -137,7 +146,7 @@ def publish_store_balances(db, snapshot: dict) -> dict:
 
 
 def synchronize_store_balances(
-    settings: Settings, query: AccountingReportQuery, api_url: str = "http://127.0.0.1:8010"
+    settings: Settings, query: AccountingReportQuery, api_url: str = collector_url()
 ) -> dict:
     api_url = check_local_api(api_url)
     if not settings.database_url.get_secret_value():
@@ -145,30 +154,35 @@ def synchronize_store_balances(
     source = configured_sources(settings)[0]
     run_id = uuid4()
     with (
-        psycopg.connect(
+        tenant_connect(
             settings.database_url.get_secret_value(),
             autocommit=True,
             connect_timeout=10,
             application_name="chaika-store-balance-sync",
+            connector=psycopg.connect,
         ) as db,
         reference_lock(db),
     ):
         register_sources(db, [source])
         if not db.execute(
-            "SELECT 1 FROM chaika.sources WHERE id=%s AND server_type='CHAIN'", (source.id,)
+            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources WHERE id=%s AND server_type='CHAIN'",
+            (source.id,),
         ).fetchone():
             raise SyncError("reference_sync_required")
         db.execute(
-            "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),"
+            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' "
             "WHERE job='store_balances' AND status='running'"
         )
         db.execute(
-            "INSERT INTO chaika.sync_runs(id,job,status) VALUES(%s,'store_balances','running')",
+            (
+                f"INSERT INTO {ANALYTICS_SCHEMA}.sync_runs(id,job,status) "
+                f"VALUES(%s,'store_balances','running')"
+            ),
             (run_id,),
         )
         touched, logout_ok, failure = False, True, None
-        with httpx.Client(base_url=api_url, timeout=180, trust_env=False) as client:
+        with collector_client(base_url=api_url, timeout=180, trust_env=False) as client:
             try:
                 response = client.get("/api/v1/iiko/connections")
                 response.raise_for_status()
@@ -202,7 +216,8 @@ def synchronize_store_balances(
                     counts = publish_store_balances(db, snapshot)
                     counts["logout_ok"] = logout_ok
                     db.execute(
-                        "UPDATE chaika.sync_runs SET status='succeeded',finished_at=now(),"
+                        f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='succeeded',"
+                        f"finished_at=now(),"
                         "counts=%s WHERE id=%s",
                         (Jsonb(counts), run_id),
                     )
@@ -211,7 +226,8 @@ def synchronize_store_balances(
         if failure is not None:
             code = str(failure) if isinstance(failure, SyncError) else type(failure).__name__
             db.execute(
-                "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),error_code=%s,"
+                f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
+                f"error_code=%s,"
                 "counts=%s WHERE id=%s",
                 (code, Jsonb({"logout_ok": logout_ok}), run_id),
             )
@@ -233,7 +249,7 @@ def main() -> None:
     parser.add_argument(
         "--timestamp", required=True, help="YYYY-MM-DDTHH:MM:SS (iiko accounting time)"
     )
-    parser.add_argument("--api-url", default="http://127.0.0.1:8010")
+    parser.add_argument("--api-url", default=collector_url())
     args = parser.parse_args()
     try:
         query = AccountingReportQuery(timestamp=args.timestamp)

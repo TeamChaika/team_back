@@ -19,8 +19,11 @@ from app.core.config import BACKEND_DIR, Settings
 from app.progress import describe, read_json
 from app.schemas.sync_jobs import RefreshStatus, ResourceProgress
 from app.sync_references import SyncError, reference_lock
+from app.tenancy.config import load_runtime
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import runtime_directory, validate_runtime_path
 
-ROOT = BACKEND_DIR / ".local/sync"
+ROOT = runtime_directory("local", BACKEND_DIR / ".local") / "sync"
 
 
 class SyncJobError(Exception):
@@ -34,6 +37,7 @@ def now() -> datetime:
 
 
 def write_json(path: Path, value: dict) -> None:
+    path = validate_runtime_path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     descriptor = os.open(temporary, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
@@ -66,7 +70,7 @@ def job_alive(pid: int | None, job_id: UUID) -> bool:
 
 class SyncJobsService:
     def __init__(self, settings: Settings, directory: Path = ROOT):
-        self.settings, self.directory = settings, directory
+        self.settings, self.directory = settings, validate_runtime_path(directory)
 
     def job_directory(self, job_id: UUID) -> Path:
         return self.directory / "jobs" / str(job_id)
@@ -92,11 +96,12 @@ class SyncJobsService:
             raise SyncJobError("database_not_configured", "База данных не настроена.")
         try:
             with (
-                psycopg.connect(
+                tenant_connect(
                     self.settings.database_url.get_secret_value(),
                     autocommit=True,
                     connect_timeout=5,
                     options="-c statement_timeout=5000",
+                    connector=psycopg.connect,
                 ) as db,
                 reference_lock(db),
             ):
@@ -146,7 +151,13 @@ class SyncJobsService:
                     )
             self.preflight()
             timestamp = now()
-            end = timestamp.astimezone(ZoneInfo("Europe/Simferopol")).date()
+            end = timestamp.astimezone(
+                ZoneInfo(
+                    load_runtime().timezone
+                    if load_runtime().mode == "tenant"
+                    else "Europe/Simferopol"
+                )
+            ).date()
             manifest = {
                 "job_id": str(job_id),
                 "status": "accepted",

@@ -13,13 +13,14 @@ from psycopg.types.json import Jsonb
 from app.commercial_invoices.runtime import build_service as commercial_service
 from app.core.logging import configure_http_logging
 from app.documents.config import DocumentSettings
+from app.documents.context import fixed_lock, local_zone
 from app.documents.dispatch import deliver_one, recover_uncertain
 from app.documents.policy import identifier
-from app.documents.reads import ZONE
 from app.documents.service import DocumentService
 from app.documents.telegram import Telegram, deliver_notification, handle_update
 from app.documents.telegram_cleanup import deliver_cleanup
 from app.documents.telegram_link import queued_update
+from app.tenancy.worker_policy import configure as configure_worker_policy
 
 log = logging.getLogger(__name__)
 LEADER_LOCK = 7623011102049
@@ -33,7 +34,8 @@ def worker_leader(database):
         # allow another replica to start polling Telegram concurrently.
         leader.execute("SET LOCAL idle_in_transaction_session_timeout='0'")
         acquired = leader.execute(
-            "SELECT pg_try_advisory_xact_lock(%s) AS ok", (LEADER_LOCK,)
+            "SELECT pg_try_advisory_xact_lock(%s) AS ok",
+            (fixed_lock(leader, "documents-worker", LEADER_LOCK),),
         ).fetchone()["ok"]
         yield leader if acquired else None
 
@@ -59,7 +61,7 @@ def refresh_catalogs(service):
 
 
 def catalog_due(service, now):
-    local = now.astimezone(ZONE)
+    local = now.astimezone(local_zone(service.database))
     slot = local.replace(hour=6, minute=0, second=0, microsecond=0)
     if slot > local:
         slot -= timedelta(days=1)
@@ -212,6 +214,7 @@ def main():
     if not args.refresh_catalogs and (not settings.native_enabled or not settings.worker_enabled):
         raise SystemExit("Native document worker is disabled")
     service = DocumentService(settings)
+    configure_worker_policy(service)
     commercial = commercial_service(service, settings)
     if args.refresh_catalogs:
         try:

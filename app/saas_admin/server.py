@@ -14,6 +14,7 @@ from .config import SupabaseSettings, validate_origin, validate_private_key
 from .connection_check import check_connection
 from .connections import problem
 from .models import CompanyWrite, ConnectionCredential, Model, metadata_url
+from .platform_sso_routes import mount_platform_sso
 from .repository import Problem
 from .tenant_dashboard import mount_dashboard_routes
 from .tenant_routes import mount_tenant_routes
@@ -60,7 +61,19 @@ def error_response(status, code, message, field=None):
 
 
 def create_app(
-    data_dir, dist_dir=None, origin="http://127.0.0.1:8210", mode="local", *, repository=None
+    data_dir,
+    dist_dir=None,
+    origin="http://127.0.0.1:8210",
+    mode="local",
+    *,
+    repository=None,
+    runtime_registry=None,
+    proxy_transport_factory=None,
+    company_accounts=None,
+    provisioning_root=None,
+    public_dns_targets=None,
+    edge_peer=None,
+    acceptance_root=None,
 ):
     allowed_host = validate_origin(origin, mode)
     secure = mode == "production"
@@ -107,6 +120,13 @@ def create_app(
         )
         repository.validate_ready()
     repo = repository
+    from .full_portal_proxy import FullPortalProxy, public_route, route_methods
+
+    full_proxy = (
+        FullPortalProxy(repo, runtime_registry, proxy_transport_factory, edge_peer=edge_peer)
+        if runtime_registry
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(app):
@@ -115,6 +135,9 @@ def create_app(
             await run_in_threadpool(repo.auth.close)
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app.state.full_proxy = full_proxy
+    app.state.runtime_registry = runtime_registry
+    app.state.company_accounts = company_accounts
     app.state.repository = repo
     app.state.connection_tester = check_connection
     app.state.mode = mode
@@ -136,6 +159,7 @@ def create_app(
         host = hosts[0]
         company = None
         api_host = False
+        callback = False
         expected_origin = "https://" + host if secure else origin
         if host != allowed_host:
             try:
@@ -154,26 +178,41 @@ def create_app(
             company = {key: str(matched[key]) for key in ("id", "name", "slug")}
             if api_host:
                 expected_origin = "https://" + company_domain
-                if request.headers.getlist("origin") != [expected_origin]:
+                callback = bool(
+                    full_proxy and public_route(request.url.path, request.method) == "callback"
+                )
+                if not callback and request.headers.getlist("origin") != [expected_origin]:
                     return error_response(403, "invalid_origin", "Недопустимый источник запроса")
                 # Set only after exact host, registry and Origin verification. The outer
                 # middleware also adds CORS to validation/auth/boundary error responses.
-                request.state.saas_cors_origin = expected_origin
+                if not callback:
+                    request.state.saas_cors_origin = expected_origin
                 if request.headers.get("sec-fetch-site") == "cross-site":
                     return error_response(403, "invalid_origin", "Межсайтовый запрос запрещён")
             path = request.url.path
             tenant_prefix = "/api/saas-tenant/" + company["slug"] + "/"
-            allowed_api_path = path == "/api/saas-context" or path.startswith(tenant_prefix)
+            full_api_path = bool(
+                full_proxy
+                and api_host
+                and path.startswith("/api/")
+                and not path.startswith(("/api/saas-", "/api/saas-admin"))
+            )
+            allowed_api_path = (
+                path == "/api/saas-context" or path.startswith(tenant_prefix) or full_api_path
+            )
             if (api_host or path.startswith("/api/")) and not allowed_api_path:
                 return error_response(403, "tenant_boundary", "Этот раздел недоступен")
             if path.startswith("/tenant/") and path.rstrip("/") != "/tenant/" + company["slug"]:
                 return error_response(403, "tenant_boundary", "Этот раздел недоступен")
         request.state.saas_company = company
         if api_host:
+            allowed_methods = (
+                route_methods(request.url.path) if full_proxy and full_api_path else {"GET", "POST"}
+            )
             if request.method == "OPTIONS":
                 methods = request.headers.getlist("access-control-request-method")
                 header_values = request.headers.getlist("access-control-request-headers")
-                if len(methods) != 1 or methods[0] not in ("GET", "POST"):
+                if len(methods) != 1 or methods[0] not in allowed_methods:
                     return error_response(403, "invalid_preflight", "Недопустимый метод запроса")
                 if len(header_values) > 1:
                     return error_response(403, "invalid_preflight", "Недопустимые заголовки")
@@ -184,14 +223,14 @@ def create_app(
                 return Response(
                     status_code=204,
                     headers={
-                        "Access-Control-Allow-Methods": "GET, POST",
+                        "Access-Control-Allow-Methods": ", ".join(sorted(allowed_methods)),
                         "Access-Control-Allow-Headers": "content-type, x-csrf-token",
                     },
                 )
-            if request.method not in ("GET", "POST"):
+            if request.method not in allowed_methods:
                 return error_response(403, "invalid_method", "Недопустимый метод запроса")
         if request.method not in ("GET", "HEAD", "OPTIONS"):
-            if request.headers.getlist("origin") != [expected_origin]:
+            if not callback and request.headers.getlist("origin") != [expected_origin]:
                 return error_response(403, "invalid_origin", "Недопустимый источник запроса")
             if request.headers.get("sec-fetch-site") == "cross-site":
                 return error_response(403, "invalid_origin", "Межсайтовый запрос запрещён")
@@ -206,6 +245,11 @@ def create_app(
                     return error_response(422, "body_too_large", "Слишком большой запрос")
                 chunks.append(chunk)
             request._body = b"".join(chunks)
+        if company and api_host and full_proxy and full_api_path:
+            try:
+                return await full_proxy.forward(request, company)
+            except Problem as exc:
+                return error_response(exc.status, exc.code, exc.message)
         return await call_next(request)
 
     def response_headers(request, response):
@@ -251,7 +295,42 @@ def create_app(
     @app.get("/api/saas-context")
     def context(request: Request):
         company = request.state.saas_company
-        return {"surface": "tenant" if company else "platform", "company": company}
+        full_company = repo.get(company["id"]) if company and runtime_registry else None
+        if full_company:
+            timezone = full_company.get("timezone") or full_company.get("subscription", {}).get(
+                "timezone"
+            )
+            company = {**company, **({"timezone": timezone} if timezone else {})}
+        return {
+            "surface": "tenant" if company else "platform",
+            "company": company,
+            "platform_origin": origin,
+            **(
+                {
+                    "setup_available": bool(
+                        company
+                        and getattr(runtime_registry, "resolve_setup", lambda _: None)(full_company)
+                    ),
+                    "full_dashboard_ready": bool(
+                        company and runtime_registry.resolve(full_company)
+                    ),
+                    "full_dashboard_available": bool(
+                        company
+                        and getattr(runtime_registry, "resolve_existing", runtime_registry.resolve)(
+                            full_company
+                        )
+                    ),
+                }
+                if runtime_registry
+                else {}
+            ),
+        }
+
+    @app.get(BASE + "/entitlements/catalog")
+    def entitlement_catalog(session=owner_dependency):
+        from .entitlements import catalog
+
+        return catalog()
 
     @app.get(BASE + "/health")
     def health():
@@ -301,6 +380,13 @@ def create_app(
 
     @app.post(BASE + "/companies", status_code=201)
     def create(body: CompanyWrite, session=owner_dependency):
+        if body.subscription.policy != "plans_v1":
+            raise Problem(
+                422,
+                "subscription_required",
+                "Для новой компании выберите план",
+                "subscription.policy",
+            )
         return repo.save(
             body.model_dump(mode="json", exclude={"connection_credentials"}),
             session["user"],
@@ -390,6 +476,19 @@ def create_app(
     def reset_admin_access(company_id: str, body: SavedCheck, session=owner_dependency):
         return repo.provision_admin(company_id, body.expected_version, session["user"], reset=True)
 
+    from .provisioning_routes import ProvisioningRequests, mount_provisioning_routes
+
+    mount_provisioning_routes(
+        app,
+        ProvisioningRequests(
+            repo, provisioning_root, public_dns_targets, acceptance_root=acceptance_root
+        ),
+        owner_dependency,
+    )
+    from .company_module_settings import mount_module_settings
+
+    mount_module_settings(app, repo, owner_dependency)
+    mount_platform_sso(app, repo, owner_dependency, mode=mode)
     mount_tenant_routes(app, repo, mode=mode)
     mount_dashboard_routes(app, repo)
 

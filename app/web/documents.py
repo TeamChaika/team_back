@@ -7,6 +7,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from starlette.concurrency import run_in_threadpool
 
+from app.tenancy.actor import actor_from_verified_scope
 from app.web.auth import ACCESS_COOKIE
 from app.web.permissions import require_admin, require_section
 from app.web.repository import Scope
@@ -101,7 +102,7 @@ def create_documents_router(access):
             request.app.state.auth.check_origin(request)
         if scope.warehouse_restricted and not hasattr(request.app.state.documents, "dispatch"):
             raise HTTPException(403, "Ограничение по складам требует нативного сервиса документов.")
-        request.state.documents_identity = scope.user["id"]
+        request.state.documents_identity = actor_from_verified_scope(scope)
         return scope
 
     Access = Annotated[Scope, Depends(allowed)]

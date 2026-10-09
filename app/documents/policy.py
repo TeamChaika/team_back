@@ -3,6 +3,9 @@ from uuid import UUID
 from fastapi import HTTPException
 from psycopg.types.json import Jsonb
 
+from app.documents.actors import actor_user, owner_actor, principal_uuid
+from app.documents.context import analytics_schema
+
 TABLES = {"waybill": ("waybills", "waybills_items"), "writeoff": ("writeoffs", "writeoffs_items")}
 SECTIONS = {"waybill": "transfers", "writeoff": "writeoffs"}
 ACTIONS = {
@@ -33,6 +36,14 @@ def table(kind):
 
 
 def profile(db, portal_id, *, admin=False, kind=None):
+    if owner_actor(db, portal_id):
+        return {
+            "id": principal_uuid(portal_id),
+            "active": True,
+            "is_portal_admin": True,
+            "sections": list(SECTIONS.values()),
+        }
+    portal_id = principal_uuid(portal_id)
     row = db.execute("SELECT * FROM portal_access WHERE id=%s", (portal_id,)).fetchone()
     if not row or not row["active"]:
         fail(403, "Учётная запись отключена.")
@@ -45,6 +56,9 @@ def profile(db, portal_id, *, admin=False, kind=None):
 
 def actor(db, portal_id=None, *, telegram_id=None, kind, lock=False):
     table(kind)
+    if telegram_id is None and owner_actor(db, portal_id):
+        return actor_user(portal_id)
+    portal_id = principal_uuid(portal_id)
     suffix = " FOR UPDATE OF u" if lock else ""
     if telegram_id is None:
         profile(db, portal_id, kind=kind)
@@ -67,7 +81,7 @@ def actor(db, portal_id=None, *, telegram_id=None, kind, lock=False):
     return row
 
 
-def warehouse_grant_guard(grant_table, *, alias=None):
+def warehouse_grant_guard(grant_table, *, alias=None, db=None):
     """An unlinked legacy worker retains its grants; linked users obey portal ACL.
 
     grant_table is a fixed internal identifier, never supplied by a request.
@@ -83,7 +97,7 @@ def warehouse_grant_guard(grant_table, *, alias=None):
         " AND (NOT EXISTS(SELECT 1 FROM portal_documents_userlink wl "
         f"WHERE wl.user_id={reference}.user_id) OR EXISTS("
         "SELECT 1 FROM portal_documents_userlink wl "
-        "JOIN chaika.portal_warehouse_access wa ON wa.user_id=wl.supabase_id "
+        f"JOIN {analytics_schema(db)}.portal_warehouse_access wa ON wa.user_id=wl.supabase_id "
         f"WHERE wl.user_id={reference}.user_id AND (wa.warehouse_scope_mode='all' OR "
         f"(wa.source_id='primary' AND wa.store_id={reference}.store_id))))"
     )
@@ -92,12 +106,14 @@ def warehouse_grant_guard(grant_table, *, alias=None):
 def stores_for(db, user_id, kind, action="view"):
     if action not in ACTIONS[kind]:
         return []
+    if owner_actor(db, user_id):
+        return [r["id"] for r in db.execute("SELECT id FROM stores ORDER BY id").fetchall()]
     return [
         r["store_id"]
         for r in db.execute(
             "SELECT store_id FROM portal_documents_grant "
             "WHERE user_id=%s AND kind=%s AND actions @> %s"
-            + warehouse_grant_guard("portal_documents_grant"),
+            + warehouse_grant_guard("portal_documents_grant", db=db),
             (user_id, kind, Jsonb([action])),
         ).fetchall()
     ]

@@ -1,6 +1,6 @@
 """One durable POST, then read-only reconciliation for every uncertain outcome."""
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from psycopg.types.json import Jsonb
@@ -8,6 +8,9 @@ from psycopg.types.json import Jsonb
 from app.commercial_invoices.counterparties import CATALOG_LOCK, require_creator
 from app.commercial_invoices.counterparty_models import candidates
 from app.commercial_invoices.counterparty_transport import source_key
+from app.documents.actors import audit, owner_actor, same_actor, stored_actor
+from app.documents.context import fixed_lock
+from app.tenancy.worker_policy import require_feature
 
 
 def recover(database):
@@ -55,7 +58,10 @@ def finish(database, job, state, *, error=None, party=None, duplicates=None):
         }:
             return
         if party:
-            db.execute("SELECT pg_advisory_xact_lock(%s)", (CATALOG_LOCK,))
+            db.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (fixed_lock(db, "commercial-catalog", CATALOG_LOCK),),
+            )
             db.execute(
                 "INSERT INTO commercial_counterparties(id,source_key,data,operation_id) "
                 "VALUES(%s,%s,%s,%s) "
@@ -84,6 +90,14 @@ def finish(database, job, state, *, error=None, party=None, duplicates=None):
             "INSERT INTO commercial_counterparty_events(operation_id,state) VALUES(%s,%s)",
             (job["id"], state),
         )
+        audit(
+            db,
+            stored_actor(current),
+            state,
+            "counterparty",
+            job["id"],
+            {"error_code": error} if error else {},
+        )
 
 
 def reserve(service, job):
@@ -93,8 +107,19 @@ def reserve(service, job):
         ).fetchone()
         if current["claim_id"] != job["claim_id"] or current["state"] != "connecting":
             return False
-        user = require_creator(db, job["portal_id"], job["kind"])
-        if user["id"] != job["actor_id"]:
+        principal = current["portal_id"]
+        saved = current.get("actor")
+        if saved and saved.get("kind") == "platform_owner":
+            # A journal snapshot describes history; only the current central
+            # authorization callback can grant permission to send a queued job.
+            authorizer = service.owner_authorizer
+            if authorizer is None:
+                return False
+            principal = authorizer(UUID(saved["company_id"]), UUID(saved["auth_user_id"]))
+            if principal is None or owner_actor(db, principal) is None:
+                return False
+        user = require_creator(db, principal, current["kind"])
+        if not same_actor(current, user["id"]):
             return False
         db.execute(
             "UPDATE commercial_counterparty_operations SET state='sending',updated_at=now() "
@@ -105,6 +130,7 @@ def reserve(service, job):
             "INSERT INTO commercial_counterparty_events(operation_id,state) VALUES(%s,'sending')",
             (job["id"],),
         )
+        audit(db, stored_actor(current), "sending", "counterparty", job["id"])
         return True
 
 
@@ -130,6 +156,7 @@ def deliver_one(service):
                 if provider.exists(client, token, **{field: value}):
                     finish(service.database, job, "rejected", error=error)
                     return True
+            require_feature(service, "commercial.counterparties")
             try:
                 reserved = reserve(service, job)
             except HTTPException:

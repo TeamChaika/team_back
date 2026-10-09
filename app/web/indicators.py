@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from threading import Lock
 from time import monotonic
 from typing import Annotated
@@ -30,6 +29,8 @@ from app.integrations.iiko.errors import IikoError
 from app.services.iiko_auth import IikoAuthService
 from app.sync_references import reference_lock
 from app.sync_sales_history import FixedReport, error_code
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_post, temporary_directory
 from app.web.coverage import ZONE
 from app.web.warehouse_analytics import warehouse_ids
 
@@ -175,8 +176,9 @@ def request_body(query, ids, fields, start, end, *, stores=None):
 def collect_reports(settings, bodies):
     """One licensed session, sequential queries and confirmed logout on every exit."""
     with (
-        psycopg.connect(
+        tenant_connect(
             settings.database_url.get_secret_value(),
+            connector=psycopg.connect,
             autocommit=True,
             connect_timeout=10,
             application_name="chaika-indicators",
@@ -184,8 +186,8 @@ def collect_reports(settings, bodies):
         reference_lock(db),
     ):
         try:
-            response = httpx.post(
-                "http://127.0.0.1:8010/api/v1/iiko/connections/primary/logout",
+            response = collector_post(
+                "/api/v1/iiko/connections/primary/logout",
                 timeout=10,
                 trust_env=False,
             )
@@ -194,7 +196,7 @@ def collect_reports(settings, bodies):
                 raise IikoError("iiko_session_unknown", "Выход из iiko не подтверждён.")
         except httpx.ConnectError:
             pass
-        with TemporaryDirectory(prefix="chaika-indicators-") as directory:
+        with temporary_directory(prefix="chaika-indicators-") as directory:
 
             async def collect():
                 client = IikoClient(settings)

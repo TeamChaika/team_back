@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from uuid import UUID
 
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 from app.web.coverage import ZONE
 from app.web.purchase_prices_prepared import prepared_receipts_query
 
@@ -20,17 +21,17 @@ def household_product_ids(db):
         row["id"]
         for row in db.execute(
             "WITH RECURSIVE household_groups(id) AS ("
-            "SELECT id FROM chaika.product_groups WHERE source_id='primary' AND id=%s "
-            "UNION SELECT g.id FROM chaika.product_groups g JOIN household_groups h "
+            f"SELECT id FROM {DB}.product_groups WHERE source_id='primary' AND id=%s "
+            f"UNION SELECT g.id FROM {DB}.product_groups g JOIN household_groups h "
             "ON g.parent_id=h.id WHERE g.source_id='primary') "
-            "SELECT p.id FROM chaika.products p JOIN household_groups h ON p.group_id=h.id "
+            f"SELECT p.id FROM {DB}.products p JOIN household_groups h ON p.group_id=h.id "
             "WHERE p.source_id='primary'",
             (HOUSEHOLD_GROUP_ID,),
         ).fetchall()
     ]
 
 
-JOIN = """chaika.incoming_invoice_items i JOIN chaika.incoming_invoices t
+JOIN = f"""{DB}.incoming_invoice_items i JOIN {DB}.incoming_invoices t
     ON (t.source_id,t.id)=(i.source_id,i.document_id)"""
 LINKED = "(NULLIF(t.details->>'linked_outgoing_invoice_id','') IS NOT NULL)"
 ELIGIBLE = """t.source_id='primary' AND t.status='PROCESSED' AND i.present_in_latest
@@ -282,14 +283,14 @@ def read_purchase_prices(
 
 def enrich(db, scope, changes):
     labels = db.execute(
-        "SELECT id,name,code FROM chaika.products WHERE source_id='primary' AND id=ANY(%s::uuid[])",
+        f"SELECT id,name,code FROM {DB}.products WHERE source_id='primary' AND id=ANY(%s::uuid[])",
         (list({r["product_id"] for r in changes}),),
     )
-    stores = db.execute("SELECT id,parent_id,name FROM chaika.stores WHERE source_id='primary'")
+    stores = db.execute(f"SELECT id,parent_id,name FROM {DB}.stores WHERE source_id='primary'")
     nodes = db.execute(
-        "SELECT id,parent_id,name FROM chaika.corporate_nodes WHERE source_id='primary'"
+        f"SELECT id,parent_id,name FROM {DB}.corporate_nodes WHERE source_id='primary'"
     )
-    units = db.execute("SELECT id,name FROM chaika.measure_units WHERE source_id='primary'")
+    units = db.execute(f"SELECT id,name FROM {DB}.measure_units WHERE source_id='primary'")
     lines = [
         line
         for r in changes
@@ -297,7 +298,7 @@ def enrich(db, scope, changes):
         for line in o["lines"]
     ]
     suppliers = db.execute(
-        "SELECT id,name FROM chaika.counteragents WHERE source_id='primary' AND id=ANY(%s::uuid[])",
+        f"SELECT id,name FROM {DB}.counteragents WHERE source_id='primary' AND id=ANY(%s::uuid[])",
         (list({r["supplier_id"] for r in lines if r["supplier_id"]}),),
     )
     products = {r["id"]: r for r in labels.fetchall()}

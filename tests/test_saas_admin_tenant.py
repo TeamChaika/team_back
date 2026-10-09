@@ -31,6 +31,12 @@ def setup(tmp_path):
         BASE + "/companies",
         json={
             "name": "Private tenant",
+            "subscription": {
+                "policy": "plans_v1",
+                "plan_id": "full",
+                "start_date": "2026-01-01",
+                "end_date": "2099-12-31",
+            },
             "slug": "tenant-one",
             "notes": "OWNER PRIVATE",
             "primary_admin": {"name": "Admin", "email": "ADMIN@example.org", "phone": "PRIVATE"},
@@ -299,7 +305,7 @@ def test_tenant_login_throttle_and_cookie_scope(setup):
     access = provision(owner, path)
     base, _ = enter(tenant, access)
     cookie = next(iter(tenant.cookies.jar))
-    assert cookie.path == "/api/saas-tenant"
+    assert cookie.path == "/"
     assert cookie.has_nonstandard_attr("HttpOnly")
     assert cookie.get_nonstandard_attr("SameSite") == "strict"
     for _ in range(10):

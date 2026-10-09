@@ -1,18 +1,27 @@
 import csv
 import io
 from datetime import datetime, time, timedelta
-from zoneinfo import ZoneInfo
 
+from app.documents.actors import owner_actor
 from app.documents.catalog import products
+from app.documents.context import local_zone, runtime_of
 from app.documents.costs import (
     displayed_estimate,
     estimate,
     improved_estimate,
     needs_current_estimate,
 )
-from app.documents.policy import fail, identifier, invalid, stores_for, table, warehouse_grant_guard
+from app.documents.policy import (
+    ACTIONS,
+    fail,
+    identifier,
+    invalid,
+    stores_for,
+    table,
+    warehouse_grant_guard,
+)
 
-ZONE = ZoneInfo("Europe/Simferopol")
+ZONE = local_zone()
 
 
 def summary(kind, doc):
@@ -71,7 +80,7 @@ def filters(db, user, kind, params):
             try:
                 dates[key] = datetime.strptime(params[key], "%Y-%m-%d").date()
                 day = dates[key] + (timedelta(days=1) if key == "date_to" else timedelta())
-                cutoff = datetime.combine(day, time.min, ZONE)
+                cutoff = datetime.combine(day, time.min, local_zone(db))
             except (ValueError, TypeError, OverflowError):
                 invalid("Выберите корректную дату.")
             conditions.append("d.created_at" + ("<%s" if key == "date_to" else ">=%s"))
@@ -93,7 +102,7 @@ def filters(db, user, kind, params):
     return " AND ".join(conditions), values
 
 
-def joined(kind):
+def joined(kind, db=None):
     parent, _ = table(kind)
     extra = ", t.name AS counteragent" if kind == "waybill" else ", r.id AS reason_pk"
     relation = (
@@ -101,12 +110,16 @@ def joined(kind):
         if kind == "waybill"
         else "LEFT JOIN writeoffs_reasons r ON r.name=d.reason_id"
     )
+    creator = "d.created_actor->>'display_name'," if runtime_of(db).mode == "tenant" else ""
+    processor = "d.processed_actor->>'display_name'," if runtime_of(db).mode == "tenant" else ""
     return (
         f"SELECT d.*, s.name AS store, "
-        "coalesce(nullif(trim(c.first_name || ' ' || c.last_name),''),c.username) AS creator, "
-        "coalesce(nullif(trim(p.first_name || ' ' || p.last_name),''),p.username) AS processor"
+        f"coalesce({creator}"
+        "nullif(trim(c.first_name || ' ' || c.last_name),''),c.username) AS creator, "
+        f"coalesce({processor}"
+        "nullif(trim(p.first_name || ' ' || p.last_name),''),p.username) AS processor"
         f"{extra} FROM {parent} d JOIN stores s ON s.id=d.store_id "
-        "JOIN authentication_user c ON c.id=d.created_by_id "
+        "LEFT JOIN authentication_user c ON c.id=d.created_by_id "
         f"LEFT JOIN authentication_user p ON p.id=d.processed_by_id {relation}"
     )
 
@@ -118,6 +131,8 @@ def serialize(kind, doc):
         "store": doc["store"],
         "comment": doc["comment"] or "",
         "created_by": doc["creator"],
+        "created_actor": doc.get("created_actor"),
+        "processed_actor": doc.get("processed_actor"),
         "created_at": doc["created_at"].isoformat(),
         "processed_by": doc["processor"],
         "processed_at": doc["processed_at"].isoformat() if doc["processed_at"] else None,
@@ -154,7 +169,9 @@ def listing(db, user, kind, params, *, export=False):
     if export:
         if total > 10000:
             invalid("Сузьте период экспорта до 10 000 документов.")
-        rows = db.execute(joined(kind) + f" WHERE {where} ORDER BY d.id DESC", values).fetchall()
+        rows = db.execute(
+            joined(kind, db) + f" WHERE {where} ORDER BY d.id DESC", values
+        ).fetchall()
         stream = io.StringIO()
         writer = csv.writer(stream, delimiter=";")
         writer.writerow(
@@ -189,7 +206,7 @@ def listing(db, user, kind, params, *, export=False):
     page = integer(params.get("page"), 1, 10000000)
     size = integer(params.get("page_size"), 30, 100)
     rows = db.execute(
-        joined(kind) + f" WHERE {where} ORDER BY d.id DESC LIMIT %s OFFSET %s",
+        joined(kind, db) + f" WHERE {where} ORDER BY d.id DESC LIMIT %s OFFSET %s",
         [*values, size, (page - 1) * size],
     ).fetchall()
     return {
@@ -243,14 +260,17 @@ def available_actions(db, user, kind, doc):
 def detail(db, user, kind, document_id, params):
     where, values = filters(db, user, kind, params)
     doc = db.execute(
-        joined(kind) + f" WHERE {where} AND d.id=%s", [*values, document_id]
+        joined(kind, db) + f" WHERE {where} AND d.id=%s", [*values, document_id]
     ).fetchone()
     if not doc:
         fail(404, "Документ не найден.")
+    actor_name = "e.actor->>'display_name'," if runtime_of(db).mode == "tenant" else ""
+    actor_projection = "e.actor AS actor_context," if runtime_of(db).mode == "tenant" else ""
     history = db.execute(
-        "SELECT e.action,e.version,e.created_at,e.data, "
-        "coalesce(nullif(trim(u.first_name || ' ' || u.last_name),''),u.username) AS actor "
-        "FROM portal_documents_event e JOIN authentication_user u ON u.id=e.actor_id "
+        f"SELECT e.action,e.version,e.created_at,e.data, {actor_projection}"
+        f"coalesce({actor_name}"
+        "nullif(trim(u.first_name || ' ' || u.last_name),''),u.username) AS actor "
+        "FROM portal_documents_event e LEFT JOIN authentication_user u ON u.id=e.actor_id "
         "WHERE kind=%s AND document_id=%s ORDER BY e.id DESC LIMIT 100",
         (kind, document_id),
     ).fetchall()
@@ -272,11 +292,18 @@ def detail(db, user, kind, document_id, params):
 
 
 def options(db, user, kind):
-    grants = db.execute(
-        "SELECT store_id,actions FROM portal_documents_grant WHERE user_id=%s AND kind=%s"
-        + warehouse_grant_guard("portal_documents_grant"),
-        (user["id"], kind),
-    ).fetchall()
+    grants = (
+        [
+            {"store_id": sid, "actions": sorted(ACTIONS[kind])}
+            for sid in stores_for(db, user["id"], kind)
+        ]
+        if owner_actor(db, user["id"])
+        else db.execute(
+            "SELECT store_id,actions FROM portal_documents_grant WHERE user_id=%s AND kind=%s"
+            + warehouse_grant_guard("portal_documents_grant", db=db),
+            (user["id"], kind),
+        ).fetchall()
+    )
     if not grants:
         return {"stores": [], "recipients": [], "reasons": [], "grants": []}
     return {

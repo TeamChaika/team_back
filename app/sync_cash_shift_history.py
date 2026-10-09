@@ -17,9 +17,13 @@ from app.schemas.sync_jobs import CashShiftSyncQuery
 from app.services.sync_jobs import write_json
 from app.sync_cash_shifts import synchronize_cash_shifts
 from app.sync_references import SyncError, configured_sources, reference_lock, register_sources
+from app.tenancy.config import load_runtime
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import runtime_directory, validate_runtime_path
+from app.tenancy.sql import ANALYTICS_SCHEMA
 
-DIRECTORY = BACKEND_DIR / ".local/sync"
-ZONE = ZoneInfo("Europe/Simferopol")
+DIRECTORY = runtime_directory("local", BACKEND_DIR / ".local") / "sync"
+ZONE = ZoneInfo(load_runtime().timezone if load_runtime().mode == "tenant" else "Europe/Simferopol")
 
 
 def history_days(start: date, end: date, *, include_today=False) -> list[date]:
@@ -111,6 +115,7 @@ def run_history(days, coverage, sync_window, checkpoint, stop: Event):
 
 def synchronize_history(settings, start, end, stop, directory=DIRECTORY, *, include_today=False):
     days = history_days(start, end, include_today=include_today)
+    directory = validate_runtime_path(directory)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(directory / "cash-shifts-history.lock", os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(descriptor, "w") as lock:
@@ -120,19 +125,22 @@ def synchronize_history(settings, start, end, stop, directory=DIRECTORY, *, incl
             raise SyncError("cash_shift_history_already_running") from None
         source = configured_sources(settings)[0]
         with (
-            psycopg.connect(
-                settings.database_url.get_secret_value(), autocommit=True, connect_timeout=10
+            tenant_connect(
+                settings.database_url.get_secret_value(),
+                autocommit=True,
+                connect_timeout=10,
+                connector=psycopg.connect,
             ) as db,
             reference_lock(db),
         ):
             register_sources(db, [source])
             rows = db.execute(
                 "SELECT d.open_day,d.row_count,d.observed_at,"
-                "(SELECT count(*) FROM chaika.cash_shift_observations o "
+                f"(SELECT count(*) FROM {ANALYTICS_SCHEMA}.cash_shift_observations o "
                 "WHERE o.snapshot_id=d.last_snapshot_id AND o.mapping_state='matched') "
-                "FROM chaika.cash_shift_days d "
-                "JOIN chaika.raw_snapshots s ON s.id=d.last_snapshot_id "
-                "JOIN chaika.sync_runs r ON r.id=s.run_id "
+                f"FROM {ANALYTICS_SCHEMA}.cash_shift_days d "
+                f"JOIN {ANALYTICS_SCHEMA}.raw_snapshots s ON s.id=d.last_snapshot_id "
+                f"JOIN {ANALYTICS_SCHEMA}.sync_runs r ON r.id=s.run_id "
                 "WHERE d.source_id=%s AND d.open_day BETWEEN %s AND %s "
                 "AND (r.status='succeeded' OR "
                 "(r.status='failed' AND r.counts->>'logout_ok'='true'))",

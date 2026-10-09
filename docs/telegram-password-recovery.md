@@ -61,3 +61,9 @@ Auth изолированным тестовым аккаунтом перед �
 фикстура использует отдельную disposable БД `telegram_profile_tests`.
 
 Откат к предыдущим образам backend/frontend/worker не требует удаления таблицы.
+
+## Tenant runtime (09.10.2026, локально)
+
+Полный tenant portal использует существующий профиль документов и одноразовую ссылку своего Telegram. `RESTCONTROL_TENANT_DOCUMENTS_BOT_TOKEN`, `BOT_USERNAME` и `WORKER_ENABLED=true` должны быть заданы явно через настройки компании; без них подключение и восстановление недоступны. Название бота не ищется через Chaika/config fallback. Дочерний процесс не получает Supabase admin key: `/api/auth/recovery/reset` передаёт token/password через private company capability центральному CompanyAccounts. Центральный обработчик проверяет существующую привязку, active profile, exclusive active company membership, отсутствие platform/shared identity, consumes proof до Auth, держит binding/profile/member locks и отзывает сессии. Неизвестный ответ Auth не разрешает повторное применение proof.
+
+Публичные страницы открываются только после подтверждённого full tenant context. GET `/api/auth/recovery/telegram` и POST `/api/auth/recovery/reset` требуют точный frontend Origin своей компании; user session не требуется. Пароль не создаёт новую сессию. Это локальные проверки с fake Auth/Telegram и изолированной PostgreSQL; доставку сообщений, реальный сброс и production release они не подтверждают.

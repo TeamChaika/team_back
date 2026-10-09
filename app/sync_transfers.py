@@ -12,15 +12,16 @@ from app.core.config import BACKEND_DIR, Settings
 from app.schemas.iiko_transfers import TransfersSyncQuery
 from app.sync_invoices import synchronize_invoices
 from app.sync_references import SyncError
+from app.tenancy.io import collector_url, runtime_directory
 
 
 def synchronize_transfers(settings: Settings, query: TransfersSyncQuery) -> dict:
     return synchronize_invoices(
         settings,
-        "http://127.0.0.1:8010",
+        collector_url(),
         query.date_from,
         query.date_to,
-        BACKEND_DIR / ".local/sync/transfers-manual.json",
+        runtime_directory("local", BACKEND_DIR / ".local") / "sync/transfers-manual.json",
         resource="transfers",
     )
 
@@ -30,9 +31,11 @@ def main():
     parser.add_argument("--date-from", required=True, type=date.fromisoformat)
     parser.add_argument("--date-to", required=True, type=date.fromisoformat)
     parser.add_argument("--resume-run", type=UUID)
-    parser.add_argument("--api-url", default="http://127.0.0.1:8010")
+    parser.add_argument("--api-url", default=collector_url())
     parser.add_argument(
-        "--output", type=Path, default=BACKEND_DIR / ".local/sync/transfers-latest.json"
+        "--output",
+        type=Path,
+        default=runtime_directory("local", BACKEND_DIR / ".local") / "sync/transfers-latest.json",
     )
     args = parser.parse_args()
     stop = Event()

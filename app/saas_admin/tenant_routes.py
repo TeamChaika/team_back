@@ -1,6 +1,7 @@
 """Tenant API namespace; owner auth is never accepted here."""
 
 from fastapi import Depends, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import ConfigDict, Field, SecretStr
 
 from .auth_validation import CredentialsModel, csrf_matches
@@ -26,6 +27,8 @@ def mount_tenant_routes(app, repo, mode="local"):
     base = TENANT_BASE + "/{slug}"
 
     def cookie(response, token):
+        # Remove the former narrower cookie so upgraded browsers send one identity.
+        response.delete_cookie(TENANT_COOKIE, path=TENANT_BASE)
         response.set_cookie(
             TENANT_COOKIE,
             token,
@@ -33,7 +36,7 @@ def mount_tenant_routes(app, repo, mode="local"):
             samesite="strict",
             secure=mode == "production",
             max_age=8 * 3600,
-            path=TENANT_BASE,
+            path="/",
         )
 
     def session(slug: str, request: Request):
@@ -66,9 +69,10 @@ def mount_tenant_routes(app, repo, mode="local"):
     def logout(request: Request, value=tenant_dependency):
         repo.tenant_logout(request.cookies.get(TENANT_COOKIE, ""))
         response = Response(status_code=204)
+        response.delete_cookie(TENANT_COOKIE, path=TENANT_BASE)
         response.delete_cookie(
             TENANT_COOKIE,
-            path=TENANT_BASE,
+            path="/",
             httponly=True,
             samesite="strict",
             secure=mode == "production",
@@ -83,6 +87,30 @@ def mount_tenant_routes(app, repo, mode="local"):
         response: Response,
         value=tenant_dependency,
     ):
+        accounts = getattr(app.state, "company_accounts", None)
+        company_id = str(value["company"]["id"])
+        if accounts is not None and company_id in accounts.targets:
+            result = accounts.password(
+                company_id,
+                request.cookies.get(TENANT_COOKIE, ""),
+                request.headers.get("x-csrf-token", ""),
+                body.current_password.get_secret_value(),
+                body.new_password.get_secret_value(),
+            )
+            current = repo.tenant_session(result["token"], slug)
+            outgoing = (
+                response
+                if result["completed"]
+                else JSONResponse(
+                    {
+                        **current,
+                        "detail": "Пароль сохранён. Обновление доступа требует повторной проверки.",
+                    },
+                    status_code=503,
+                )
+            )
+            cookie(outgoing, result["token"])
+            return current if result["completed"] else outgoing
         token, value = repo.tenant_password(
             request.cookies.get(TENANT_COOKIE, ""),
             slug,
@@ -97,4 +125,17 @@ def mount_tenant_routes(app, repo, mode="local"):
     @app.get(base + "/workspace")
     def workspace(slug: str, request: Request):
         value = repo.tenant_workspace(request.cookies.get(TENANT_COOKIE, ""), slug)
+        registry = getattr(app.state, "runtime_registry", None)
+        if registry is not None:
+            company = repo.get(str(value["company"]["id"]))
+            value = {
+                **value,
+                "setup_available": bool(
+                    getattr(registry, "resolve_setup", lambda _: None)(company)
+                ),
+                "full_dashboard_ready": bool(registry.resolve(company)),
+                "full_dashboard_available": bool(
+                    getattr(registry, "resolve_existing", registry.resolve)(company)
+                ),
+            }
         return {**value, "mode": mode}

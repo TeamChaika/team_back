@@ -5,6 +5,7 @@ from datetime import date
 from psycopg.types.json import Jsonb
 
 from app.sync_inventory import upsert_rows
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 
 
 def publish_transfers(db, snapshot: dict, day: date) -> dict:
@@ -46,7 +47,7 @@ def publish_transfers(db, snapshot: dict, day: date) -> dict:
         headers(),
     )
     db.execute(
-        "UPDATE chaika.internal_transfer_items SET present_in_latest=false "
+        f"UPDATE {DB}.internal_transfer_items SET present_in_latest=false "
         "WHERE source_id=%s AND document_id=ANY(%s::uuid[])",
         (source_id, [p["id"] for p in parents]),
     )
@@ -88,9 +89,9 @@ def transfer_link_counts(db, source_id: str, ids: list) -> dict:
     row = db.execute(
         "SELECT count(*),count(*) FILTER(WHERE t.status='PROCESSED'),"
         "count(*) FILTER(WHERE f.id IS NOT NULL),count(*) FILTER(WHERE d.id IS NOT NULL) "
-        "FROM chaika.internal_transfers t "
-        "LEFT JOIN chaika.stores f ON f.source_id=t.source_id AND f.id=t.store_from_id "
-        "LEFT JOIN chaika.stores d ON d.source_id=t.source_id AND d.id=t.store_to_id "
+        f"FROM {DB}.internal_transfers t "
+        f"LEFT JOIN {DB}.stores f ON f.source_id=t.source_id AND f.id=t.store_from_id "
+        f"LEFT JOIN {DB}.stores d ON d.source_id=t.source_id AND d.id=t.store_to_id "
         "WHERE t.source_id=%s AND t.id=ANY(%s::uuid[])",
         (source_id, ids),
     ).fetchone()
@@ -104,9 +105,9 @@ def transfer_link_counts(db, source_id: str, ids: list) -> dict:
     row = db.execute(
         "SELECT count(*),count(*) FILTER(WHERE p.id IS NULL),"
         "count(*) FILTER(WHERE i.measure_unit_id IS NOT NULL AND u.id IS NULL) "
-        "FROM chaika.internal_transfer_items i "
-        "LEFT JOIN chaika.products p ON p.source_id=i.source_id AND p.id=i.product_id "
-        "LEFT JOIN chaika.measure_units u ON u.source_id=i.source_id AND u.id=i.measure_unit_id "
+        f"FROM {DB}.internal_transfer_items i "
+        f"LEFT JOIN {DB}.products p ON p.source_id=i.source_id AND p.id=i.product_id "
+        f"LEFT JOIN {DB}.measure_units u ON u.source_id=i.source_id AND u.id=i.measure_unit_id "
         "WHERE i.source_id=%s AND i.document_id=ANY(%s::uuid[]) AND i.present_in_latest",
         (source_id, ids),
     ).fetchone()

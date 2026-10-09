@@ -205,6 +205,9 @@ def test_invalid_money_is_never_returned(value):
 
 
 class Gate:
+    def get(self, company_id):
+        return {"modules": {"analytics": True}, "subscription": {"policy": "legacy"}}
+
     blocked = None
     revision = 1
 
@@ -404,6 +407,9 @@ class SourceRepository(PostgresTenantAccess):
         assert token == "valid" and tenant is True and slug == "one"
         return self.row
 
+    def _tenant_verified(self, db, token, slug):
+        return self._verified(db, token, True, slug)
+
     def execute(self, sql, params):
         assert "FROM connections WHERE company_id=%s" in sql
         assert "connection_id='chain'" in sql
@@ -425,6 +431,14 @@ def test_repository_uses_verified_company_only_and_no_rms_fallback():
     with pytest.raises(Problem) as error:
         repo.tenant_dashboard_source("valid", "one")
     assert error.value.code == "chain_required"
+
+
+def test_employee_cannot_bypass_local_warehouse_rights_through_old_summary():
+    repo = SourceRepository()
+    repo.row["role"] = "employee"
+    with pytest.raises(Problem) as error:
+        repo.tenant_dashboard_source("valid", "one")
+    assert error.value.code == "full_portal_required"
 
 
 @pytest.mark.parametrize(
@@ -516,3 +530,31 @@ def test_dish_periods_are_explicit_without_fabricated_dates_or_order_dependent_n
         "includeLow": True,
         "includeHigh": False,
     }
+
+
+def test_named_plan_override_blocks_current_tenant_read_before_iiko(tmp_path):
+    class RestrictedGate(Gate):
+        def get(self, company_id):
+            return {
+                "modules": {"analytics": True},
+                "subscription": {
+                    "policy": "plans_v1",
+                    "plan_id": "full",
+                    "start_date": "2026-01-01",
+                    "overrides": {"analytics.sales": {"mode": "deny"}},
+                },
+            }
+
+    app = create_app(tmp_path, repository=RestrictedGate())
+
+    def forbidden_fetch(*args):
+        raise AssertionError("Disabled feature reached iiko")
+
+    app.state.tenant_dashboard.fetch = forbidden_fetch
+    with TestClient(app, base_url="http://127.0.0.1:8210") as client:
+        client.cookies.set("saas_tenant_session", "valid", path="/api/saas-tenant")
+        response = client.get(
+            "/api/saas-tenant/one/dashboard/sales/daily?start=2026-10-07&end=2026-10-07"
+        )
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "feature_disabled"

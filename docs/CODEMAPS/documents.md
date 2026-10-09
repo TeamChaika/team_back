@@ -173,3 +173,21 @@ chat_id/message_id из сохранённых native_bot_updates callbacks; н�
 действует в native runtime и Telegram независимо от HTTP Scope. Перед выпуском
 применить обе миграции и обновить worker по [контракту](../warehouse-access.md).
 Глобальный склад не создаёт право действия; профили, ссылки и история сохраняются.
+
+## Изолированный runtime компании (08.10.2026)
+
+`app/documents/database.py` фиксирует TenantRuntime на пул и проверяет login;
+`context.py` задаёт identifiers, timezone и locks. `config.py` в tenant-режиме
+читает только `RESTCONTROL_TENANT_DOCUMENTS_*`, без `.env`/Chaika fallback.
+Чистая схема — [tenant migrations](../tenant-migrations.md), runtime/проверки и
+граница platform actor — [tenant documents](../tenant-documents.md).
+`tests/test_tenant_documents.py` проверяет существующие workflow/очереди/CSV/PDF
+двух компаний с одинаковыми ID на настоящем PostgreSQL, без внешних отправок.
+
+`actors.py` отделяет проверенный `ActorContext` от снимка `StoredActor` для
+истории: только первый даёт platform-owner доступ в собственной компании.
+Native и commercial workflow пишут глобальный actor snapshot и append-only
+`native_actor_audit`; локальная учётная запись владельца не создаётся.
+Counterparty worker требует текущий `owner_authorizer` перед резервированием
+POST. Проверки: `test_tenant_owner_documents.py`, `test_tenant_owner_commercial.py`,
+`test_tenant_actor_schema.py` на одноразовом PostgreSQL.

@@ -8,8 +8,8 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 import httpx
 from defusedxml.ElementTree import fromstring
 
+from app.documents.context import local_zone
 from app.documents.policy import full_name
-from app.documents.reads import ZONE
 
 log = logging.getLogger(__name__)
 
@@ -60,9 +60,9 @@ class DocumentTransport:
                         log.warning("Document iiko logout unavailable")
 
     @staticmethod
-    def payload(kind, doc, rows, creator, processor, source, target, reason):
+    def payload(kind, doc, rows, creator, processor, source, target, reason, *, timezone=None):
         number = f"DJ{doc['id']:06d}"
-        local_time = doc["created_at"].astimezone(ZONE)
+        local_time = doc["created_at"].astimezone(timezone or local_zone())
         if kind == "writeoff":
             if not reason or not reason["account_id"]:
                 raise ValueError("Writeoff account missing")

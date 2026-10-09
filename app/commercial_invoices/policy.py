@@ -1,10 +1,12 @@
-"Explicit commercial permissions; portal ownership never supplies warehouse grants."
+"Commercial grants for members and verified global owners in their company."
 
 import hashlib
 import json
 
 from psycopg.types.json import Jsonb
 
+from app.documents.actors import actor_user, audit, owner_actor, principal_uuid
+from app.documents.context import lock_resource
 from app.documents.policy import fail, identifier, invalid, profile, warehouse_grant_guard
 
 SECTIONS = {"purchase": "invoices", "sale": "outgoing"}
@@ -12,6 +14,9 @@ ACTIONS = {"view", "create", "edit", "submit"}
 
 
 def actor(db, portal_id, *, kind):
+    owner = owner_actor(db, portal_id)
+    if owner is not None:
+        return actor_user(owner)
     current = profile(db, portal_id)
     if SECTIONS[kind] not in current["sections"]:
         fail(403, "Нет доступа к разделу накладных.")
@@ -21,7 +26,7 @@ def actor(db, portal_id, *, kind):
             "portal_documents_userlink l ON l.user_id=u.id WHERE "
             "l.supabase_id=%s"
         ),
-        (portal_id,),
+        (principal_uuid(portal_id),),
     ).fetchone()
     if not user or not user["is_active"]:
         fail(403, "Администратор должен подключить рабочий профиль и склады.")
@@ -31,12 +36,15 @@ def actor(db, portal_id, *, kind):
 def stores_for(db, user_id, kind, action="view"):
     if action not in ACTIONS:
         return []
+    if owner_actor(db, user_id) is not None:
+        return [r["id"] for r in db.execute("SELECT id FROM stores").fetchall()]
     return [
         r["store_id"]
         for r in db.execute(
             (
                 "SELECT store_id FROM commercial_invoice_grants WHERE user_id=%s "
-                "AND kind=%s AND actions @> %s" + warehouse_grant_guard("commercial_invoice_grants")
+                "AND kind=%s AND actions @> %s"
+                + warehouse_grant_guard("commercial_invoice_grants", db=db)
             ),
             (user_id, kind, Jsonb([action])),
         ).fetchall()
@@ -67,14 +75,17 @@ def administration(database, portal_id, *, user_id=None, body=None):
                     {"user_id": user_id, "body": body}, sort_keys=True, allow_nan=False
                 ).encode()
             ).hexdigest()
-            db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (str(request_id),))
+            db.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (lock_resource(db, str(request_id)),),
+            )
             previous = db.execute(
                 "SELECT portal_id,fingerprint FROM commercial_grant_operations WHERE request_id=%s",
                 (request_id,),
             ).fetchone()
             if previous:
                 if (
-                    str(previous["portal_id"]) != str(portal_id)
+                    str(previous["portal_id"]) != str(principal_uuid(portal_id))
                     or previous["fingerprint"] != fingerprint
                 ):
                     fail(409, "Этот request_id уже использован другой командой.")
@@ -131,8 +142,10 @@ def administration(database, portal_id, *, user_id=None, body=None):
             db.execute(
                 "INSERT INTO commercial_grant_operations(request_id,portal_id,fingerprint,user_id) "
                 "VALUES(%s,%s,%s,%s)",
-                (request_id, portal_id, fingerprint, user_id),
+                (request_id, principal_uuid(portal_id), fingerprint, user_id),
             )
+        if body is not None:
+            audit(db, portal_id, "commercial_grants", "user", user_id)
         return _listing(db)
 
 

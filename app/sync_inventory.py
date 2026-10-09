@@ -9,7 +9,6 @@ from pathlib import Path
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
-import httpx
 import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
@@ -35,6 +34,10 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.tenancy.config import load_runtime
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_client, collector_url, runtime_directory, validate_runtime_path
+from app.tenancy.sql import ANALYTICS_SCHEMA
 
 RESOURCES = ("product_groups", "products", "incoming_invoices", "writeoffs", "assembly_charts")
 
@@ -49,7 +52,7 @@ def capture_inventory(
         "outgoing_invoices": "outgoing-invoices",
         "assembly_charts": "assembly-charts",
     }.get(resource, resource)
-    folder = BACKEND_DIR / ".local" / folder_name
+    folder = runtime_directory("local", BACKEND_DIR / ".local") / folder_name
     catalog = resource in {"products", "product_groups"}
     meta = json.loads((folder / ("current.json" if catalog else f"{key}.meta.json")).read_text())
     if meta["source_fingerprint"] != source.fingerprint:
@@ -161,7 +164,8 @@ def upsert_rows(db, table: str, columns: list[str], keys: list[str], rows) -> in
     """Pipeline bounded batches, preserving exact decimal strings for numeric columns."""
     updates = [c for c in columns if c not in {*keys, "first_seen_at"}]
     statement = sql.SQL(
-        "INSERT INTO chaika.{} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"
+        f"INSERT INTO {ANALYTICS_SCHEMA}.{{}} ({{}}) VALUES ({{}}) ON CONFLICT ({{}}) DO "
+        f"UPDATE SET {{}}"
     ).format(
         sql.Identifier(table),
         sql.SQL(",").join(map(sql.Identifier, columns)),
@@ -218,7 +222,7 @@ def publish_writeoffs(db, snapshot: dict, day: date) -> None:
         headers(),
     )
     db.execute(
-        "UPDATE chaika.writeoff_items SET present_in_latest=false "
+        f"UPDATE {ANALYTICS_SCHEMA}.writeoff_items SET present_in_latest=false "
         "WHERE source_id=%s AND document_id=ANY(%s::uuid[])",
         (source_id, [p["id"] for p in parents]),
     )
@@ -323,7 +327,8 @@ def publish_inventory(db, snapshots: dict, day: date) -> dict:
             if catalog:
                 db.execute(
                     sql.SQL(
-                        "UPDATE chaika.{} SET present_in_latest=false WHERE source_id='primary'"
+                        f"UPDATE {ANALYTICS_SCHEMA}.{{}} SET present_in_latest=false "
+                        f"WHERE source_id='primary'"
                     ).format(sql.Identifier(table))
                 )
             columns = fields + meta_columns + (["present_in_latest"] if catalog else [])
@@ -382,7 +387,7 @@ def publish_inventory(db, snapshots: dict, day: date) -> dict:
             ids = [r["id"] for r in parents]
             db.execute(
                 sql.SQL(
-                    "UPDATE chaika.{} SET present_in_latest=false "
+                    f"UPDATE {ANALYTICS_SCHEMA}.{{}} SET present_in_latest=false "
                     "WHERE source_id='primary' AND {}=ANY(%s::uuid[])"
                 ).format(sql.Identifier(table), sql.Identifier(parent_column)),
                 (ids,),
@@ -415,7 +420,7 @@ def publish_inventory(db, snapshots: dict, day: date) -> dict:
             )
         chart_snapshot = snapshots["assembly_charts"]
         db.execute(
-            "UPDATE chaika.assembly_chart_scopes SET present_in_latest=false "
+            f"UPDATE {ANALYTICS_SCHEMA}.assembly_chart_scopes SET present_in_latest=false "
             "WHERE source_id='primary' AND business_date=%s",
             (day,),
         )
@@ -440,7 +445,7 @@ def publish_inventory(db, snapshots: dict, day: date) -> dict:
 
 def restore_snapshots(db, run_id: UUID, source: Source, day: date) -> dict:
     job = db.execute(
-        "SELECT job,status,counts FROM chaika.sync_runs WHERE id=%s", (run_id,)
+        f"SELECT job,status,counts FROM {ANALYTICS_SCHEMA}.sync_runs WHERE id=%s", (run_id,)
     ).fetchone()
     if not job or job[0] != "inventory" or job[1] == "running":
         raise SyncError("inventory_resume_run_invalid")
@@ -449,7 +454,7 @@ def restore_snapshots(db, run_id: UUID, source: Source, day: date) -> dict:
     ids = [str(UUID(value)) for value in manifest.values()]
     for key, resource, observed_at, payload, valid in db.execute(
         "SELECT id,resource,observed_at,normalized,encode(sha256(raw),'hex')=sha256 "
-        "FROM chaika.raw_snapshots WHERE (run_id=%s OR id=ANY(%s::uuid[])) "
+        f"FROM {ANALYTICS_SCHEMA}.raw_snapshots WHERE (run_id=%s OR id=ANY(%s::uuid[])) "
         "AND source_id=%s ORDER BY observed_at",
         (run_id, ids, source.id),
     ):
@@ -467,36 +472,41 @@ def restore_snapshots(db, run_id: UUID, source: Source, day: date) -> dict:
 def synchronize_inventory(
     settings: Settings, api_url: str, day: date, output: Path, resume_run: UUID | None = None
 ) -> dict:
+    output = validate_runtime_path(output)
     api_url = check_local_api(api_url)
     source = configured_sources(settings)[0]
     if not settings.database_url.get_secret_value():
         raise SyncError("database_not_configured")
     run_id = uuid4()
     with (
-        psycopg.connect(
+        tenant_connect(
             settings.database_url.get_secret_value(),
             autocommit=True,
             connect_timeout=10,
             application_name="chaika-inventory-sync",
+            connector=psycopg.connect,
         ) as db,
         reference_lock(db),
     ):
         register_sources(db, [source])
         if not db.execute(
-            "SELECT 1 FROM chaika.sources WHERE id='primary' AND server_type='CHAIN'"
+            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources WHERE id='primary' AND server_type='CHAIN'"
         ).fetchone():
             raise SyncError("reference_sync_required")
         db.execute(
-            "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),"
+            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' WHERE status='running'"
         )
         snapshots = restore_snapshots(db, resume_run, source, day) if resume_run else {}
         db.execute(
-            "INSERT INTO chaika.sync_runs(id,job,status) VALUES(%s,'inventory','running')",
+            (
+                f"INSERT INTO {ANALYTICS_SCHEMA}.sync_runs(id,job,status) "
+                f"VALUES(%s,'inventory','running')"
+            ),
             (run_id,),
         )
         touched, failure, logout_ok, counts = False, None, True, {}
-        with httpx.Client(base_url=api_url, timeout=300, trust_env=False) as client:
+        with collector_client(base_url=api_url, timeout=300, trust_env=False) as client:
             try:
                 primary = client.get("/api/v1/iiko/connections")
                 primary.raise_for_status()
@@ -560,7 +570,8 @@ def synchronize_inventory(
                             resumed_from=str(resume_run) if resume_run else None,
                         )
                         db.execute(
-                            "UPDATE chaika.sync_runs SET status='succeeded',finished_at=now(),"
+                            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='succeeded',"
+                            f"finished_at=now(),"
                             "counts=%s WHERE id=%s",
                             (Jsonb(counts), run_id),
                         )
@@ -573,7 +584,7 @@ def synchronize_inventory(
         )
         if failure:
             db.execute(
-                "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),"
+                f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
                 "error_code=%s,counts=%s WHERE id=%s",
                 (
                     code,
@@ -608,11 +619,18 @@ def main():
     parser.add_argument(
         "--date",
         type=date.fromisoformat,
-        default=datetime.now(ZoneInfo("Europe/Simferopol")).date() - timedelta(days=1),
+        default=datetime.now(
+            ZoneInfo(
+                load_runtime().timezone if load_runtime().mode == "tenant" else "Europe/Simferopol"
+            )
+        ).date()
+        - timedelta(days=1),
     )
-    parser.add_argument("--api-url", default="http://127.0.0.1:8010")
+    parser.add_argument("--api-url", default=collector_url())
     parser.add_argument(
-        "--output", type=Path, default=BACKEND_DIR / ".local/sync/inventory-latest.json"
+        "--output",
+        type=Path,
+        default=runtime_directory("local", BACKEND_DIR / ".local") / "sync/inventory-latest.json",
     )
     parser.add_argument(
         "--resume-run",

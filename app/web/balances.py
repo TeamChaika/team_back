@@ -2,15 +2,17 @@
 
 from fastapi import HTTPException
 
-LATEST = """WITH latest AS (
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
+
+LATEST = f"""WITH latest AS (
     SELECT source_id,last_snapshot_id,accounting_timestamp,last_seen_at
-    FROM chaika.store_balance_reports WHERE source_id='primary'
+    FROM {DB}.store_balance_reports WHERE source_id='primary'
     ORDER BY accounting_timestamp DESC LIMIT 1
 ) """
-BASE = """latest r JOIN chaika.store_balance_items i ON i.snapshot_id=r.last_snapshot_id
-    LEFT JOIN chaika.products p ON p.source_id=r.source_id AND p.id=i.product_id
-    LEFT JOIN chaika.stores s ON s.source_id=r.source_id AND s.id=i.store_id
-    LEFT JOIN chaika.measure_units u ON u.source_id=p.source_id AND u.id=p.main_unit_id"""
+BASE = f"""latest r JOIN {DB}.store_balance_items i ON i.snapshot_id=r.last_snapshot_id
+    LEFT JOIN {DB}.products p ON p.source_id=r.source_id AND p.id=i.product_id
+    LEFT JOIN {DB}.stores s ON s.source_id=r.source_id AND s.id=i.store_id
+    LEFT JOIN {DB}.measure_units u ON u.source_id=p.source_id AND u.id=p.main_unit_id"""
 
 
 def filters(scope, store_id=None, product_id=None, q=""):
@@ -42,17 +44,17 @@ def summary_queries(db, scope):
     stats = db.execute(
         LATEST + "SELECT i.store_id AS id,count(*) AS row_count,"
         "count(DISTINCT i.product_id) AS product_count,sum(i.sum) AS value "
-        "FROM latest r JOIN chaika.store_balance_items i ON i.snapshot_id=r.last_snapshot_id "
+        f"FROM latest r JOIN {DB}.store_balance_items i ON i.snapshot_id=r.last_snapshot_id "
         "WHERE " + where + " GROUP BY i.store_id",
         params,
     )
     store_clause = "" if scope.unrestricted else " AND id=ANY(%s::uuid[])"
     stores = db.execute(
-        "SELECT id,parent_id,name FROM chaika.stores WHERE source_id='primary'" + store_clause,
+        f"SELECT id,parent_id,name FROM {DB}.stores WHERE source_id='primary'" + store_clause,
         [] if scope.unrestricted else [list(scope.store_ids)],
     )
     nodes = db.execute(
-        "SELECT id,parent_id,name FROM chaika.corporate_nodes WHERE source_id='primary'"
+        f"SELECT id,parent_id,name FROM {DB}.corporate_nodes WHERE source_id='primary'"
     )
     return stats, stores, nodes
 

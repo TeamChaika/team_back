@@ -7,7 +7,6 @@ import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Annotated
 from uuid import UUID, uuid4
 from xml.etree.ElementTree import Element, ParseError, tostring
@@ -26,6 +25,9 @@ from app.integrations.iiko.errors import IikoError
 from app.schemas.iiko_employees import IikoEmployee
 from app.services.iiko_employees import read_employees
 from app.sync_references import SyncError, append_snapshot, reference_lock
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import temporary_directory
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 from app.web.repository import serial
 
 Text = Annotated[str, Field(max_length=200)]
@@ -131,7 +133,7 @@ def parse_card(raw, employee_id):
             raise HTTPException(409, "Эта карточка недоступна для редактирования сотрудника.")
         wrapper = Element("employees")
         wrapper.append(root)
-        with TemporaryDirectory(prefix="chaika-employee-") as directory:
+        with temporary_directory(prefix="chaika-employee-") as directory:
             path = Path(directory) / "employee.xml"
             path.write_bytes(tostring(wrapper))
             item = read_employees(path, 1024 * 1024)[0]
@@ -175,7 +177,7 @@ def publish_one(db, raw, item):
     data = item.model_dump(mode="json")
     with db.transaction():
         db.execute(
-            "INSERT INTO chaika.sync_runs(id,job,status,finished_at,counts) "
+            f"INSERT INTO {DB}.sync_runs(id,job,status,finished_at,counts) "
             "VALUES(%s,'employees','succeeded',%s,%s)",
             (run_id, observed, Jsonb({"scope": "single_employee", "employees_updated": 1})),
         )
@@ -209,7 +211,7 @@ def publish_one(db, raw, item):
         updates = [c for c in columns if c not in {"id", "source_id", "first_seen_at"}]
         db.execute(
             sql.SQL(
-                "INSERT INTO chaika.employees ({}) VALUES ({}) ON CONFLICT "
+                f"INSERT INTO {DB}.employees ({{}}) VALUES ({{}}) ON CONFLICT "
                 "(source_id,id) DO UPDATE SET {}"
             ).format(
                 sql.SQL(",").join(map(sql.Identifier, columns)),
@@ -232,9 +234,9 @@ class EmployeeEditor:
         owner(scope)
         with self.repo.connection() as db:
             roles = db.execute(
-                "SELECT code,name FROM chaika.employee_roles WHERE source_id='primary' "
+                f"SELECT code,name FROM {DB}.employee_roles WHERE source_id='primary' "
                 "AND present_in_latest AND NOT coalesce(deleted,false) AND code<>'' "
-                "AND code IN (SELECT code FROM chaika.employee_roles WHERE source_id='primary' "
+                f"AND code IN (SELECT code FROM {DB}.employee_roles WHERE source_id='primary' "
                 "GROUP BY code HAVING count(*)=1) ORDER BY name"
             ).fetchall()
         return serial({"roles": roles, "departments": list(scope.departments)})
@@ -245,7 +247,7 @@ class EmployeeEditor:
             return serial(
                 db.execute(
                     "SELECT id,employee_id,fields->>'name' AS name,created_at "
-                    "FROM chaika.employee_changes WHERE status='pending' AND user_id=%s "
+                    f"FROM {DB}.employee_changes WHERE status='pending' AND user_id=%s "
                     "ORDER BY created_at DESC LIMIT 20",
                     (scope.user["id"],),
                 ).fetchall()
@@ -256,7 +258,7 @@ class EmployeeEditor:
         with self.connection(scope) as db:
             with db.cursor(row_factory=dict_row) as cursor:
                 row = cursor.execute(
-                    "SELECT * FROM chaika.employee_changes WHERE id=%s AND user_id=%s",
+                    f"SELECT * FROM {DB}.employee_changes WHERE id=%s AND user_id=%s",
                     (request_id, scope.user["id"]),
                 ).fetchone()
             if not row:
@@ -277,7 +279,7 @@ class EmployeeEditor:
                     with db.transaction():
                         snapshot_id = publish_one(db, raw, item)
                         db.execute(
-                            "UPDATE chaika.employee_changes SET status=%s,snapshot_id=%s,"
+                            f"UPDATE {DB}.employee_changes SET status=%s,snapshot_id=%s,"
                             "finished_at=now() WHERE id=%s",
                             (status, snapshot_id, request_id),
                         )
@@ -291,8 +293,9 @@ class EmployeeEditor:
         if not self.settings.iiko_configured:
             raise HTTPException(503, "Подключение к iiko не настроено.")
         try:
-            with psycopg.connect(
+            with tenant_connect(
                 self.settings.database_url.get_secret_value(),
+                connector=psycopg.connect,
                 autocommit=True,
                 connect_timeout=10,
                 application_name="chaika-employee-edit",
@@ -300,7 +303,7 @@ class EmployeeEditor:
                 with reference_lock(db):
                     # Recheck privileges after acquiring the shared collector lock.
                     row = db.execute(
-                        "SELECT role FROM chaika.web_users WHERE id=%s AND active "
+                        f"SELECT role FROM {DB}.web_users WHERE id=%s AND active "
                         "AND all_departments AND 'employees'=ANY(sections)",
                         (scope.user["id"],),
                     ).fetchone()
@@ -310,7 +313,7 @@ class EmployeeEditor:
                         f"{str(self.settings.iiko_base_url).rstrip('/')}\n{self.settings.iiko_login}".encode()
                     ).hexdigest()
                     source = db.execute(
-                        "SELECT fingerprint FROM chaika.sources WHERE id='primary'"
+                        f"SELECT fingerprint FROM {DB}.sources WHERE id='primary'"
                     ).fetchone()
                     if not source or source[0] != expected:
                         raise HTTPException(
@@ -358,7 +361,7 @@ class EmployeeEditor:
         with self.connection(scope) as db:
             with db.cursor(row_factory=dict_row) as cursor:
                 old = cursor.execute(
-                    "SELECT * FROM chaika.employee_changes WHERE id=%s", (payload.request_id,)
+                    f"SELECT * FROM {DB}.employee_changes WHERE id=%s", (payload.request_id,)
                 ).fetchone()
             if old and (old["user_id"] != scope.user["id"] or old["request_hash"] != signature):
                 raise HTTPException(409, "Идентификатор сохранения уже использован.")
@@ -397,7 +400,7 @@ class EmployeeEditor:
                             raise HTTPException(409, "Идентификатор сотрудника уже занят.")
                         self.validate(db, fields, current)
                         pending = db.execute(
-                            "SELECT id FROM chaika.employee_changes WHERE employee_id=%s "
+                            f"SELECT id FROM {DB}.employee_changes WHERE employee_id=%s "
                             "AND status='pending'",
                             (target,),
                         ).fetchone()
@@ -409,7 +412,7 @@ class EmployeeEditor:
                             )
                         # The autocommit reservation survives timeouts, disconnects and restarts.
                         db.execute(
-                            "INSERT INTO chaika.employee_changes "
+                            f"INSERT INTO {DB}.employee_changes "
                             "(id,user_id,employee_id,is_create,request_hash,"
                             "fields,before_fields,status) "
                             "VALUES(%s,%s,%s,%s,%s,%s,%s,'pending')",
@@ -434,7 +437,7 @@ class EmployeeEditor:
                             await gateway.save(target, wire)
                             if pin is not None:
                                 db.execute(
-                                    "UPDATE chaika.employee_changes SET pin_accepted=true "
+                                    f"UPDATE {DB}.employee_changes SET pin_accepted=true "
                                     "WHERE id=%s",
                                     (payload.request_id,),
                                 )
@@ -449,7 +452,7 @@ class EmployeeEditor:
                                 422,
                             }:
                                 db.execute(
-                                    "UPDATE chaika.employee_changes SET status='rejected', "
+                                    f"UPDATE {DB}.employee_changes SET status='rejected', "
                                     "finished_at=now(),error_code=%s WHERE id=%s",
                                     (exc.code, payload.request_id),
                                 )
@@ -470,7 +473,7 @@ class EmployeeEditor:
                     with db.transaction():
                         snapshot_id = publish_one(db, raw, current)
                         db.execute(
-                            "UPDATE chaika.employee_changes SET status='confirmed',"
+                            f"UPDATE {DB}.employee_changes SET status='confirmed',"
                             "finished_at=now(), "
                             "snapshot_id=%s WHERE id=%s",
                             (snapshot_id, payload.request_id),
@@ -487,7 +490,7 @@ class EmployeeEditor:
             raise HTTPException(422, "Укажите имя, табельный номер, должность и заведения.")
         if "code" in fields and (current is None or fields["code"] != current.code):
             if db.execute(
-                "SELECT 1 FROM chaika.employee_changes WHERE status='pending' "
+                f"SELECT 1 FROM {DB}.employee_changes WHERE status='pending' "
                 "AND fields->>'code'=%s LIMIT 1",
                 (fields["code"],),
             ).fetchone():
@@ -497,7 +500,7 @@ class EmployeeEditor:
                     "Сначала загрузите его текущие данные из iiko.",
                 )
             if db.execute(
-                "SELECT 1 FROM chaika.employees WHERE source_id='primary' AND code=%s "
+                f"SELECT 1 FROM {DB}.employees WHERE source_id='primary' AND code=%s "
                 "AND id<>%s LIMIT 1",
                 (fields["code"], current.id if current else UUID(int=0)),
             ).fetchone():
@@ -525,7 +528,7 @@ class EmployeeEditor:
             for code in codes:
                 count = db.execute(
                     sql.SQL(
-                        "SELECT count(*) FROM chaika.{} WHERE source_id='primary' AND {}=%s"
+                        f"SELECT count(*) FROM {DB}.{{}} WHERE source_id='primary' AND {{}}=%s"
                     ).format(sql.Identifier(table), sql.Identifier(column)),
                     (code,),
                 ).fetchone()[0]

@@ -14,6 +14,8 @@ from psycopg.types.json import Jsonb
 from app.core.config import Settings
 from app.services.iiko_olap_sales import _unique_fields
 from app.sync_references import configured_sources, reference_lock
+from app.tenancy.connection import tenant_connect
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 
 KINDS = {"daily", "dishes", "payments", "discounts", "returns", "waiters", "hours"}
 METRICS = {
@@ -164,7 +166,7 @@ def publish(db, bundle: dict) -> dict:
     )
     with db.transaction():
         if db.execute(
-            "SELECT 1 FROM chaika.sales_report_sets WHERE id=%s", (bundle["id"],)
+            f"SELECT 1 FROM {DB}.sales_report_sets WHERE id=%s", (bundle["id"],)
         ).fetchone():
             return {"status": "already_imported", "id": str(bundle["id"])}
         captures = [
@@ -186,7 +188,7 @@ def publish(db, bundle: dict) -> dict:
             existing = {
                 row[0]
                 for row in db.execute(
-                    "SELECT id FROM chaika.sales_report_captures WHERE id=ANY(%s::uuid[])",
+                    f"SELECT id FROM {DB}.sales_report_captures WHERE id=ANY(%s::uuid[])",
                     ([record[0] for record in captures],),
                 ).fetchall()
             }
@@ -194,13 +196,13 @@ def publish(db, bundle: dict) -> dict:
         if captures:
             with db.cursor() as cur:
                 cur.executemany(
-                    "INSERT INTO chaika.sales_report_captures(id,source_id,kind,date_from,date_to,"
+                    f"INSERT INTO {DB}.sales_report_captures(id,source_id,kind,date_from,date_to,"
                     "request,observed_at,raw,sha256,row_count) VALUES(%s,'primary',%s,%s,%s,%s,%s,"
                     "%s,%s,%s) ON CONFLICT(id) DO NOTHING",
                     captures,
                 )
         db.execute(
-            "INSERT INTO chaika.sales_report_sets(id,source_id,business_date,observed_at,checks) "
+            f"INSERT INTO {DB}.sales_report_sets(id,source_id,business_date,observed_at,checks) "
             "VALUES(%s,'primary',%s,%s,%s)",
             (bundle["id"], manifest["business_date"], observed, Jsonb(bundle["checks"])),
         )
@@ -236,22 +238,22 @@ def publish(db, bundle: dict) -> dict:
             counts[kind] = len(report["rows"])
         with db.cursor() as cur:
             cur.executemany(
-                "INSERT INTO chaika.sales_reports(id,set_id,kind,request,observed_at,raw,"
+                f"INSERT INTO {DB}.sales_reports(id,set_id,kind,request,observed_at,raw,"
                 "sha256,row_count,source_capture_id) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 report_records,
             )
             cur.executemany(
-                "INSERT INTO chaika.sales_report_rows(report_id,ordinal,department_id,revenue,"
+                f"INSERT INTO {DB}.sales_report_rows(report_id,ordinal,department_id,revenue,"
                 "cost,checks,guests,discount,return_sum,quantity,dimensions) "
                 "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 row_records,
             )
         db.execute(
-            "INSERT INTO chaika.sales_report_days(source_id,business_date,current_set_id) "
+            f"INSERT INTO {DB}.sales_report_days(source_id,business_date,current_set_id) "
             "VALUES('primary',%s,%s) ON CONFLICT(source_id,business_date) DO UPDATE "
             "SET current_set_id=EXCLUDED.current_set_id WHERE "
-            "(SELECT observed_at FROM chaika.sales_report_sets WHERE "
-            "id=chaika.sales_report_days.current_set_id)<=%s",
+            f"(SELECT observed_at FROM {DB}.sales_report_sets WHERE "
+            f"id={DB}.sales_report_days.current_set_id)<=%s",
             (manifest["business_date"], bundle["id"], observed),
         )
     return {
@@ -270,7 +272,9 @@ def main():
     settings = Settings()
     bundle = parse_review(args.directory, configured_sources(settings)[0].fingerprint)
     with (
-        psycopg.connect(settings.database_url.get_secret_value(), autocommit=True) as db,
+        tenant_connect(
+            settings.database_url.get_secret_value(), connector=psycopg.connect, autocommit=True
+        ) as db,
         reference_lock(db),
     ):
         print(json.dumps(publish(db, bundle)))

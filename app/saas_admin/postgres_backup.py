@@ -22,8 +22,10 @@ TABLES = (
     "companies", "platform_memberships", "memberships", "connections", "events",
     "tenant_events", "auth_provisioning", "attempts", "check_attempts",
     "check_targets", "imports", "sessions", "tenant_sessions",
+    "platform_tenant_events", "platform_sso_codes", "platform_tenant_sessions",
+    "company_account_requests", "runtime_provisioning", "company_module_settings",
 )
-SESSION_TABLES = {"sessions", "tenant_sessions"}
+SESSION_TABLES = {"sessions", "tenant_sessions", "platform_sso_codes", "platform_tenant_sessions"}
 
 
 def _encoded(value):
@@ -64,6 +66,29 @@ def _validate_ciphertexts(data, key):
     for row in data["auth_provisioning"]:
         if row.get("temporary_ciphertext"):
             cipher.decrypt(row["temporary_ciphertext"].encode())
+    for row in data["company_module_settings"]:
+        from .company_module_settings import ModuleSettingsWrite, Seller
+
+        value = json.loads(cipher.decrypt(row["ciphertext"].encode()))
+        if not isinstance(value, dict) or set(value) != {"seller", "telegram", "assistant"}:
+            raise ValueError("Invalid encrypted module settings")
+        fields = {
+            "telegram": {"username", "token"},
+            "assistant": {"provider", "model", "agent_id", "key"},
+        }
+        if value["seller"] is not None:
+            fields["seller"] = set(Seller.model_fields)
+        if any(
+            not isinstance(value[name], dict) or set(value[name]) != required
+            for name, required in fields.items()
+        ):
+            raise ValueError("Invalid encrypted module settings")
+        try:
+            ModuleSettingsWrite.model_validate({"expected_version": 1, **value})
+        except ValueError:
+            # Validation diagnostics may contain credential input. Keep backup
+            # errors generic, including when the encrypted payload is malformed.
+            raise ValueError("Invalid encrypted module settings") from None
 
 
 def snapshot_postgres(dsn, source, destination):
@@ -178,6 +203,13 @@ def restore_postgres(source, operator_dsn, destination):
                                 "jsonb_populate_recordset(NULL::restcontrol.{},%s)")
                         .format(sql.Identifier(name), sql.Identifier(name)), (Jsonb(data[name]),),
                     )
+            # A database snapshot cannot attest that a saved Unix socket, process
+            # or external configuration still belongs to this restored runtime.
+            db.execute(
+                "UPDATE restcontrol.runtime_provisioning SET state='failed', "
+                "step='migrations',checks='{}',active_socket_path=NULL,active_version=NULL, "
+                "error_code='restored_runtime_requires_validation',updated_at=now()"
+            )
             # Write before commit: a filesystem failure rolls back every row.
             _write(target / "credentials.key", key)
             _write(target / "restore-manifest.json", _encoded(manifest))

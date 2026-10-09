@@ -33,6 +33,7 @@ def test_customer_context_discloses_only_branding(client):
     assert reply.status_code == 200
     assert reply.json() == {
         "surface": "tenant",
+        "platform_origin": "https://rc.example.org",
         "company": {"id": "test-company", "name": "Client", "slug": "client"},
     }
     assert client.get("/").status_code == 200
@@ -73,4 +74,4 @@ def test_exact_host_and_origin_with_no_forwarded_override(client):
 
 def test_platform_context_remains_separate(client):
     reply = client.get("/api/saas-context", headers={"host": "rc.example.org"})
-    assert reply.json() == {"surface": "platform", "company": None}
+    assert reply.json() == {"surface": "platform", "company": None, "platform_origin": "https://rc.example.org"}

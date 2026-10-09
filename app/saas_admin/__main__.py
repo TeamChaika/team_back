@@ -1,4 +1,4 @@
-"""Run only this module, never app.portal or the scheduler."""
+"""Control-plane CLI; full tenant gateway is opt-in via --runtime-config."""
 
 import argparse
 import os
@@ -23,6 +23,10 @@ def main():
     listen.add_argument("--uds")
     serve.add_argument("--mode", choices=["local", "production"], default="local")
     serve.add_argument("--origin")
+    serve.add_argument(
+        "--runtime-config",
+        help="Private verifier/operator JSON; explicitly enable full gateway assembly",
+    )
     backup = sub.add_parser("backup")
     backup.add_argument("--data-dir", required=True)
     backup.add_argument("--output", required=True)
@@ -49,7 +53,7 @@ def main():
     else:
         import uvicorn
 
-        from .server import create_app
+        from .deployment import create_deployment_app
 
         if args.mode == "production" and not args.origin:
             parser.error("Production requires an explicit --origin https://hostname")
@@ -64,7 +68,13 @@ def main():
                 if socket.resolve().is_relative_to(Path(private_root).resolve()):
                     parser.error("Unix socket must be outside data and static directories")
         origin = args.origin or f"http://127.0.0.1:{port}"
-        app = create_app(args.data_dir, args.dist_dir, origin, args.mode)
+        app = create_deployment_app(
+            args.data_dir,
+            args.dist_dir,
+            origin,
+            args.mode,
+            runtime_config=args.runtime_config,
+        )
         if args.uds:
             uvicorn.run(app, uds=args.uds, proxy_headers=False, access_log=False)
         else:

@@ -1,9 +1,12 @@
 """Настройки из CHAIKA_* и собственного файла backend/.env."""
 
+import os
 from pathlib import Path
 
-from pydantic import Field, HttpUrl, SecretStr, field_validator
+from pydantic import Field, HttpUrl, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.tenancy.config import load_runtime
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
@@ -17,6 +20,38 @@ class Settings(BaseSettings):
         frozen=True,
         hide_input_in_errors=True,
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
+    ):
+        if load_runtime().mode == "legacy":
+            return init_settings, env_settings, dotenv_settings, file_secret_settings
+
+        def tenant_environment():
+            values = {
+                name: os.environ[f"RESTCONTROL_TENANT_{name.upper()}"]
+                for name in settings_cls.model_fields
+                if f"RESTCONTROL_TENANT_{name.upper()}" in os.environ
+            }
+            values.setdefault("app_name", "RestControl API")
+            return values
+
+        # No CHAIKA_* variables, project .env or global file-secret fallback.
+        return init_settings, tenant_environment
+
+    @model_validator(mode="after")
+    def tenant_configuration(self):
+        if load_runtime().mode == "tenant":
+            if not self.database_url.get_secret_value():
+                raise ValueError("Tenant database URL is required")
+            if not self.iiko_configured:
+                raise ValueError("Tenant iiko URL, login and password are required")
+            if self.iiko_base_url.host == "chaika.team" or self.iiko_base_url.host.endswith(
+                ".chaika.team"
+            ):
+                raise ValueError("Tenant iiko URL cannot fall back to Chaika")
+        return self
 
     app_name: str = Field(default="Chaika Team API", min_length=1)
     database_url: SecretStr = SecretStr("")

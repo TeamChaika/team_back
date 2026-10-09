@@ -11,16 +11,17 @@ from psycopg.types.json import Jsonb
 
 from .auth_validation import csrf_matches
 from .dashboard_source import DashboardSource
+from .platform_sso import PlatformSSO
 from .repository import Problem, digest, stamp
 
 TEMP_SECONDS = 72 * 3600
 
 
-class PostgresTenantAccess:
+class PostgresTenantAccess(PlatformSSO):
     def tenant_dashboard_source(self, token, slug):
         """Never accept a caller-supplied company or inherit dashboard owner access."""
         with self.connect(True) as db:
-            row = self._verified(db, token, True, slug)
+            row = self._tenant_verified(db, token, slug)
             result = self._dashboard_source(db, row) if row else None
         if result is None:
             raise Problem(401, "unauthorized", "Требуется вход")
@@ -29,6 +30,8 @@ class PostgresTenantAccess:
     def _dashboard_source(self, db, row):
         if row["must_change"]:
             raise Problem(403, "password_change_required", "Сначала смените временный пароль")
+        if row.get("role") == "employee":
+            raise Problem(403, "full_portal_required", "Используйте рабочий кабинет компании")
         company = row["body"]
         if company["status"] != "active":
             raise Problem(403, "company_inactive", "Компания ещё не активирована")
@@ -51,7 +54,7 @@ class PostgresTenantAccess:
         return DashboardSource(
             str(company["id"]),
             company["name"],
-            str(row["id"]),
+            str(row["auth_user_id"] if row.get("_platform_owner") else row["id"]),
             row["display_name"],
             company["version"],
             fingerprint,
@@ -252,7 +255,16 @@ class PostgresTenantAccess:
     def _tenant_body(row, csrf):
         company = row["body"]
         return {
-            "user": {k: str(row[k]) for k in ("id", "username", "display_name", "company_id")},
+            "user": {
+                **{k: str(row[k]) for k in ("username", "display_name", "company_id")},
+                "id": str(row["auth_user_id"] if row.get("_platform_owner") else row["id"]),
+            },
+            "actor": {
+                "kind": "platform_owner" if row.get("_platform_owner") else "company_member",
+                "auth_user_id": str(row["auth_user_id"]),
+                "company_id": str(row["company_id"]),
+                "display_name": row["display_name"],
+            },
             "company": {k: company[k] for k in ("id", "name", "slug")},
             "must_change_password": bool(row["must_change"]),
             "csrf_token": csrf,
@@ -266,7 +278,7 @@ class PostgresTenantAccess:
             row = db.execute(
                 "SELECT m.*,c.body,c.status,c.archived_at FROM memberships m JOIN companies c "
                 "ON c.id=m.company_id WHERE c.slug=%s AND lower(m.username)=%s AND "
-                "m.active=true AND m.role='company_admin' FOR UPDATE OF m",
+                "m.active=true AND m.role IN ('company_admin','employee') FOR UPDATE OF m",
                 (slug, username.strip().casefold()),
             ).fetchone()
             try:
@@ -301,7 +313,7 @@ class PostgresTenantAccess:
 
     def tenant_session(self, token, slug):
         with self.connect(True) as db:
-            row = self._verified(db, token, True, slug)
+            row = self._tenant_verified(db, token, slug)
             result = self._tenant_body(row, row["csrf"]) if row else None
         if result is None:
             raise Problem(401, "unauthorized", "Требуется повторный вход")
@@ -310,13 +322,20 @@ class PostgresTenantAccess:
     def tenant_logout(self, token):
         with self.connect(True) as db:
             db.execute("DELETE FROM tenant_sessions WHERE token_hash=%s", (digest(token),))
+            db.execute("DELETE FROM platform_tenant_sessions WHERE token_hash=%s", (digest(token),))
 
     def tenant_password(self, token, slug, current, new, csrf, peer):
         if new == current or not 8 <= len(new) <= 1024:
             raise Problem(422, "password_policy", "Нужен новый пароль от 8 символов")
         result = None
         with self.connect(True) as db:
-            row = self._verified(db, token, True, slug, rate_peer=peer)
+            row = self._tenant_verified(db, token, slug)
+            if row and row.get("_platform_owner"):
+                raise Problem(
+                    403,
+                    "platform_password_central",
+                    "Пароль владельца меняется в центральном аккаунте",
+                )
             if row:
                 if not csrf_matches(csrf, row["csrf"]):
                     raise Problem(403, "csrf_failed", "Обновите страницу")
@@ -353,13 +372,17 @@ class PostgresTenantAccess:
 
     def tenant_workspace(self, token, slug):
         with self.connect(True) as db:
-            row = self._verified(db, token, True, slug)
+            row = self._tenant_verified(db, token, slug)
             if row and row["must_change"]:
                 raise Problem(403, "password_change_required", "Сначала смените временный пароль")
             result = (
                 {
                     "company": {k: row["body"][k] for k in ("id", "name", "slug", "modules")},
-                    "admin": {k: str(row[k]) for k in ("id", "username", "display_name")},
+                    "admin": {
+                        **{k: str(row[k]) for k in ("username", "display_name")},
+                        "id": str(row["auth_user_id"] if row.get("_platform_owner") else row["id"]),
+                    },
+                    "actor": self._actor(row).as_dict(),
                     "mode": "local",
                     "business_modules_ready": False,
                 }

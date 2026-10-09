@@ -69,7 +69,7 @@ def login(client):
     cors(reply)
     cookie = reply.headers["set-cookie"]
     assert "Secure" in cookie and "HttpOnly" in cookie and "SameSite=strict" in cookie
-    assert "Domain=" not in cookie and "Path=/api/saas-tenant" in cookie
+    assert "Domain=" not in cookie and "Path=/" in cookie
     return reply
 
 
@@ -81,6 +81,7 @@ def test_context_uses_exact_registry_and_ignores_forwarded_host(client):
     assert reply.status_code == 200
     assert reply.json() == {
         "surface": "tenant",
+        "platform_origin": "https://rc.example.org",
         "company": {"id": "one", "name": "Client", "slug": "client"},
     }
     assert client.app.state.repository.calls == ["tenant.example.org"]

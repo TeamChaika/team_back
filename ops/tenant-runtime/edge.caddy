@@ -1,0 +1,9 @@
+# Import only inside the reviewed own API hostname block. The service manager must
+# load RESTCONTROL_EDGE_TOKEN from the same 0600 capability used by the gateway.
+# Never enable logging of request headers or query strings containing capabilities.
+(restcontrol_private_gateway) {
+    reverse_proxy unix//private/sockets/gateway.sock {
+        header_up X-RestControl-Proxy-Token {$RESTCONTROL_EDGE_TOKEN}
+        header_up X-RestControl-Client-IP {remote_host}
+    }
+}

@@ -9,7 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.concurrency import run_in_threadpool
 
 from app.documents import password_recovery as recovery
+from app.documents.context import runtime_of
 from app.documents.service import DocumentService
+from app.documents.telegram_link import _available
+from app.tenancy.config import load_runtime
 from app.web.auth import ACCESS_COOKIE, REFRESH_COOKIE, LoginLimiter
 
 logger = logging.getLogger(__name__)
@@ -73,23 +76,68 @@ def reset(service, web, repo, payload, *, transport=None):
 def create_recovery_router(repo, web, *, transport=None):
     router = APIRouter(prefix="/api/auth/recovery", tags=["auth"])
     attempts, tokens = LoginLimiter(10), LoginLimiter(5)
+    runtime = getattr(repo, "runtime", None) or load_runtime()
 
     def native(request):
         service = request.app.state.documents
-        if not isinstance(service, DocumentService) or not web.auth_admin_key.get_secret_value():
+        if not isinstance(service, DocumentService) or (
+            runtime.mode == "legacy" and not web.auth_admin_key.get_secret_value()
+        ):
             raise HTTPException(503, "Восстановление пароля сейчас недоступно.")
+        if runtime.mode == "tenant" and (
+            runtime_of(service.database).company_id != runtime.company_id or not _available(service)
+        ):
+            raise HTTPException(503, "Бот Telegram компании ещё не настроен.")
         return service
 
     @router.get("/telegram")
     async def telegram(request: Request):
-        attempts.check(request.client.host if request.client else "unknown")
+        if runtime.mode == "tenant":
+            request.app.state.auth.check_origin(request)
+        # Tenant gateway limits the verified external peer; a UDS peer is shared.
+        if runtime.mode == "legacy":
+            attempts.check(request.client.host if request.client else "unknown")
         return await run_in_threadpool(recovery.start_url, native(request))
 
     @router.post("/reset")
     async def password(payload: ResetPassword, request: Request, response: Response):
         request.app.state.auth.check_origin(request)
-        attempts.check(request.client.host if request.client else "unknown")
+        # Tenant gateway limits the verified external peer; a UDS peer is shared.
+        if runtime.mode == "legacy":
+            attempts.check(request.client.host if request.client else "unknown")
         tokens.check(recovery.digest(payload.token.get_secret_value()))
+        if runtime.mode == "tenant":
+            from app.saas_admin.repository import Problem
+
+            native(request)  # Own configured document service; never fall back to Chaika.
+            verifier = request.app.state.saas_auth_repository
+            if verifier is None:
+                raise HTTPException(503, "Восстановление пароля сейчас недоступно.")
+            try:
+                confirmed = await run_in_threadpool(
+                    verifier.recover_company_password,
+                    str(runtime.company_id),
+                    payload.token.get_secret_value(),
+                    payload.new_password.get_secret_value(),
+                )
+            except Problem as error:
+                raise HTTPException(error.status, error.message) from None
+            if confirmed.get("ok") is not True:
+                raise HTTPException(
+                    503,
+                    "Результат смены пароля не подтверждён. "
+                    "Попробуйте войти с новым паролем или запросите новую ссылку.",
+                )
+            if confirmed.get("completed") is not True:
+                raise HTTPException(
+                    503,
+                    "Новый пароль сохранён. Войдите с ним; "
+                    "если появится обязательная смена, завершите её в профиле.",
+                )
+            response.delete_cookie(
+                "saas_tenant_session", path="/", secure=True, httponly=True, samesite="strict"
+            )
+            return {"status": "ok"}
         result = await run_in_threadpool(
             reset, native(request), web, repo, payload, transport=transport
         )

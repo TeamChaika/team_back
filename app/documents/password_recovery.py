@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 
+from app.documents.context import lock_resource, runtime_of
 from app.documents.policy import fail
 from app.documents.telegram_link import TOKEN, _available, _username
 
@@ -35,7 +36,8 @@ def identity(db, telegram_id):
         fail(400, UNAVAILABLE)
     row = rows[0]
     db.execute(
-        "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("link:" + str(row["supabase_id"]),)
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+        (lock_resource(db, "link:" + str(row["supabase_id"])),),
     )
     locked = db.execute(
         "SELECT u.id,u.is_active,u.telegram_id,l.supabase_id,l.revision "
@@ -60,6 +62,8 @@ def start_url(service):
 
 
 def issue(service, telegram_id):
+    if not _available(service):
+        fail(503, UNAVAILABLE)
     origin = service.settings.dashboard_url.rstrip("/")
     parsed = urlsplit(origin)
     if (
@@ -144,10 +148,11 @@ def handle_update(service, bot, update):
     ):
         return True
     if requested:
+        brand = " Chaika Team" if runtime_of(service.database).mode == "legacy" else ""
         bot.call(
             "sendMessage",
             chat_id=sender["id"],
-            text="Восстановить пароль Chaika Team для учётной записи, "
+            text=f"Восстановить пароль{brand} для учётной записи, "
             "к которой привязан этот Telegram?",
             reply_markup={
                 "inline_keyboard": [

@@ -23,9 +23,13 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.tenancy.config import load_runtime
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import runtime_directory, validate_runtime_path
+from app.tenancy.sql import ANALYTICS_SCHEMA
 
-ZONE = ZoneInfo("Europe/Simferopol")
-DIRECTORY = BACKEND_DIR / ".local/sync"
+ZONE = ZoneInfo(load_runtime().timezone if load_runtime().mode == "tenant" else "Europe/Simferopol")
+DIRECTORY = runtime_directory("local", BACKEND_DIR / ".local") / "sync"
 RETRYABLE = {
     "sync_already_running",
     "OperationalError",
@@ -37,6 +41,7 @@ RETRYABLE = {
 
 
 def write_json(path: Path, payload: dict):
+    path = validate_runtime_path(path)
     temporary = path.with_suffix(".tmp")
     descriptor = os.open(temporary, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
     with os.fdopen(descriptor, "w") as stream:
@@ -190,11 +195,12 @@ def synchronize_history(
         except BlockingIOError:
             raise SyncError("events_history_already_running") from None
         with (
-            psycopg.connect(
+            tenant_connect(
                 settings.database_url.get_secret_value(),
                 autocommit=True,
                 connect_timeout=10,
                 application_name="chaika-events-history-preflight",
+                connector=psycopg.connect,
             ) as db,
             reference_lock(db),
         ):
@@ -204,7 +210,8 @@ def synchronize_history(
                 matched = {
                     row[0]
                     for row in db.execute(
-                        "SELECT s.id FROM chaika.sources s JOIN chaika.rms_bindings b "
+                        f"SELECT s.id FROM {ANALYTICS_SCHEMA}.sources s JOIN "
+                        f"{ANALYTICS_SCHEMA}.rms_bindings b "
                         "ON b.source_id=s.id WHERE s.server_type='REPLICATED_RMS' "
                         "AND b.state='matched'"
                     ).fetchall()
@@ -214,7 +221,8 @@ def synchronize_history(
                 coverage = {
                     source.id: completed_coverage(
                         db.execute(
-                            "SELECT event_date,event_count,observed_at FROM chaika.rms_event_days "
+                            f"SELECT event_date,event_count,observed_at FROM "
+                            f"{ANALYTICS_SCHEMA}.rms_event_days "
                             "WHERE source_id=%s AND event_date BETWEEN %s AND %s",
                             (source.id, start, end),
                         ).fetchall(),
@@ -226,7 +234,7 @@ def synchronize_history(
                     source.id: {
                         f"transfer_events_{state}": count
                         for state, count in db.execute(
-                            "SELECT status,count(*) FROM chaika.rms_event_links "
+                            f"SELECT status,count(*) FROM {ANALYTICS_SCHEMA}.rms_event_links "
                             "WHERE source_id=%s GROUP BY status",
                             (source.id,),
                         ).fetchall()

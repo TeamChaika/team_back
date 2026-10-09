@@ -97,8 +97,44 @@ class Modules(Model):
     deposits: StrictBool = False
 
 
+class FeatureOverride(Model):
+    mode: Literal["allow", "deny", "inherit"] = "inherit"
+    expires_at: datetime | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def aware_expiration(cls, value):
+        if value is not None and value.tzinfo is None:
+            raise ValueError("Срок исключения должен включать часовой пояс")
+        return value
+
+
 class Subscription(Model):
     plan: str = Field(default="", max_length=120)
+    policy: Literal["legacy", "plans_v1"] = "legacy"
+    plan_id: str | None = None
+    status: Literal["active", "suspended", "cancelled"] = "active"
+    timezone: str = "Europe/Simferopol"
+    overrides: dict[str, FeatureOverride] = Field(default_factory=dict, max_length=100)
+
+    @field_validator("timezone")
+    @classmethod
+    def timezone_valid(cls, value):
+        try:
+            ZoneInfo(value)
+        except (ValueError, KeyError):
+            raise ValueError("Неизвестный часовой пояс") from None
+        return value
+
+    @field_validator("overrides")
+    @classmethod
+    def features_valid(cls, value):
+        from .entitlements import FEATURES
+
+        if set(value) - set(FEATURES):
+            raise ValueError("Неизвестная возможность")
+        return value
+
     start_date: date | None = None
     end_date: date | None = None
 
@@ -113,6 +149,12 @@ class Subscription(Model):
 
     @model_validator(mode="after")
     def dates(self):
+        from .entitlements import PLANS
+
+        if self.policy == "plans_v1" and self.plan_id not in PLANS:
+            raise ValueError("Выберите существующий план")
+        if self.policy == "legacy" and (self.plan_id or self.overrides):
+            raise ValueError("Исключения доступны после выбора нового плана")
         if self.end_date and not self.start_date:
             raise ValueError("Укажите дату начала")
         if self.start_date and self.end_date and self.end_date < self.start_date:
@@ -178,18 +220,13 @@ class CompanyWrite(Model):
 
 
 def derived(company: dict) -> dict:
+    from .entitlements import PLANS, subscription_state
+
     sub = company["subscription"]
-    today = datetime.now(ZoneInfo("Europe/Simferopol")).date().isoformat()
-    state = "not_set"
-    if sub["start_date"]:
-        state = (
-            "scheduled"
-            if sub["start_date"] > today
-            else "expired"
-            if sub["end_date"] and sub["end_date"] < today
-            else "active"
-        )
-    company["subscription_state"] = state
+    sub.setdefault("policy", "legacy")
+    if sub["policy"] == "plans_v1" and sub.get("plan_id") in PLANS:
+        sub["plan"] = PLANS[sub["plan_id"]][0]
+    company["subscription_state"] = subscription_state(sub)
     company["integration_state"] = (
         "not_checked" if company["chain_url"] or company["rms"] else "not_configured"
     )

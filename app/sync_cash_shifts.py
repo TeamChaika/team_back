@@ -10,7 +10,6 @@ from pathlib import Path
 from threading import Event
 from uuid import UUID, uuid4
 
-import httpx
 import psycopg
 from defusedxml import ElementTree
 from psycopg import sql
@@ -30,10 +29,17 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_client, collector_url, runtime_directory
+from app.tenancy.sql import ANALYTICS_SCHEMA
 
 
 def capture_cash_shifts(settings, source: Source, query, response, directory: Path | None = None):
-    folder = directory if directory is not None else BACKEND_DIR / ".local/cash-shifts"
+    folder = (
+        directory
+        if directory is not None
+        else runtime_directory("local", BACKEND_DIR / ".local") / "cash-shifts"
+    )
     key = str(UUID(response["snapshot_id"]))
     metadata = json.loads((folder / f"{key}.meta.json").read_text())
     if metadata.pop("source_fingerprint") != source.fingerprint:
@@ -121,7 +127,10 @@ def publish_cash_shifts(db, snapshot, groups) -> dict:
     known = {
         r[0]
         for r in db.execute(
-            "SELECT id FROM chaika.corporate_nodes WHERE source_id=%s AND type='DEPARTMENT'",
+            (
+                f"SELECT id FROM {ANALYTICS_SCHEMA}.corporate_nodes WHERE source_id=%s AND "
+                f"type='DEPARTMENT'"
+            ),
             (snapshot["source_id"],),
         )
     }
@@ -152,7 +161,7 @@ def publish_cash_shifts(db, snapshot, groups) -> dict:
         with db.cursor() as cur:
             cur.executemany(
                 sql.SQL(
-                    "INSERT INTO chaika.cash_shift_observations ({}) "
+                    f"INSERT INTO {ANALYTICS_SCHEMA}.cash_shift_observations ({{}}) "
                     "VALUES ({}) ON CONFLICT(snapshot_id,id) DO NOTHING"
                 ).format(
                     sql.SQL(",").join(map(sql.Identifier, columns)),
@@ -161,12 +170,12 @@ def publish_cash_shifts(db, snapshot, groups) -> dict:
                 records,
             )
         db.execute(
-            "INSERT INTO chaika.cash_shift_days"
+            f"INSERT INTO {ANALYTICS_SCHEMA}.cash_shift_days"
             "(source_id,open_day,last_snapshot_id,observed_at,row_count) VALUES(%s,%s,%s,%s,%s) "
             "ON CONFLICT(source_id,open_day) DO UPDATE SET "
             "last_snapshot_id=EXCLUDED.last_snapshot_id,"
             "observed_at=EXCLUDED.observed_at,row_count=EXCLUDED.row_count "
-            "WHERE EXCLUDED.observed_at>chaika.cash_shift_days.observed_at",
+            f"WHERE EXCLUDED.observed_at>{ANALYTICS_SCHEMA}.cash_shift_days.observed_at",
             (
                 snapshot["source_id"],
                 query.open_date_from,
@@ -181,31 +190,33 @@ def publish_cash_shifts(db, snapshot, groups) -> dict:
 def synchronize_cash_shifts(
     settings: Settings,
     query: CashShiftSyncQuery,
-    api_url="http://127.0.0.1:8010",
+    api_url: str | None = None,
     *,
     on_day_saved: Callable[[dict], None] | None = None,
     stop: Event | None = None,
 ) -> dict:
-    api_url = check_local_api(api_url)
+    api_url = check_local_api(collector_url() if api_url is None else api_url)
     if not settings.database_url.get_secret_value():
         raise SyncError("database_not_configured")
     source = configured_sources(settings)[0]
     with (
-        psycopg.connect(
+        tenant_connect(
             settings.database_url.get_secret_value(),
             autocommit=True,
             connect_timeout=10,
             application_name="chaika-cash-shifts-sync",
+            connector=psycopg.connect,
         ) as db,
         reference_lock(db),
     ):
         register_sources(db, [source])
         if not db.execute(
-            "SELECT 1 FROM chaika.sources WHERE id=%s AND server_type='CHAIN'", (source.id,)
+            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources WHERE id=%s AND server_type='CHAIN'",
+            (source.id,),
         ).fetchone():
             raise SyncError("reference_sync_required")
         db.execute(
-            "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),"
+            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' WHERE job='cash_shifts' AND status='running'"
         )
         run_id = uuid4()
@@ -219,12 +230,12 @@ def synchronize_cash_shifts(
             date_to=query.open_date_to.isoformat(),
         )
         db.execute(
-            "INSERT INTO chaika.sync_runs(id,job,status,counts) "
+            f"INSERT INTO {ANALYTICS_SCHEMA}.sync_runs(id,job,status,counts) "
             "VALUES(%s,'cash_shifts','running',%s)",
             (run_id, Jsonb(counts)),
         )
         days, failure, touched, logout_ok = [], None, False, True
-        with httpx.Client(base_url=api_url, timeout=180, trust_env=False) as client:
+        with collector_client(base_url=api_url, timeout=180, trust_env=False) as client:
 
             def get(path, **kwargs):
                 r = client.get("/api/v1/iiko" + path, **kwargs)
@@ -240,7 +251,7 @@ def synchronize_cash_shifts(
                     raise SyncError("backend_source_config_mismatch")
                 touched = True
                 groups = capture_snapshot(
-                    BACKEND_DIR / ".local",
+                    runtime_directory("local", BACKEND_DIR / ".local"),
                     source,
                     "groups",
                     get("/connections/primary/corporate-groups"),
@@ -265,7 +276,7 @@ def synchronize_cash_shifts(
                             next_counts[key] += result[key]
                         next_counts["completed_through"] = day.isoformat()
                         db.execute(
-                            "UPDATE chaika.sync_runs SET counts=%s WHERE id=%s",
+                            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET counts=%s WHERE id=%s",
                             (Jsonb(next_counts), run_id),
                         )
                     counts = next_counts
@@ -291,7 +302,7 @@ def synchronize_cash_shifts(
             else None
         )
         db.execute(
-            "UPDATE chaika.sync_runs SET status=%s,finished_at=now(),error_code=%s,"
+            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status=%s,finished_at=now(),error_code=%s,"
             "counts=%s WHERE id=%s",
             ("failed" if failure else "succeeded", code, Jsonb(counts), run_id),
         )

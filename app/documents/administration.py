@@ -3,6 +3,8 @@ from uuid import uuid4
 from psycopg import IntegrityError
 from psycopg.types.json import Jsonb
 
+from app.documents.actors import audit, principal_uuid
+from app.documents.context import lock_resource
 from app.documents.policy import ACTIONS, fail, identifier, invalid, profile
 
 
@@ -88,7 +90,7 @@ def save_access(database, admin_id, user_id, payload):
             if portal_id:
                 db.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-                    ("link:" + str(portal_id),),
+                    (lock_resource(db, "link:" + str(portal_id)),),
                 )
                 if db.execute(
                     "SELECT 1 FROM portal_documents_userlink WHERE supabase_id=%s AND user_id<>%s",
@@ -110,6 +112,7 @@ def save_access(database, admin_id, user_id, payload):
             ).fetchone()
             if not user:
                 fail(404, "Рабочий профиль не найден.")
+            audit(db, admin_id, "access_update", "document_user", user_id)
             link = db.execute(
                 "SELECT revision FROM portal_documents_userlink WHERE user_id=%s FOR UPDATE",
                 (user_id,),
@@ -145,7 +148,7 @@ def save_access(database, admin_id, user_id, payload):
                 "(actor_supabase_id,user_id,revision,data,created_at) "
                 "VALUES (%s,%s,%s,%s,now())",
                 (
-                    admin_id,
+                    principal_uuid(admin_id),
                     user_id,
                     current + 1,
                     Jsonb(

@@ -1,6 +1,7 @@
 """Public website API; integration routes stay on the private collector."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
@@ -26,6 +27,7 @@ from app.schemas.sales_drilldown import DiscountDetailsQuery
 from app.services.order_topology import read_topology
 from app.services.sales_drilldown import discount_details
 from app.services.sync_jobs import SyncJobError
+from app.tenancy.config import load_runtime
 from app.web.administration import create_admin_router
 from app.web.assistant import AssistantSettings, Message, answer_question
 from app.web.assistant_store import AssistantStore
@@ -68,10 +70,16 @@ def create_portal(
     documents_transport=None,
     document_service=None,
     document_settings=None,
+    saas_auth_repository=None,
+    payment_service=None,
+    administration_store=None,
 ):
+    runtime = load_runtime()
     settings = settings or Settings()
     web = web_settings or WebSettings()
     repo = repository or Repository(settings)
+    if runtime.mode == "tenant" and getattr(repo, "runtime", None) != runtime:
+        raise ValueError("Tenant portal requires a repository bound to its startup runtime")
     limiter = LoginLimiter(web.max_login_attempts)
     chats = assistant_store or AssistantStore(repo)
     employees = employee_editor or EmployeeEditor(settings, repo)
@@ -82,7 +90,11 @@ def create_portal(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.auth = Auth(web, transport=auth_transport)
-        app.state.deposits = DepositsClient(web.deposits_api_url, transport=deposits_transport)
+        app.state.deposits = (
+            payment_service
+            if runtime.mode == "tenant"
+            else DepositsClient(web.deposits_api_url, transport=deposits_transport)
+        )
         app.state.documents = document_service or (
             DocumentService(document_config)
             if document_config.native_enabled and web.documents_enabled
@@ -108,8 +120,9 @@ def create_portal(
 
         background = None
         document_worker = None
+        payment_worker = None
         try:
-            if repository is None:
+            if repository is None or runtime.mode == "tenant":
                 await run_in_threadpool(repo.open)
             background = asyncio.create_task(start_background())
             if (
@@ -120,8 +133,24 @@ def create_portal(
                 from app.documents.runtime import supervise
 
                 document_worker = asyncio.create_task(supervise())
+            if payment_service is not None:
+
+                async def reconcile_payments():
+                    while True:
+                        try:
+                            await payment_service.reconcile_due()
+                        except Exception:
+                            logging.getLogger(__name__).warning(
+                                "Tenant payment reconciliation unavailable"
+                            )
+                        await asyncio.sleep(30)
+
+                payment_worker = asyncio.create_task(reconcile_payments())
             yield
         finally:
+            if payment_worker is not None:
+                payment_worker.cancel()
+                await asyncio.gather(payment_worker, return_exceptions=True)
             if document_worker is not None:
                 document_worker.cancel()
                 await asyncio.gather(document_worker, return_exceptions=True)
@@ -132,7 +161,8 @@ def create_portal(
 
                 await run_in_threadpool(stop_process, scheduler)
             await app.state.auth.client.aclose()
-            await app.state.deposits.client.aclose()
+            if runtime.mode == "legacy":
+                await app.state.deposits.client.aclose()
             if hasattr(app.state.documents, "dispatch"):
                 await run_in_threadpool(app.state.documents.close)
             else:
@@ -143,15 +173,33 @@ def create_portal(
                 await run_in_threadpool(repo.close)
 
     app = FastAPI(
-        title="Chaika Team", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
+        title="RestControl" if runtime.mode == "tenant" else "Chaika Team",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
+    app.state.tenant_runtime = runtime
+    app.state.saas_auth_repository = saas_auth_repository
+    if runtime.mode == "tenant":
+        from urllib.parse import urlsplit
+
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+        app.add_middleware(
+            TrustedHostMiddleware, allowed_hosts=[urlsplit(runtime.api_origin).hostname]
+        )
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=4)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[web.origin],
         allow_credentials=True,
-        allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"]
+        if runtime.mode == "tenant"
+        else ["GET", "POST"],
+        allow_headers=["Content-Type", "X-CSRF-Token"]
+        if runtime.mode == "tenant"
+        else ["Content-Type"],
     )
 
     @app.middleware("http")
@@ -159,7 +207,9 @@ def create_portal(
         started = perf_counter()
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Referrer-Policy"] = (
+            "no-referrer" if runtime.mode == "tenant" else "same-origin"
+        )
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -198,11 +248,22 @@ def create_portal(
         department_id: Annotated[list[UUID] | None, Query(max_length=100)] = None,
     ):
         started = perf_counter()
-        user_id = await request.app.state.auth.user(request.cookies.get(ACCESS_COOKIE))
+        from app.web.auth import tenant_actor_from_request
+
+        actor = await tenant_actor_from_request(request, runtime)
+        user_id = (
+            actor.auth_user_id
+            if actor
+            else await request.app.state.auth.user(request.cookies.get(ACCESS_COOKIE))
+        )
         authenticated = perf_counter()
         selection = tuple(sorted(set(department_id or []), key=str))
         selected = selection[0] if len(selection) == 1 else selection or None
-        scope = await run_in_threadpool(repo.scope, user_id, selected)
+        scope = (
+            await run_in_threadpool(repo.actor_scope, actor, selected)
+            if actor
+            else await run_in_threadpool(repo.scope, user_id, selected)
+        )
         require_personal_password(scope.user)
         require_section(scope.user, section_for_path(request.url.path))
         require_warehouse_section(scope, section_for_path(request.url.path))
@@ -216,9 +277,20 @@ def create_portal(
 
     async def portal_access(request: Request):
         started = perf_counter()
-        user_id = await request.app.state.auth.user(request.cookies.get(ACCESS_COOKIE))
+        from app.web.auth import tenant_actor_from_request
+
+        actor = await tenant_actor_from_request(request, runtime)
+        user_id = (
+            actor.auth_user_id
+            if actor
+            else await request.app.state.auth.user(request.cookies.get(ACCESS_COOKIE))
+        )
         authenticated = perf_counter()
-        scope = await run_in_threadpool(repo.portal_scope, user_id)
+        scope = (
+            await run_in_threadpool(repo.actor_scope, actor)
+            if actor
+            else await run_in_threadpool(repo.portal_scope, user_id)
+        )
         if (request.method, request.url.path) not in {
             ("GET", "/api/me"),
             ("POST", "/api/profile/password"),
@@ -238,10 +310,41 @@ def create_portal(
         require_warehouse_section(scope, "deposits")
         return scope
 
-    app.include_router(create_deposits_router(deposit_access, repo))
+    if runtime.mode == "tenant":
+        if payment_service is None:
+            raise ValueError("Full tenant portal requires its own payments service")
+        from app.tenancy.payment_bootstrap import (
+            TenantPaymentAdministration,
+            principal_from_scope,
+        )
+        from app.tenant_payments.routes import create_router as create_tenant_payment_router
+        from app.web.administration import Administration
+
+        payment_administration = TenantPaymentAdministration(payment_service, repo)
+
+        async def payment_principal(request: Request):
+            return principal_from_scope(runtime, await portal_access(request))
+
+        def payment_origin(request):
+            request.app.state.auth.check_origin(request)
+
+        app.include_router(
+            create_tenant_payment_router(
+                payment_service,
+                payment_principal,
+                payment_origin,
+                company_users=repo.deposit_users,
+                validate_user=payment_administration.validate_user,
+            )
+        )
+        administration_store = administration_store or Administration(
+            repo, payments=payment_administration
+        )
+    else:
+        app.include_router(create_deposits_router(deposit_access, repo))
     app.include_router(create_documents_router(portal_access))
     app.include_router(create_commercial_invoices_router(portal_access))
-    app.include_router(create_admin_router(portal_access, repo, web))
+    app.include_router(create_admin_router(portal_access, repo, web, store=administration_store))
     app.include_router(create_profile_router(portal_access, repo))
     app.include_router(create_recovery_router(repo, web, transport=auth_transport))
 
@@ -282,6 +385,11 @@ def create_portal(
     async def refresh(request: Request, response: Response):
         auth = request.app.state.auth
         auth.check_origin(request)
+        from app.web.auth import tenant_actor_from_request
+
+        actor = await tenant_actor_from_request(request, runtime)
+        if actor is not None:
+            return {"status": "ok", "password_change_required": False}
         token = request.cookies.get(REFRESH_COOKIE)
         if not token or len(token) > 8192:
             raise HTTPException(401, "Войдите в систему.")
@@ -300,6 +408,19 @@ def create_portal(
     async def logout(request: Request):
         auth = request.app.state.auth
         auth.check_origin(request)
+        from app.web.auth import tenant_actor_from_request
+
+        actor = await tenant_actor_from_request(request, runtime)
+        if actor is not None:
+            await run_in_threadpool(
+                request.app.state.saas_auth_repository.tenant_logout,
+                request.cookies.get("saas_tenant_session", ""),
+            )
+            delegated = JSONResponse({"status": "logged_out"})
+            delegated.delete_cookie(
+                "saas_tenant_session", path="/", secure=True, httponly=True, samesite="strict"
+            )
+            return delegated
         token = request.cookies.get(ACCESS_COOKIE)
         response = JSONResponse({"status": "logged_out"})
         if token:
@@ -614,7 +735,11 @@ def create_portal(
     @app.get("/api/commercial-invoices/existing-outgoing/{item_id}/pdf")
     async def existing_invoice_pdf(item_id: UUID, request: Request, scope: PortalAccess):
         require_section(scope.user, "outgoing")
-        analytical = await run_in_threadpool(repo.scope, scope.user["id"], None)
+        analytical = (
+            await run_in_threadpool(repo.actor_scope, scope.actor)
+            if scope.actor
+            else await run_in_threadpool(repo.scope, scope.user["id"], None)
+        )
         result = await run_in_threadpool(
             historical_pdf, repo, request.app.state.commercial_invoices, analytical, item_id
         )
@@ -671,4 +796,4 @@ def create_portal(
     return app
 
 
-app = create_portal()
+app = create_portal() if load_runtime().mode == "legacy" else None

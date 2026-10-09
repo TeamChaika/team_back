@@ -14,6 +14,7 @@ from app.progress import read_json
 from app.services.sync_jobs import ROOT, SyncJobsService, now, write_json
 from app.sync_invoices import HistoryRequest, synchronize_histories
 from app.sync_references import SyncError
+from app.tenancy.io import collector_url
 
 
 def run_job(service: SyncJobsService, job_id: UUID, stop: Event) -> None:
@@ -50,7 +51,7 @@ def run_job(service: SyncJobsService, job_id: UUID, stop: Event) -> None:
 
         synchronize_histories(
             service.settings,
-            "http://127.0.0.1:8010",
+            collector_url(),
             start,
             end,
             [

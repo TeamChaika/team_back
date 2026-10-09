@@ -18,9 +18,13 @@ from app.integrations.iiko.errors import IikoError
 from app.schemas.iiko_events import EventsCapture
 from app.services.iiko_connections import IikoConnectionsService
 from app.sync_references import SyncError
+from app.tenancy.config import load_runtime
+from app.tenancy.io import runtime_directory
 
 MAX_EVENT_BYTES = 32 * 1024 * 1024
-EVENT_ZONE = ZoneInfo("Europe/Simferopol")
+EVENT_ZONE = ZoneInfo(
+    load_runtime().timezone if load_runtime().mode == "tenant" else "Europe/Simferopol"
+)
 SECRET_NAMES = {
     "pin",
     "pincode",
@@ -212,7 +216,9 @@ async def capture_events(
     connection = connections.get_connection(source_id)
     if source_id == "primary":
         raise IikoError("events_rms_required", "Для событий выберите RMS.", status_code=422)
-    folder = (directory or BACKEND_DIR / ".local/events") / source_id
+    folder = (
+        directory or runtime_directory("local", BACKEND_DIR / ".local") / "events"
+    ) / source_id
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     key = uuid4()
     raw_path, meta_path = folder / f"{key}.xml", folder / f"{key}.metadata.xml"

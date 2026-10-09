@@ -3,7 +3,9 @@
 import argparse
 import json
 
+from app.documents.actors import stored_actor
 from app.documents.config import DocumentSettings
+from app.documents.context import runtime_of
 from app.documents.database import DocumentDatabase
 from app.documents.policy import fail, table
 from app.documents.reads import summary
@@ -66,7 +68,9 @@ def reconcile(
         else:
             doc = db.execute(
                 f"UPDATE {parent} SET version=version+1,submission_state='idle',"
-                "processed_by_id=NULL,processed_at=NULL WHERE id=%s RETURNING *",
+                "processed_by_id=NULL,processed_at=NULL "
+                + (",processed_actor=NULL " if runtime_of(db).mode == "tenant" else "")
+                + "WHERE id=%s RETURNING *",
                 (document_id,),
             ).fetchone()
         op = operations[0]
@@ -80,7 +84,7 @@ def reconcile(
             db,
             kind,
             doc,
-            op["actor_id"],
+            stored_actor(op),
             "reconciled_" + result,
             {
                 "operator": operator.strip(),

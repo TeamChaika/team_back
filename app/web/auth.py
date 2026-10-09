@@ -12,6 +12,7 @@ import httpx
 from fastapi import HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
+from app.tenancy.config import load_runtime
 from app.web.settings import WebSettings
 
 ACCESS_COOKIE = "chaika_access"
@@ -27,6 +28,8 @@ def login_candidates(value: str) -> tuple[str, ...]:
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
             raise ValueError("Invalid login")
         return (value,)
+    if load_runtime().mode == "tenant":
+        raise ValueError("Tenant login requires an explicit account email")
     if re.fullmatch(r"\+?[0-9()\s-]+", value):
         digits = re.sub(r"[^0-9]", "", value)
         if len(digits) == 11 and digits[0] in "78":
@@ -193,3 +196,30 @@ class Auth:
     def check_origin(self, request: Request):
         if request.headers.get("origin") != self.settings.origin:
             raise HTTPException(403, "Недопустимый источник запроса.")
+
+
+async def tenant_actor_from_request(request: Request, runtime):
+    """Registry validation is the sole source of delegated platform authority."""
+    from starlette.concurrency import run_in_threadpool
+
+    from app.saas_admin.repository import Problem
+
+    token = request.cookies.get("saas_tenant_session")
+    if runtime.mode != "tenant" or not token:
+        return None
+    registry = getattr(request.app.state, "saas_auth_repository", None)
+    if registry is None:
+        raise HTTPException(503, "Центральная авторизация компании не настроена.")
+    try:
+        actor, session = await run_in_threadpool(
+            registry.tenant_actor_session, token, str(runtime.company_id)
+        )
+    except Problem as exc:
+        raise HTTPException(exc.status, exc.message) from None
+    request.state.actor = actor
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        from app.saas_admin.auth_validation import csrf_matches
+
+        if not csrf_matches(request.headers.get("x-csrf-token", ""), session["csrf_token"]):
+            raise HTTPException(403, "Обновите страницу и повторите действие.")
+    return actor

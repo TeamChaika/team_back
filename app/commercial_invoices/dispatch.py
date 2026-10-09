@@ -2,6 +2,9 @@
 
 from uuid import uuid4
 
+from app.documents.context import runtime_of
+from app.tenancy.worker_policy import require_feature, require_queued_owner
+
 
 def recover_uncertain(database):
     with database.connection() as db:
@@ -151,6 +154,21 @@ def deliver_one(service):
     outcome = {"state": "unknown"}
     try:
         with service.provider.session() as (client, token):
+            if runtime_of(service.database).mode == "tenant":
+                with service.database.connection(readonly=True) as db:
+                    document = db.execute(
+                        "SELECT d.kind,e.actor,e.actor_id FROM commercial_invoices d "
+                        "JOIN commercial_invoice_events e ON e.document_id=d.id "
+                        "AND e.version=d.version AND e.action='submit' "
+                        "WHERE d.id=%s AND d.version=%s ORDER BY e.id DESC LIMIT 1",
+                        (job["document_id"], job["version"]),
+                    ).fetchone()
+                if not document:
+                    retry(service.database, job)
+                    return True
+                require_queued_owner(service, document)
+                features = {"purchase": "commercial.incoming", "sale": "commercial.outgoing"}
+                require_feature(service, features[document["kind"]])
             kind = reserve(service.database, job)
             if kind is None:
                 return True

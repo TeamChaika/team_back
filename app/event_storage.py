@@ -15,6 +15,8 @@ from psycopg.types.json import Jsonb
 from app.schemas.iiko_events import EventsCapture
 from app.services.iiko_events import MAX_EVENT_BYTES, event_content_hash, read_events
 from app.sync_references import Source, SyncError, append_snapshot
+from app.tenancy.config import load_runtime
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 
 ALGORITHM_VERSION = "reciprocal-v1"
 TRANSFER_TYPES = ("dishesMovedFrom", "dishesMovedTo")
@@ -132,14 +134,14 @@ def match_transfers(events: list[dict]) -> list[dict]:
 
 def rebuild_links(db, source_id: str) -> dict:
     rows = db.execute(
-        "SELECT v.payload FROM chaika.rms_events e JOIN chaika.rms_event_versions v "
+        f"SELECT v.payload FROM {DB}.rms_events e JOIN {DB}.rms_event_versions v "
         "ON v.version_id=e.version_id WHERE e.source_id=%s AND e.event_type=ANY(%s)",
         (source_id, list(TRANSFER_TYPES)),
     ).fetchall()
     links = match_transfers([r[0] for r in rows])
     for link in links:
         db.execute(
-            "INSERT INTO chaika.rms_event_links"
+            f"INSERT INTO {DB}.rms_event_links"
             "(source_id,event_id,paired_event_id,status,candidate_ids,algorithm_version,evidence) "
             "VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(source_id,event_id) DO UPDATE SET "
             "paired_event_id=EXCLUDED.paired_event_id,status=EXCLUDED.status,"
@@ -157,8 +159,8 @@ def rebuild_links(db, source_id: str) -> dict:
         )
     # A correction can cease being a transfer. Retire the projection, retain event history.
     db.execute(
-        "UPDATE chaika.rms_event_links l SET status='invalid',paired_event_id=NULL,"
-        "candidate_ids='[]'::jsonb,updated_at=now() FROM chaika.rms_events e "
+        f"UPDATE {DB}.rms_event_links l SET status='invalid',paired_event_id=NULL,"
+        f"candidate_ids='[]'::jsonb,updated_at=now() FROM {DB}.rms_events e "
         "WHERE l.source_id=%s AND e.source_id=l.source_id AND e.id=l.event_id "
         "AND NOT(e.event_type=ANY(%s))",
         (source_id, list(TRANSFER_TYPES)),
@@ -173,7 +175,7 @@ def publish_events(db, run_id: UUID, snapshot: dict, types: dict) -> dict:
         raise SyncError("events_snapshot_count_mismatch")
     with db.transaction(), db.pipeline():
         existing_day = db.execute(
-            "SELECT observed_at FROM chaika.rms_event_days WHERE source_id=%s AND event_date=%s",
+            f"SELECT observed_at FROM {DB}.rms_event_days WHERE source_id=%s AND event_date=%s",
             (source, day),
         ).fetchone()
         if existing_day and existing_day[0] > observed:
@@ -212,7 +214,7 @@ def publish_events(db, run_id: UUID, snapshot: dict, types: dict) -> dict:
         )
         for key, item in types.items():
             db.execute(
-                "INSERT INTO chaika.rms_event_types(source_id,id,label,details,last_snapshot_id) "
+                f"INSERT INTO {DB}.rms_event_types(source_id,id,label,details,last_snapshot_id) "
                 "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(source_id,id) DO UPDATE SET "
                 "label=EXCLUDED.label,details=EXCLUDED.details,last_snapshot_id=EXCLUDED.last_snapshot_id",
                 (source, key, item["label"], Jsonb(item), type_snapshot),
@@ -221,7 +223,7 @@ def publish_events(db, run_id: UUID, snapshot: dict, types: dict) -> dict:
         with db.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 "SELECT e.id,e.version_id,e.last_seen_at,v.version_no,v.content_hash,v.payload "
-                "FROM chaika.rms_events e JOIN chaika.rms_event_versions v "
+                f"FROM {DB}.rms_events e JOIN {DB}.rms_event_versions v "
                 "ON v.version_id=e.version_id "
                 "WHERE e.source_id=%s AND e.id=ANY(%s::uuid[])",
                 (source, ids),
@@ -244,7 +246,7 @@ def publish_events(db, run_id: UUID, snapshot: dict, types: dict) -> dict:
                 version_id = uuid4()
                 number = previous["version_no"] + 1 if previous else 1
                 db.execute(
-                    "INSERT INTO chaika.rms_event_versions"
+                    f"INSERT INTO {DB}.rms_event_versions"
                     "(source_id,event_id,version_id,version_no,observed_at,snapshot_id,content_hash,payload)"
                     " VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
                     (
@@ -264,7 +266,7 @@ def publish_events(db, run_id: UUID, snapshot: dict, types: dict) -> dict:
                 unchanged += 1
             fields = event["fields"]
             db.execute(
-                "INSERT INTO chaika.rms_events"
+                f"INSERT INTO {DB}.rms_events"
                 "(source_id,id,version_id,occurred_at,event_type,order_id,"
                 "order_number,department_code,actor_id,authorizer_id,waiter_id,terminal_id,"
                 "event_sum,order_sum_after_discount,first_seen_at,last_seen_at) "
@@ -296,20 +298,27 @@ def publish_events(db, run_id: UUID, snapshot: dict, types: dict) -> dict:
                 ),
             )
             db.execute(
-                "INSERT INTO chaika.rms_event_observations"
+                f"INSERT INTO {DB}.rms_event_observations"
                 "(snapshot_id,source_id,event_id,version_id) "
                 "VALUES(%s,%s,%s,%s)",
                 (snapshot["id"], source, event["id"], version_id),
             )
         links = rebuild_links(db, source)
         db.execute(
-            "INSERT INTO chaika.rms_event_days"
+            f"INSERT INTO {DB}.rms_event_days"
             "(source_id,event_date,timezone,last_snapshot_id,event_count,observed_at) "
-            "VALUES(%s,%s,'Europe/Simferopol',%s,%s,%s) "
+            "VALUES(%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT(source_id,event_date) DO UPDATE SET "
             "last_snapshot_id=EXCLUDED.last_snapshot_id,event_count=EXCLUDED.event_count,"
             "observed_at=EXCLUDED.observed_at",
-            (source, day, snapshot["id"], len(records), observed),
+            (
+                source,
+                day,
+                load_runtime().timezone if load_runtime().mode == "tenant" else "Europe/Simferopol",
+                snapshot["id"],
+                len(records),
+                observed,
+            ),
         )
     return {
         "events": len(records),

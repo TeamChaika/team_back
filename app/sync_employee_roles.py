@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-import httpx
 import psycopg
 from psycopg.types.json import Jsonb
 
@@ -24,6 +23,9 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_client, collector_url, runtime_directory
+from app.tenancy.sql import ANALYTICS_SCHEMA
 
 
 def capture_employee_roles(
@@ -32,7 +34,11 @@ def capture_employee_roles(
     response: dict,
     directory: Path | None = None,
 ) -> dict:
-    folder = directory if directory is not None else BACKEND_DIR / ".local/employee-roles"
+    folder = (
+        directory
+        if directory is not None
+        else runtime_directory("local", BACKEND_DIR / ".local") / "employee-roles"
+    )
     metadata = json.loads((folder / "current.json").read_text())
     if metadata["source_fingerprint"] != source.fingerprint or metadata["snapshot"] != response:
         raise SyncError("employee_roles_snapshot_mismatch")
@@ -77,13 +83,17 @@ def publish_employee_roles(db, snapshot: dict) -> dict:
     source, observed = snapshot["source_id"], snapshot["observed_at"]
     with db.transaction():
         latest = db.execute(
-            "SELECT max(last_seen_at) FROM chaika.employee_roles WHERE source_id=%s",
+            f"SELECT max(last_seen_at) FROM {ANALYTICS_SCHEMA}.employee_roles WHERE source_id=%s",
             (source,),
         ).fetchone()[0]
         if latest and latest > observed:
             raise SyncError("employee_roles_stale_observation")
         db.execute(
-            "UPDATE chaika.employee_roles SET present_in_latest=false WHERE source_id=%s", (source,)
+            (
+                f"UPDATE {ANALYTICS_SCHEMA}.employee_roles SET present_in_latest=false WHERE "
+                f"source_id=%s"
+            ),
+            (source,),
         )
         count = upsert_rows(
             db,
@@ -112,14 +122,14 @@ def publish_employee_roles(db, snapshot: dict) -> dict:
             ),
         )
         absent = db.execute(
-            "SELECT count(*) FROM chaika.employee_roles "
+            f"SELECT count(*) FROM {ANALYTICS_SCHEMA}.employee_roles "
             "WHERE source_id=%s AND NOT present_in_latest",
             (source,),
         ).fetchone()[0]
         employees, main, unresolved_main = db.execute(
             "SELECT count(*),count(e.main_role_id),"
             "count(*) FILTER(WHERE e.main_role_id IS NOT NULL AND r.id IS NULL) "
-            "FROM chaika.employees e LEFT JOIN chaika.employee_roles r "
+            f"FROM {ANALYTICS_SCHEMA}.employees e LEFT JOIN {ANALYTICS_SCHEMA}.employee_roles r "
             "ON r.source_id=e.source_id AND r.id=e.main_role_id "
             "WHERE e.source_id=%s AND e.present_in_latest",
             (source,),
@@ -129,7 +139,7 @@ def publish_employee_roles(db, snapshot: dict) -> dict:
             "count(DISTINCT role_id) FILTER(WHERE NOT role_resolved),"
             "count(DISTINCT role_id) FILTER(WHERE role_resolved AND NOT role_present_in_latest),"
             "count(DISTINCT role_id) FILTER(WHERE role_deleted) "
-            "FROM chaika.employee_role_assignments "
+            f"FROM {ANALYTICS_SCHEMA}.employee_role_assignments "
             "WHERE source_id=%s AND employee_present_in_latest",
             (source,),
         ).fetchone()
@@ -148,7 +158,7 @@ def publish_employee_roles(db, snapshot: dict) -> dict:
     }
 
 
-def synchronize_employee_roles(settings: Settings, api_url: str = "http://127.0.0.1:8010") -> dict:
+def synchronize_employee_roles(settings: Settings, api_url: str = collector_url()) -> dict:
     api_url = check_local_api(api_url)
     if not settings.database_url.get_secret_value():
         raise SyncError("database_not_configured")
@@ -157,30 +167,35 @@ def synchronize_employee_roles(settings: Settings, api_url: str = "http://127.0.
         raise SyncError("sync_key_not_configured")
     source = configured_sources(settings)[0]
     with (
-        psycopg.connect(
+        tenant_connect(
             settings.database_url.get_secret_value(),
             autocommit=True,
             connect_timeout=10,
             application_name="chaika-employee-roles-sync",
+            connector=psycopg.connect,
         ) as db,
         reference_lock(db),
     ):
         register_sources(db, [source])
         if not db.execute(
-            "SELECT 1 FROM chaika.sources WHERE id=%s AND server_type='CHAIN'", (source.id,)
+            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources WHERE id=%s AND server_type='CHAIN'",
+            (source.id,),
         ).fetchone():
             raise SyncError("reference_sync_required")
         db.execute(
-            "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),"
+            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' WHERE job='employee_roles' AND status='running'"
         )
         run_id = uuid4()
         db.execute(
-            "INSERT INTO chaika.sync_runs(id,job,status) VALUES(%s,'employee_roles','running')",
+            (
+                f"INSERT INTO {ANALYTICS_SCHEMA}.sync_runs(id,job,status) "
+                f"VALUES(%s,'employee_roles','running')"
+            ),
             (run_id,),
         )
         failure, touched, logout_ok = None, False, True
-        with httpx.Client(base_url=api_url, timeout=180, trust_env=False) as client:
+        with collector_client(base_url=api_url, timeout=180, trust_env=False) as client:
             try:
                 response = client.get("/api/v1/iiko/connections")
                 response.raise_for_status()
@@ -212,7 +227,8 @@ def synchronize_employee_roles(settings: Settings, api_url: str = "http://127.0.
                     counts = publish_employee_roles(db, snapshot)
                     counts["logout_ok"] = logout_ok
                     db.execute(
-                        "UPDATE chaika.sync_runs SET status='succeeded',finished_at=now(),"
+                        f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='succeeded',"
+                        f"finished_at=now(),"
                         "counts=%s WHERE id=%s",
                         (Jsonb(counts), run_id),
                     )
@@ -221,7 +237,8 @@ def synchronize_employee_roles(settings: Settings, api_url: str = "http://127.0.
         if failure is not None:
             code = str(failure) if isinstance(failure, SyncError) else type(failure).__name__
             db.execute(
-                "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),error_code=%s,"
+                f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
+                f"error_code=%s,"
                 "counts=%s WHERE id=%s",
                 (code, Jsonb({"logout_ok": logout_ok}), run_id),
             )
@@ -239,7 +256,7 @@ def synchronize_employee_roles(settings: Settings, api_url: str = "http://127.0.
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--api-url", default="http://127.0.0.1:8010")
+    parser.add_argument("--api-url", default=collector_url())
     args = parser.parse_args()
     try:
         report = synchronize_employee_roles(Settings(), args.api_url)

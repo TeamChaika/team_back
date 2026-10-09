@@ -3,7 +3,8 @@
 from datetime import datetime
 from decimal import Decimal
 from html import escape
-from zoneinfo import ZoneInfo
+
+from app.documents.context import local_zone, runtime_of
 
 
 def quantity(value) -> str:
@@ -35,10 +36,11 @@ def escaped_chunks(text: str):
     yield "".join(chunk)
 
 
-def document_messages(kind: str, doc: dict):
+def document_messages(kind: str, doc: dict, runtime=None):
     title = "Накладная" if kind == "waybill" else "Списание"
+    brand = "CHAIKA · " if runtime_of(runtime).mode == "legacy" else ""
     heading = (
-        f"<b>CHAIKA · {title} №{escape(str(doc['number']), quote=False)}</b>\n"
+        f"<b>{brand}{title} №{escape(str(doc['number']), quote=False)}</b>\n"
         f"На согласовании · версия {int(doc['version'])}"
     )
     if doc.get("receipt_state") == "pending_sender":
@@ -77,7 +79,7 @@ def document_messages(kind: str, doc: dict):
     if doc.get("created_at"):
         created = datetime.fromisoformat(doc["created_at"])
         if created.tzinfo is not None:
-            created = created.astimezone(ZoneInfo("Europe/Simferopol"))
+            created = created.astimezone(local_zone(runtime))
         add(created.strftime("%d.%m.%Y · %H:%M"))
 
     for page, body in enumerate(pages, 1):

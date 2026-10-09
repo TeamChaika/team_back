@@ -3,6 +3,7 @@
 from collections import defaultdict
 from datetime import datetime
 
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 from app.web.coverage import ZONE
 from app.web.purchase_impact import calculate_impact, load_graphs, recent_period, sales_coverage
 
@@ -81,29 +82,29 @@ def add_weekly_impacts(db, scope, report):
         return report
     targets = {p["product_id"] for p in prices}
     recipe_day = db.execute(
-        "SELECT max(business_date) AS day FROM chaika.assembly_chart_scopes "
+        f"SELECT max(business_date) AS day FROM {DB}.assembly_chart_scopes "
         "WHERE source_id='primary' AND business_date<=%s",
         (datetime.now(ZONE).date(),),
     ).fetchone()["day"]
     # Independent reads are queued in the repository's pipeline before graph loading.
     product_query = db.execute(
-        "SELECT id,main_unit_id FROM chaika.products "
+        f"SELECT id,main_unit_id FROM {DB}.products "
         "WHERE source_id='primary' AND id=ANY(%s::uuid[])",
         (list(targets),),
     )
     coverage_query = db.execute(
-        "SELECT d.business_date,r.observed_at,s.checks FROM chaika.sales_report_days d "
-        "JOIN chaika.sales_report_sets s ON s.id=d.current_set_id "
-        "JOIN chaika.sales_reports r ON r.set_id=s.id AND r.kind='dishes' "
+        f"SELECT d.business_date,r.observed_at,s.checks FROM {DB}.sales_report_days d "
+        f"JOIN {DB}.sales_report_sets s ON s.id=d.current_set_id "
+        f"JOIN {DB}.sales_reports r ON r.set_id=s.id AND r.kind='dishes' "
         "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s",
         (start, end),
     )
     sales_query = db.execute(
-        """SELECT x.department_id,x.dimensions->>'DishId' AS dish_id,
+        f"""SELECT x.department_id,x.dimensions->>'DishId' AS dish_id,
             max(x.dimensions->>'DishName') AS dish,sum(x.quantity) AS quantity,
             bool_or(x.quantity IS NULL OR x.quantity<0) AS invalid_quantity
-        FROM chaika.sales_report_days d JOIN chaika.sales_reports r ON r.set_id=d.current_set_id
-        JOIN chaika.sales_report_rows x ON x.report_id=r.id
+        FROM {DB}.sales_report_days d JOIN {DB}.sales_reports r ON r.set_id=d.current_set_id
+        JOIN {DB}.sales_report_rows x ON x.report_id=r.id
         WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s
             AND r.kind='dishes' AND x.department_id=ANY(%s::uuid[]) GROUP BY 1,2""",
         (start, end, scope.ids),

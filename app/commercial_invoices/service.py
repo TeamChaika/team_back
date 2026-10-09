@@ -9,6 +9,9 @@ from psycopg.types.json import Jsonb
 from app.commercial_invoices.calculation import VAT_RATES
 from app.commercial_invoices.drafts import build_snapshot, counterparty_catalog, product_catalog
 from app.commercial_invoices.policy import actor, require, stores_for
+from app.documents.actors import audit, local_id, same_actor
+from app.documents.actors import snapshot as actor_snapshot
+from app.documents.context import lock_resource, runtime_of
 from app.documents.policy import fail, full_name, identifier, invalid
 
 KINDS = {"purchase", "sale"}
@@ -30,12 +33,16 @@ class CommercialInvoiceService:
         submit_enabled=False,
         counterparty_enabled=False,
         counterparty_provider=None,
+        owner_authorizer=None,
+        feature_authorizer=None,
     ):
         self.database, self.provider = database, provider
         self.seller = seller or {}
         self.submit_enabled = submit_enabled
         self.counterparty_enabled = counterparty_enabled
         self.counterparty_provider = counterparty_provider
+        self.owner_authorizer = owner_authorizer
+        self.feature_authorizer = feature_authorizer
 
     def _actor(self, db, portal_id, kind):
         check_kind(kind)
@@ -80,6 +87,11 @@ class CommercialInvoiceService:
         create = stores_for(db, user["id"], kind, "create")
         edit = stores_for(db, user["id"], kind, "edit")
         submit = stores_for(db, user["id"], kind, "submit")
+        owner = actor_snapshot(user["id"])
+        operation_filter = (
+            "actor_id IS NULL AND actor->>'auth_user_id'=%s" if owner else "actor_id=%s"
+        )
+        operation_actor = owner["auth_user_id"] if owner else user["id"]
         stores = db.execute(
             "SELECT id,name FROM stores WHERE id=ANY(%s) ORDER BY name", (visible,)
         ).fetchall()
@@ -90,11 +102,11 @@ class CommercialInvoiceService:
                 serialize(db, row)["operation"]
                 for row in db.execute(
                     "SELECT * FROM commercial_counterparty_operations "
-                    "WHERE actor_id=%s AND portal_id=%s AND kind=%s "
+                    f"WHERE {operation_filter} AND portal_id=%s AND kind=%s "
                     "AND (state NOT IN ('confirmed','rejected') "
                     "OR created_at>now()-interval '1 day') "
                     "ORDER BY created_at DESC LIMIT 10",
-                    (user["id"], user["supabase_id"], kind),
+                    (operation_actor, user["supabase_id"], kind),
                 ).fetchall()
             ]
             if self.counterparty_enabled
@@ -150,13 +162,22 @@ class CommercialInvoiceService:
                         "action": e["action"],
                         "version": e["version"],
                         "actor_id": e["actor_id"],
-                        "actor_name": full_name(e) if e["actor_id"] is not None else "Система",
+                        "actor_name": (
+                            e["actor"]["display_name"]
+                            if e.get("actor")
+                            else full_name(e)
+                            if e["actor_id"] is not None
+                            else "Система"
+                        ),
+                        "actor": e.get("actor"),
                         "created_at": e["created_at"].isoformat(),
                     }
                     for e in db.execute(
                         (
                             "SELECT e.action,e.version,e.created_at,e.actor_id,"
-                            "u.first_name,u.last_name,u.username FROM commercial_invoice_events e "
+                            + ("e.actor," if runtime_of(db).mode == "tenant" else "")
+                            + "u.first_name,u.last_name,u.username "
+                            "FROM commercial_invoice_events e "
                             "LEFT JOIN authentication_user u ON u.id=e.actor_id "
                             "WHERE e.document_id=%s ORDER BY e.id"
                         ),
@@ -208,15 +229,23 @@ class CommercialInvoiceService:
         with self.database.connection() as db:
             user = self._actor(db, portal_id, kind)
             # Serialize only this request key; replay cannot race a concurrent insert.
-            db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (str(request_id),))
+            db.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (lock_resource(db, str(request_id)),),
+            )
             previous = db.execute(
                 "SELECT * FROM commercial_invoice_operations WHERE request_id=%s", (request_id,)
             ).fetchone()
             if previous:
-                if previous["actor_id"] != user["id"] or previous["fingerprint"] != fingerprint:
+                if not same_actor(previous, user["id"]) or previous["fingerprint"] != fingerprint:
                     fail(409, "Этот request_id уже использован другой командой.")
                 self._get(db, user, kind, previous["document_id"])
                 return previous["result"]
+            attributed = actor_snapshot(user["id"])
+            extra_columns = ",created_actor" if attributed else ""
+            event_column = ",actor" if attributed else ""
+            extra_values = ",%s" if attributed else ""
+            extra_params = (Jsonb(attributed),) if attributed else ()
             if action == "create":
                 snapshot = build_snapshot(db, user, kind, body, self.seller, action=action)
                 number = db.execute(
@@ -228,7 +257,8 @@ class CommercialInvoiceService:
                     (
                         "INSERT INTO "
                         "commercial_invoices(id,kind,number,store_id,"
-                        "created_by_id,snapshot) VALUES(%s,%s,%s,%s,%s,%s) "
+                        f"created_by_id,snapshot{extra_columns}) "
+                        f"VALUES(%s,%s,%s,%s,%s,%s{extra_values}) "
                         "RETURNING *"
                     ),
                     (
@@ -236,9 +266,10 @@ class CommercialInvoiceService:
                         kind,
                         number,
                         identifier(snapshot["store_id"]),
-                        user["id"],
+                        local_id(user["id"]),
                         Jsonb(snapshot),
-                    ),
+                    )
+                    + extra_params,
                 ).fetchone()
             else:
                 row = self._get(db, user, kind, document_id, lock=True)
@@ -302,18 +333,28 @@ class CommercialInvoiceService:
             db.execute(
                 (
                     "INSERT INTO "
-                    "commercial_invoice_events(document_id,version,actor_id,action) "
-                    "VALUES(%s,%s,%s,%s)"
+                    f"commercial_invoice_events(document_id,version,actor_id,action{event_column}) "
+                    f"VALUES(%s,%s,%s,%s{extra_values})"
                 ),
-                (row["id"], row["version"], user["id"], action),
+                (row["id"], row["version"], local_id(user["id"]), action) + extra_params,
             )
             result = {"document": self._serialize(db, user, row)}
             db.execute(
                 (
                     "INSERT INTO "
                     "commercial_invoice_operations(request_id,actor_id,"
-                    "fingerprint,document_id,result) VALUES(%s,%s,%s,%s,%s)"
+                    f"fingerprint,document_id,result{event_column}) "
+                    f"VALUES(%s,%s,%s,%s,%s{extra_values})"
                 ),
-                (request_id, user["id"], fingerprint, row["id"], Jsonb(result)),
+                (request_id, local_id(user["id"]), fingerprint, row["id"], Jsonb(result))
+                + extra_params,
+            )
+            audit(
+                db,
+                user["id"],
+                action,
+                "commercial_" + kind,
+                row["id"],
+                {"version": row["version"], "request_id": str(request_id)},
             )
             return result

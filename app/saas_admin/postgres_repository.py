@@ -432,6 +432,9 @@ class PostgresRepository(PostgresAuth, PostgresTenantAccess):
             (company_id,),
         )
 
+        db.execute("DELETE FROM platform_tenant_sessions WHERE company_id=%s", (company_id,))
+        db.execute("DELETE FROM platform_sso_codes WHERE company_id=%s", (company_id,))
+
     def validate_ready(self):
         """Fail closed on wrong credentials, missing schema or missing encryption key."""
         with self.connect() as db:

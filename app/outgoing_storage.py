@@ -5,6 +5,7 @@ from datetime import date
 from psycopg.types.json import Jsonb
 
 from app.sync_inventory import upsert_rows
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 
 
 def outgoing_link_counts(db, source_id: str, document_ids: list) -> dict:
@@ -16,12 +17,12 @@ def outgoing_link_counts(db, source_id: str, document_ids: list) -> dict:
         "count(*) FILTER(WHERE i.details->>'linked_outgoing_invoice_id'=o.id::text),"
         "count(*) FILTER(WHERE i.status='PROCESSED'),"
         "count(*) FILTER(WHERE s.id IS NOT NULL) "
-        "FROM chaika.outgoing_invoices o "
-        "LEFT JOIN chaika.incoming_invoices i ON i.source_id=o.source_id "
+        f"FROM {DB}.outgoing_invoices o "
+        f"LEFT JOIN {DB}.incoming_invoices i ON i.source_id=o.source_id "
         "AND i.id=o.linked_incoming_invoice_id "
-        "LEFT JOIN chaika.counteragents c ON c.source_id=o.source_id AND c.id=o.counteragent_id "
+        f"LEFT JOIN {DB}.counteragents c ON c.source_id=o.source_id AND c.id=o.counteragent_id "
         "AND c.represents_store "
-        "LEFT JOIN chaika.stores s ON s.source_id=o.source_id AND s.id=c.represented_store_id "
+        f"LEFT JOIN {DB}.stores s ON s.source_id=o.source_id AND s.id=c.represented_store_id "
         "WHERE o.source_id=%s AND o.id=ANY(%s::uuid[])",
         (source_id, document_ids),
     ).fetchone()
@@ -84,7 +85,7 @@ def publish_outgoing_invoices(db, snapshot: dict, day: date) -> dict:
     )
     # Absence of a document in a later date export is not proof of its deletion.
     db.execute(
-        "UPDATE chaika.outgoing_invoice_items SET present_in_latest=false "
+        f"UPDATE {DB}.outgoing_invoice_items SET present_in_latest=false "
         "WHERE source_id=%s AND document_id=ANY(%s::uuid[])",
         (source_id, ids),
     )

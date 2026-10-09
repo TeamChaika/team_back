@@ -4,7 +4,6 @@ import argparse
 import json
 from uuid import uuid4
 
-import httpx
 import psycopg
 from psycopg.types.json import Jsonb
 
@@ -19,10 +18,13 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_client, collector_url, runtime_directory
+from app.tenancy.sql import ANALYTICS_SCHEMA
 
 
 def synchronize_events(
-    settings: Settings, query: EventsSyncQuery, api_url: str = "http://127.0.0.1:8010"
+    settings: Settings, query: EventsSyncQuery, api_url: str = collector_url()
 ) -> dict:
     api_url = check_local_api(api_url)
     if not settings.database_url.get_secret_value():
@@ -34,31 +36,37 @@ def synchronize_events(
     if not key:
         raise SyncError("sync_key_not_configured")
     with (
-        psycopg.connect(
+        tenant_connect(
             settings.database_url.get_secret_value(),
             autocommit=True,
             connect_timeout=10,
             application_name="chaika-events-sync",
+            connector=psycopg.connect,
         ) as db,
         reference_lock(db),
     ):
         register_sources(db, [source])
         if not db.execute(
-            "SELECT 1 FROM chaika.sources s JOIN chaika.rms_bindings b ON b.source_id=s.id "
+            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources s JOIN {ANALYTICS_SCHEMA}.rms_bindings "
+            f"b ON b.source_id=s.id "
             "WHERE s.id=%s AND s.server_type='REPLICATED_RMS' AND b.state='matched'",
             (source.id,),
         ).fetchone():
             raise SyncError("events_rms_mapping_required")
         db.execute(
-            "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),"
+            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' WHERE job='events' AND status='running'"
         )
         run_id = uuid4()
         db.execute(
-            "INSERT INTO chaika.sync_runs(id,job,status) VALUES(%s,'events','running')", (run_id,)
+            (
+                f"INSERT INTO {ANALYTICS_SCHEMA}.sync_runs(id,job,status) "
+                f"VALUES(%s,'events','running')"
+            ),
+            (run_id,),
         )
         failure, touched, logout_ok = None, False, True
-        with httpx.Client(base_url=api_url, timeout=180, trust_env=False) as client:
+        with collector_client(base_url=api_url, timeout=180, trust_env=False) as client:
             try:
                 response = client.get("/api/v1/iiko/connections")
                 response.raise_for_status()
@@ -74,7 +82,9 @@ def synchronize_events(
                 if response.status_code != 200:
                     raise SyncError(f"events_http_{response.status_code}")
                 snapshot = capture_snapshot(
-                    BACKEND_DIR / ".local/events" / source.id, source, response.json()
+                    runtime_directory("local", BACKEND_DIR / ".local") / "events" / source.id,
+                    source,
+                    response.json(),
                 )
                 if snapshot["day"] != query.date:
                     raise SyncError("events_snapshot_scope_mismatch")
@@ -97,7 +107,8 @@ def synchronize_events(
                     )
                     counts["logout_ok"] = logout_ok
                     db.execute(
-                        "UPDATE chaika.sync_runs SET status='succeeded',finished_at=now(),"
+                        f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='succeeded',"
+                        f"finished_at=now(),"
                         "counts=%s WHERE id=%s",
                         (Jsonb(counts), run_id),
                     )
@@ -106,7 +117,8 @@ def synchronize_events(
         if failure is not None:
             code = str(failure) if isinstance(failure, SyncError) else type(failure).__name__
             db.execute(
-                "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),error_code=%s,"
+                f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
+                f"error_code=%s,"
                 "counts=%s WHERE id=%s",
                 (code, Jsonb({"logout_ok": logout_ok}), run_id),
             )

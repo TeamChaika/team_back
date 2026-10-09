@@ -41,6 +41,10 @@ def pg_server():
                 db.execute("INSERT INTO auth.users VALUES(%s,'1@chaika.team','{}')", (OWNER_AUTH,))
                 db.execute("INSERT INTO chaika.web_users VALUES(%s,'owner')", (OWNER_AUTH,))
                 db.execute(MIGRATION.read_text())
+                db.execute(Path("supabase/migrations/20261008185718_restcontrol_platform_sso.sql").read_text())
+                db.execute(Path("supabase/migrations/20261008200905_restcontrol_company_accounts.sql").read_text())
+                db.execute(Path("supabase/migrations/20261008235000_restcontrol_runtime_provisioning.sql").read_text())
+                db.execute(Path("supabase/migrations/20261009093000_restcontrol_company_module_settings.sql").read_text())
             yield url
         finally:
             server.cleanup()
@@ -322,6 +326,13 @@ def test_postgres_snapshot_restore_and_private_files(imported, database, tmp_pat
     from app.saas_admin.postgres_backup import read_snapshot, restore_postgres, snapshot_postgres
 
     repo, legacy, _, first, _, _ = imported
+    with repo.connect() as db:
+        db.execute(
+            "INSERT INTO runtime_provisioning(company_id,configuration_version,"
+            "socket_path,active_socket_path,active_version,state) "
+            "VALUES(%s,%s,'/old/portal.sock','/old/portal.sock',%s,'ready')",
+            (first["id"], first["version"], first["version"]),
+        )
     snapshot = tmp_path / "pg-snapshot"
     manifest = snapshot_postgres(repo.dsn, legacy.path.parent, snapshot)
     data, checked, key = read_snapshot(snapshot)
@@ -352,6 +363,12 @@ def test_postgres_snapshot_restore_and_private_files(imported, database, tmp_pat
     with copy.connect() as db:
         assert db.execute("SELECT count(*) AS n FROM sessions").fetchone()["n"] == 0
         assert db.execute("SELECT count(*) AS n FROM tenant_sessions").fetchone()["n"] == 0
+        runtime = db.execute("SELECT * FROM runtime_provisioning").fetchone()
+        assert runtime["state"] == "failed"
+        assert runtime["active_socket_path"] is None
+        assert runtime["active_version"] is None
+        assert runtime["checks"] == {}
+        assert runtime["error_code"] == "restored_runtime_requires_validation"
     (snapshot / "registry.json").write_text("{}")
     with pytest.raises(ValueError, match="checksum"):
         read_snapshot(snapshot)

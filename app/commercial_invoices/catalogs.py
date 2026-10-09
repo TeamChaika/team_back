@@ -2,13 +2,13 @@
 
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from defusedxml.ElementTree import fromstring
 from psycopg.types.json import Jsonb
 
+from app.documents.context import fixed_lock, local_zone
+
 LIMIT = 64 * 1024 * 1024
-ZONE = ZoneInfo("Europe/Simferopol")
 
 
 def _get(client, token, endpoint, params=()):
@@ -119,7 +119,10 @@ def refresh(service):
             from app.commercial_invoices.counterparties import CATALOG_LOCK
             from app.commercial_invoices.counterparty_transport import source_key
 
-            db.execute("SELECT pg_advisory_xact_lock(%s)", (CATALOG_LOCK,))
+            db.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (fixed_lock(db, "commercial-catalog", CATALOG_LOCK),),
+            )
             local = db.execute(
                 "SELECT data,verified_at FROM commercial_counterparties WHERE source_key=%s",
                 (source_key(service.counterparty_provider),),
@@ -163,14 +166,14 @@ def refresh_if_due(service, now):
     if previous and now - previous < timedelta(minutes=10):
         return False
     service._catalog_check_at = now
-    local = now.astimezone(ZONE)
+    local = now.astimezone(local_zone(service.database))
     if local.hour < 6:
         return False
     with service.database.connection(readonly=True) as db:
         row = db.execute("SELECT data FROM native_jobs WHERE name='commercial_catalogs'").fetchone()
     if row:
         last = datetime.fromisoformat(row["data"]["last_success_at"])
-        if last.astimezone(ZONE).date() >= local.date():
+        if last.astimezone(local_zone(service.database)).date() >= local.date():
             return False
     refresh(service)
     return True

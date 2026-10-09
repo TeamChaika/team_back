@@ -4,6 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal, localcontext
 
 from app.purchase_impact_precompute import source_revision
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 from app.web.purchase_impact import recent_period, sales_coverage
 from app.web.warehouse_analytics import require_department_report
 
@@ -76,7 +77,7 @@ def add_prepared_impacts(db, scope, report):
     require_department_report(scope)
     start, end = recent_period()
     current = db.execute(
-        "SELECT * FROM chaika.purchase_impact_prepared WHERE source_id='primary'"
+        f"SELECT * FROM {DB}.purchase_impact_prepared WHERE source_id='primary'"
     ).fetchone()
     valid = (
         current is not None
@@ -110,7 +111,7 @@ def add_prepared_impacts(db, scope, report):
             "SELECT product_id,product_exists,main_unit_id,has_graph,"
             "COALESCE((SELECT jsonb_object_agg(key,value) FROM jsonb_each(p.departments) "
             "WHERE key=ANY(%s::text[])), '{}'::jsonb) AS departments "
-            "FROM chaika.purchase_impact_prepared_products p "
+            f"FROM {DB}.purchase_impact_prepared_products p "
             "WHERE generation_id=%s AND product_id=ANY(%s::uuid[])",
             (sorted(allowed), current["id"], targets),
         ).fetchall()

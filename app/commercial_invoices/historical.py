@@ -12,7 +12,9 @@ from fastapi import HTTPException
 from app.commercial_invoices.drafts import counterparty_catalog
 from app.commercial_invoices.pdf import build_payment_qr_payload, render_invoice_pdf
 from app.commercial_invoices.policy import actor, stores_for
+from app.documents.context import analytics_schema
 from app.documents.policy import fail, identifier
+from app.tenancy.actor import actor_from_verified_scope
 
 
 def _number(value):
@@ -100,7 +102,7 @@ def _authorized_snapshot(repo, commercial_service, scope, document_id):
     document_id = identifier(document_id)
     spec = repo.resource_query(scope, "outgoing")
     with commercial_service.database.connection(readonly=True) as commercial_db:
-        user = actor(commercial_db, scope.user["id"], kind="sale")
+        user = actor(commercial_db, actor_from_verified_scope(scope), kind="sale")
         grants = {str(store) for store in stores_for(commercial_db, user["id"], "sale", "view")}
         with repo.connection(repeatable=True) as db:
             header = db.execute(
@@ -115,9 +117,10 @@ def _authorized_snapshot(repo, commercial_service, scope, document_id):
                 fail(404, "Документ не найден или недоступен.")
             rows = db.execute(
                 "SELECT i.*,p.name AS product,p.main_unit_id AS unit_id,u.name AS unit "
-                "FROM chaika.outgoing_invoice_items i LEFT JOIN chaika.products p ON "
+                f"FROM {analytics_schema(db)}.outgoing_invoice_items i "
+                f"LEFT JOIN {analytics_schema(db)}.products p ON "
                 "p.source_id=i.source_id AND p.id=i.product_id "
-                "LEFT JOIN chaika.measure_units u ON u.source_id=p.source_id "
+                f"LEFT JOIN {analytics_schema(db)}.measure_units u ON u.source_id=p.source_id "
                 "AND u.id=p.main_unit_id WHERE i.source_id='primary' AND i.document_id=%s "
                 "AND i.present_in_latest ORDER BY i.line_num LIMIT 201",
                 (document_id,),
@@ -126,8 +129,7 @@ def _authorized_snapshot(repo, commercial_service, scope, document_id):
             if not 1 <= len(rows) <= 200:
                 fail(422, "Для счёта требуется от 1 до 200 строк исходной накладной.")
             warehouses = {
-                str(row.get("store_id") or header.get("default_store_id") or "")
-                for row in rows
+                str(row.get("store_id") or header.get("default_store_id") or "") for row in rows
             }
             if "" in warehouses or not warehouses <= grants:
                 fail(403, "Нет права просмотра реализации по всем складам этой накладной.")

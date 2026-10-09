@@ -1,0 +1,20 @@
+# Review paths/users before installation. This file is not installed by the CLI.
+[Unit]
+Description=RestControl private tenant fleet supervisor
+After=network-online.target
+
+[Service]
+Type=simple
+User=restcontrol-operator
+WorkingDirectory=/srv/restcontrol/backend
+ExecStart=/srv/restcontrol/venv/bin/python -m app.saas_admin.runtime_fleet --config /private/restcontrol/fleet.json work
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

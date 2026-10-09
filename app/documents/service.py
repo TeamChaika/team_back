@@ -1,4 +1,5 @@
 from app.documents import administration, reads
+from app.documents.context import runtime_of
 from app.documents.database import DocumentDatabase
 from app.documents.policy import actor, fail, table
 from app.documents.transport import DocumentTransport
@@ -6,10 +7,15 @@ from app.documents.workflow import mutate
 
 
 class DocumentService:
-    def __init__(self, settings, *, database=None, provider=None):
+    def __init__(self, settings, *, database=None, provider=None, feature_authorizer=None):
         self.settings = settings
         self.database = database or DocumentDatabase(settings.database_url.get_secret_value())
+        runtime = runtime_of(self.database)
+        if runtime.mode == "tenant" and settings.dashboard_url != runtime.frontend_origin:
+            raise ValueError("Document links must use the tenant frontend origin")
         self.provider = provider or DocumentTransport(settings)
+        self.feature_authorizer = feature_authorizer
+        self.owner_authorizer = None
 
     def dispatch(self, portal_id, method, path, *, params=None, payload=None, csv=False):
         parts = path.strip("/").split("/")
@@ -56,7 +62,7 @@ class DocumentService:
                 )
                 values.append(reads.stores_for(db, user["id"], kind, "edit"))
             docs = db.execute(
-                reads.joined(kind) + f" WHERE {condition} AND d.status='Created' "
+                reads.joined(kind, db) + f" WHERE {condition} AND d.status='Created' "
                 "AND d.submission_state NOT IN ('queued','sending','unknown') ORDER BY d.id "
                 "DESC LIMIT 20",
                 values,

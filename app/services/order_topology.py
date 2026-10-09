@@ -11,6 +11,8 @@ from app.event_storage import ALGORITHM_VERSION
 from app.schemas.iiko_events import OrderTopology, TopologyEdge, TopologyNode
 from app.services.iiko_events import day_bounds
 from app.services.sync_jobs import SyncJobError
+from app.tenancy.connection import tenant_connect
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 
 MAX_ORDERS = 50
 MAX_EVENTS = 2000
@@ -20,9 +22,9 @@ def build_topology(db, source_id: str, root_id: UUID) -> OrderTopology:
     orders, frontier = {root_id}, {root_id}
     while frontier:
         related = db.execute(
-            "SELECT DISTINCT p.order_id FROM chaika.rms_events e "
-            "JOIN chaika.rms_event_links l ON l.source_id=e.source_id AND l.event_id=e.id "
-            "JOIN chaika.rms_events p ON p.source_id=l.source_id AND p.id=l.paired_event_id "
+            f"SELECT DISTINCT p.order_id FROM {DB}.rms_events e "
+            f"JOIN {DB}.rms_event_links l ON l.source_id=e.source_id AND l.event_id=e.id "
+            f"JOIN {DB}.rms_events p ON p.source_id=l.source_id AND p.id=l.paired_event_id "
             "WHERE e.source_id=%s AND e.order_id=ANY(%s::uuid[]) AND l.status='matched'",
             (source_id, list(frontier)),
         ).fetchall()
@@ -32,9 +34,9 @@ def build_topology(db, source_id: str, root_id: UUID) -> OrderTopology:
             raise SyncJobError("topology_too_large", "Связанных заказов больше лимита 50.", 413)
     with db.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
-            "SELECT v.payload, e.version_id, t.label FROM chaika.rms_events e "
-            "JOIN chaika.rms_event_versions v ON v.version_id=e.version_id "
-            "LEFT JOIN chaika.rms_event_types t ON t.source_id=e.source_id AND t.id=e.event_type "
+            f"SELECT v.payload, e.version_id, t.label FROM {DB}.rms_events e "
+            f"JOIN {DB}.rms_event_versions v ON v.version_id=e.version_id "
+            f"LEFT JOIN {DB}.rms_event_types t ON t.source_id=e.source_id AND t.id=e.event_type "
             "WHERE e.source_id=%s AND e.order_id=ANY(%s::uuid[]) "
             "ORDER BY e.occurred_at,e.id LIMIT %s",
             (source_id, list(orders), MAX_EVENTS + 1),
@@ -47,7 +49,7 @@ def build_topology(db, source_id: str, root_id: UUID) -> OrderTopology:
     event_ids = [r["payload"]["id"] for r in rows]
     with db.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
-            "SELECT * FROM chaika.rms_event_links WHERE source_id=%s "
+            f"SELECT * FROM {DB}.rms_event_links WHERE source_id=%s "
             "AND event_id=ANY(%s::uuid[]) ORDER BY event_id",
             (source_id, event_ids),
         )
@@ -60,7 +62,7 @@ def build_topology(db, source_id: str, root_id: UUID) -> OrderTopology:
     }
     names = dict(
         db.execute(
-            "SELECT e.id::text,e.name FROM chaika.employees e JOIN chaika.rms_bindings b "
+            f"SELECT e.id::text,e.name FROM {DB}.employees e JOIN {DB}.rms_bindings b "
             "ON b.chain_source_id=e.source_id WHERE b.source_id=%s AND b.state='matched' "
             "AND e.id=ANY(%s::uuid[])",
             (source_id, list(actors)),
@@ -178,7 +180,7 @@ def build_topology(db, source_id: str, root_id: UUID) -> OrderTopology:
     coverage = [
         dict(date=r[0].isoformat(), timezone=r[1], observed_at=r[2].isoformat(), event_count=r[3])
         for r in db.execute(
-            "SELECT event_date,timezone,observed_at,event_count FROM chaika.rms_event_days "
+            f"SELECT event_date,timezone,observed_at,event_count FROM {DB}.rms_event_days "
             "WHERE source_id=%s ORDER BY event_date",
             (source_id,),
         ).fetchall()
@@ -214,7 +216,9 @@ def read_topology(
 ) -> OrderTopology:
     if not settings.database_url.get_secret_value():
         raise SyncJobError("database_not_configured", "База данных не настроена.")
-    with psycopg.connect(settings.database_url.get_secret_value(), connect_timeout=10) as db:
+    with tenant_connect(
+        settings.database_url.get_secret_value(), connector=psycopg.connect, connect_timeout=10
+    ) as db:
         db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         db.execute("SET LOCAL statement_timeout='15s'")
         if order_id is not None:
@@ -222,7 +226,7 @@ def read_topology(
             return build_topology(db, source_id, order_id)
         start, end = day_bounds(day)
         found = db.execute(
-            "SELECT DISTINCT order_id FROM chaika.rms_events WHERE source_id=%s "
+            f"SELECT DISTINCT order_id FROM {DB}.rms_events WHERE source_id=%s "
             "AND order_number=%s AND occurred_at>=%s AND occurred_at<%s AND order_id IS NOT NULL",
             (source_id, str(order_number), start, end),
         ).fetchall()

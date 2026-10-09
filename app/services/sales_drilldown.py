@@ -22,6 +22,10 @@ from app.services.iiko_olap_sales import _unique_fields
 from app.services.sync_jobs import SyncJobError, write_json
 from app.sync_references import SyncError, configured_sources, reference_lock
 from app.sync_sales_history import FixedReport, request_for_day
+from app.tenancy.config import load_runtime
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_post, runtime_directory
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 from app.web.repository import serial
 
 PAGE_SIZE = 100
@@ -172,11 +176,11 @@ def read_context(db, query, allowed_departments):
         db,
         "SELECT r.id AS report_id,x.ordinal,s.business_date,x.department_id,n.name AS department,"
         "x.dimensions->>'ItemSaleEventDiscountType' AS discount_name,x.revenue,x.discount,"
-        "r.request,src.fingerprint FROM chaika.sales_reports r "
-        "JOIN chaika.sales_report_sets s ON s.id=r.set_id "
-        "JOIN chaika.sales_report_rows x ON x.report_id=r.id "
-        "JOIN chaika.sources src ON src.id=s.source_id "
-        "LEFT JOIN chaika.corporate_nodes n ON n.source_id=s.source_id AND n.id=x.department_id "
+        f"r.request,src.fingerprint FROM {DB}.sales_reports r "
+        f"JOIN {DB}.sales_report_sets s ON s.id=r.set_id "
+        f"JOIN {DB}.sales_report_rows x ON x.report_id=r.id "
+        f"JOIN {DB}.sources src ON src.id=s.source_id "
+        f"LEFT JOIN {DB}.corporate_nodes n ON n.source_id=s.source_id AND n.id=x.department_id "
         "WHERE r.id=%s AND x.ordinal=%s AND r.kind='discounts' AND s.source_id='primary' "
         "AND (%s OR x.department_id=ANY(%s::uuid[]))",
         (query.report_id, query.ordinal, allowed_departments is None, allowed_departments or []),
@@ -188,7 +192,7 @@ def read_context(db, query, allowed_departments):
 
 def stored_capture(db, key):
     return fetch_one(
-        db, "SELECT id,rows,observed_at FROM chaika.sales_drilldown_captures WHERE id=%s", (key,)
+        db, f"SELECT id,rows,observed_at FROM {DB}.sales_drilldown_captures WHERE id=%s", (key,)
     )
 
 
@@ -209,18 +213,24 @@ def load_capture(db, settings, context, order_id=None):
         if context["fingerprint"] != configured_sources(settings)[0].fingerprint:
             raise SyncJobError("drilldown_source_mismatch", "Настройки источника изменились.")
         with httpx.Client(timeout=30, trust_env=False) as http:
-            response = http.post("http://127.0.0.1:8010/api/v1/iiko/connections/primary/logout")
+            response = (
+                http.post("http://127.0.0.1:8010/api/v1/iiko/connections/primary/logout")
+                if load_runtime().mode == "legacy"
+                else collector_post("/api/v1/iiko/connections/primary/logout", timeout=30)
+            )
             if response.status_code != 200 or response.json().get("state") != "logged_out":
                 raise SyncJobError(
                     "drilldown_api_logout_failed", "Не удалось освободить сессию iiko."
                 )
         request = query_for(context, order_id)
-        root = BACKEND_DIR / ".local/discount-details" / str(uuid4())
+        root = runtime_directory("discount-details", BACKEND_DIR / ".local/discount-details") / str(
+            uuid4()
+        )
         raw, manifest = asyncio.run(capture(settings, request, root))
         rows = parse_rows(raw, request, context, order_id)
         with db.transaction():
             db.execute(
-                "INSERT INTO chaika.sales_drilldown_captures(id,report_id,ordinal,order_id,"
+                f"INSERT INTO {DB}.sales_drilldown_captures(id,report_id,ordinal,order_id,"
                 "request,observed_at,raw,sha256,rows) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     key,
@@ -241,8 +251,8 @@ def add_event_links(db, context, rows):
     linked = {}
     if rows:
         for source, order_id, count in db.execute(
-            "SELECT e.source_id,e.order_id,count(*) FROM chaika.rms_events e "
-            "JOIN chaika.rms_bindings b ON b.source_id=e.source_id "
+            f"SELECT e.source_id,e.order_id,count(*) FROM {DB}.rms_events e "
+            f"JOIN {DB}.rms_bindings b ON b.source_id=e.source_id "
             "WHERE b.chain_source_id='primary' AND b.state='matched' AND b.department_id=%s "
             "AND e.order_id=ANY(%s::uuid[]) GROUP BY e.source_id,e.order_id",
             (context["department_id"], [r["order_id"] for r in rows]),
@@ -273,8 +283,9 @@ def discount_details(
     try:
         if allowed_store_ids is not None and not allowed_store_ids:
             raise SyncJobError("drilldown_not_found", "Нет доступных складов.", 403)
-        with psycopg.connect(
+        with tenant_connect(
             settings.database_url.get_secret_value(),
+            connector=psycopg.connect,
             autocommit=True,
             connect_timeout=10,
             prepare_threshold=None,

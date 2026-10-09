@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from app.commercial_invoices.policy import administration
+from app.tenancy.actor import actor_from_verified_scope
 from app.web.permissions import require_admin, require_section
 from app.web.repository import Scope
 
@@ -60,7 +61,7 @@ def create_commercial_invoices_router(access):
             raise HTTPException(422, "Слишком много параметров.")
         return await run_in_threadpool(
             service.dispatch,
-            scope.user["id"],
+            actor_from_verified_scope(scope),
             request.method,
             kind,
             document_id,
@@ -74,7 +75,9 @@ def create_commercial_invoices_router(access):
         service = getattr(request.app.state, "commercial_invoices", None)
         if service is None:
             raise HTTPException(503, "Ввод накладных ещё не включён.")
-        return await run_in_threadpool(administration, service.database, scope.user["id"])
+        return await run_in_threadpool(
+            administration, service.database, actor_from_verified_scope(scope)
+        )
 
     @router.post("/admin/grants/{user_id}")
     async def save_grants(user_id: int, request: Request, scope: Access):
@@ -92,7 +95,11 @@ def create_commercial_invoices_router(access):
         except (ValueError, TypeError):
             raise HTTPException(422, "Проверьте формат прав.") from None
         return await run_in_threadpool(
-            administration, service.database, scope.user["id"], user_id=user_id, body=body
+            administration,
+            service.database,
+            actor_from_verified_scope(scope),
+            user_id=user_id,
+            body=body,
         )
 
     @router.get("/{kind}/options")
@@ -106,7 +113,7 @@ def create_commercial_invoices_router(access):
         service = getattr(request.app.state, "commercial_invoices", None)
         if service is None:
             raise HTTPException(503, "Ввод накладных ещё не включён.")
-        return await run_in_threadpool(grants, service.database, scope.user["id"])
+        return await run_in_threadpool(grants, service.database, actor_from_verified_scope(scope))
 
     @router.post("/admin/counterparty-grants/{user_id}")
     async def save_counterparty_grants(user_id: int, request: Request, scope: Access):
@@ -122,7 +129,7 @@ def create_commercial_invoices_router(access):
         return await run_in_threadpool(
             grants,
             service.database,
-            scope.user["id"],
+            actor_from_verified_scope(scope),
             user_id=user_id,
             body=body,
         )
@@ -138,7 +145,9 @@ def create_commercial_invoices_router(access):
             body = json.loads(await bounded_body(request, 16384))
         except ValueError:
             raise HTTPException(422, "Проверьте формат контрагента.") from None
-        return await run_in_threadpool(command, service, scope.user["id"], kind, body)
+        return await run_in_threadpool(
+            command, service, actor_from_verified_scope(scope), kind, body
+        )
 
     @router.get("/{kind}/counterparty-operations/{operation_id}")
     async def counterparty_operation(
@@ -149,7 +158,9 @@ def create_commercial_invoices_router(access):
         service = getattr(request.app.state, "commercial_invoices", None)
         if service is None:
             raise HTTPException(503, "Ввод накладных ещё не включён.")
-        return await run_in_threadpool(operation, service, scope.user["id"], kind, operation_id)
+        return await run_in_threadpool(
+            operation, service, actor_from_verified_scope(scope), kind, operation_id
+        )
 
     @router.get("/{kind}/products")
     async def products(kind: Kind, request: Request, scope: Access):

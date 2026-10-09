@@ -1,0 +1,165 @@
+{
+  "description": "Source checksums at baseline authoring; source SQL is not executed by tenant runner. No production rows read.",
+  "sources": [
+    {
+      "path": "supabase/migrations/20260910171101_chaika_reference_sync.sql",
+      "sha256": "79087874fd661d4cd020223d0400e18082afd5b8571029012b5a9100761571ff"
+    },
+    {
+      "path": "supabase/migrations/20260910172520_chaika_inventory_sync.sql",
+      "sha256": "54000bdfb7fa42e395fea8838cbc65304b6d85470e0460e2e214c8d87c60f525"
+    },
+    {
+      "path": "supabase/migrations/20260910194559_chaika_invoice_line_occurrences.sql",
+      "sha256": "329f93c64c9cb673fa8b61d1f559a1ce7d5c7bd13b814309176b3281c39a71c5"
+    },
+    {
+      "path": "supabase/migrations/20260910212915_chaika_employee_sync.sql",
+      "sha256": "c7ef5c06d9a7d7444bd0c3a1610c6029f82944babd6e9077f9fda521331fda43"
+    },
+    {
+      "path": "supabase/migrations/20260910213641_chaika_store_balance_sync.sql",
+      "sha256": "ba22903b70e8b82e80f2002efb9791690dfa42f67f59dcb1d1fa15a9d93a5459"
+    },
+    {
+      "path": "supabase/migrations/20260910214856_chaika_dictionary_sync.sql",
+      "sha256": "4da4da399dac2dae4cd151ce0eb1194d7f71c8394620dacd693f5120c63e7ec0"
+    },
+    {
+      "path": "supabase/migrations/20260910215744_chaika_counteragent_balance_sync.sql",
+      "sha256": "f8e894a52ce67a804caba00861af78f464de8e3e22cc270fe174ffaa44a42e9c"
+    },
+    {
+      "path": "supabase/migrations/20260910221015_chaika_outgoing_invoice_sync.sql",
+      "sha256": "f06570bf1f973e8df1e2ea753dc7617715fb077c022558097208ca9ec46494d3"
+    },
+    {
+      "path": "supabase/migrations/20260910222625_chaika_internal_transfer_sync.sql",
+      "sha256": "9f303494c68987d7ca8d892f17f0329098cfc6efb18696e5a8edeef8fd7cd1af"
+    },
+    {
+      "path": "supabase/migrations/20260910232649_chaika_rms_events.sql",
+      "sha256": "f2d15b4a2af3a6383ccca07fbc826a9b079bcb9d8e86b91869570289933509c9"
+    },
+    {
+      "path": "supabase/migrations/20260911001233_chaika_employee_roles.sql",
+      "sha256": "58d810734b52bdabbd25899e684028eb594b80c7504154eabca27fcc9c7a614b"
+    },
+    {
+      "path": "supabase/migrations/20260911002352_chaika_accounts.sql",
+      "sha256": "e4a1184587feaad264fbbd6e67d3395b51f8264017cf8cadfd08d6838500c897"
+    },
+    {
+      "path": "supabase/migrations/20260911013009_chaika_portal_and_olap.sql",
+      "sha256": "1c48e57476c33c9256d5e41ed8888843e79aa02af1b8849b41b668abe15e2bca"
+    },
+    {
+      "path": "supabase/migrations/20260911054546_cash_shifts_and_olap_review.sql",
+      "sha256": "c78e65575c4b058914cf7429cad91e3ee0abad80efdfac7c320aed338efd1fb7"
+    },
+    {
+      "path": "supabase/migrations/20260911065600_cash_shift_request_days.sql",
+      "sha256": "0657f99b752a3a74abd02b97990a3a863b64b234d6254e99f6b413df5eedc388"
+    },
+    {
+      "path": "supabase/migrations/20260911105000_sales_report_captures.sql",
+      "sha256": "7ae817c41266102c6998c50bf28ae1091bb8b1ae1c8c149e1bec17e291c95fb9"
+    },
+    {
+      "path": "supabase/migrations/20260911114000_sales_discount_drilldown.sql",
+      "sha256": "49d3e8c752a181b1bec52d69942b949d8853d89d11321b506ab7833a0ce0024e"
+    },
+    {
+      "path": "supabase/migrations/20260914194141_purchase_assistant.sql",
+      "sha256": "5234be4799da21e586f5cb802a312f2b8ee7762957c14b75136e9272e71ff2f3"
+    },
+    {
+      "path": "supabase/migrations/20260915123000_scheduled_sync.sql",
+      "sha256": "76be9fd665f1c18dfbdd466e640a4cb93fe0001f5657fddaff40b42a988d3bae"
+    },
+    {
+      "path": "supabase/migrations/20260915233000_employee_editing.sql",
+      "sha256": "ad5404f4fd15b06f6acddd6cc5ff9f5770e2fba1e54670ab42ac945ebe66fbf7"
+    },
+    {
+      "path": "supabase/migrations/20260916001500_employee_pin_ack.sql",
+      "sha256": "207e768352884b5ff8f9f2ce6a9b6f934336410a2b2c9f7d804c66edd33c3503"
+    },
+    {
+      "path": "supabase/migrations/20260918190000_indicator_filters.sql",
+      "sha256": "0b0fb1823c8d384cf60d49824bdfadb1e57e1e2236ebedca5676ae4db1ec16cd"
+    },
+    {
+      "path": "supabase/migrations/20260928094000_deposit_portal_role.sql",
+      "sha256": "fca02f8f8d016e1b07aadf4fb58ed6e57cb4b7a3dbbe379d4ed5d758f947b0a4"
+    },
+    {
+      "path": "supabase/migrations/20260928143000_portal_administration.sql",
+      "sha256": "9bdaeceeed065f7cd8d76f3e887005d499349c3e1794249c11e61b9890f9ba7e"
+    },
+    {
+      "path": "supabase/migrations/20261003150000_password_change_required.sql",
+      "sha256": "c09b73137a6baf4ee9452d86bf2c3b99349077dcf7e0ea6232dbf73e59ad116f"
+    },
+    {
+      "path": "supabase/migrations/20261004120000_manual_scheduled_sync.sql",
+      "sha256": "1609c635e6007ec45c411d1b0720456d1a4915e9af5b7eca05c0541fc3526c10"
+    },
+    {
+      "path": "supabase/migrations/20261007120000_warehouse_access.sql",
+      "sha256": "a9d65f5b511a5341adac81b8af28f77aceedd3d4afb4b1abff03aa16fb61c06c"
+    },
+    {
+      "path": "supabase/migrations/20261007180000_purchase_impact_prepared.sql",
+      "sha256": "abd56f2efc1ae5dfa59de212b1fb6e2ab46ff8d3ad4121730a325493e18f70e7"
+    },
+    {
+      "path": "supabase/migrations/20261007190000_purchase_prices_prepared.sql",
+      "sha256": "7f07e663de30ba915a2e8481652a5e7872a89c93e86e7d45d2d1ec4bf0fd840a"
+    },
+    {
+      "path": "migrations/documents/0001_native_runtime.sql",
+      "sha256": "6ee7a3848af60a44cd93b926577faf7c6cf3ff16ca430187968063d04de70251"
+    },
+    {
+      "path": "migrations/documents/0002_telegram_link.sql",
+      "sha256": "ae998823feb14ae2bc17772d8c6fefb4ac183ac9cea4b8d5416eee85154fbb15"
+    },
+    {
+      "path": "migrations/documents/0003_password_recovery.sql",
+      "sha256": "205544fde2438f90479ee2a84dbcd859d2ce020f4d8805b86f243de452749534"
+    },
+    {
+      "path": "migrations/documents/0004_receipt_discrepancies.sql",
+      "sha256": "90341a0f31ccfc2a4eb795bb76b32b2d783823b5dc0ae3e1a9281a272d4a3c80"
+    },
+    {
+      "path": "migrations/documents/0005_writeoff_cost_estimates.sql",
+      "sha256": "48fb2be12ad52f9f30c94738f940e120628b893755a66f824b7d31727082508e"
+    },
+    {
+      "path": "migrations/documents/0006_writeoff_recipe_costs.sql",
+      "sha256": "9da81a393cb83c1e167c01615398c714b14bbcbd31420c8d708f0851ccf03b45"
+    },
+    {
+      "path": "migrations/documents/0007_telegram_cleanup.sql",
+      "sha256": "5c89daa4d60e5fe4833572c00512c3a4de02585d1cc4e7c3222af3d64ea792a4"
+    },
+    {
+      "path": "migrations/documents/0008_commercial_invoices.sql",
+      "sha256": "dbd882f51db64c13cedf53472c14a7fb55518659d0876de424415fe1e062bc8b"
+    },
+    {
+      "path": "migrations/documents/0009_commercial_counterparties.sql",
+      "sha256": "ae4d628c1fda305854696dff9a96e0459251f4e8d5671cd18bc6c21b95502d46"
+    },
+    {
+      "path": "migrations/documents/0010_global_warehouse_scope.sql",
+      "sha256": "18fbb2af47d86322219f9ecea2ae2840791e785acf859903e932a927e3d85252"
+    },
+    {
+      "path": "tests/fixtures/documents_schema.sql",
+      "sha256": "caa76298a5240650d1d9dd29a40ecba58f7a596c95486a6c86218e39036bc964"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "migrations": [
+    {
+      "file": "20261008182231_tenant_analytics_baseline.sql",
+      "area": "analytics"
+    },
+    {
+      "file": "20261008182232_tenant_documents_base.sql",
+      "area": "documents"
+    },
+    {
+      "file": "20261008182305_tenant_documents_native.sql",
+      "area": "documents"
+    },
+    {
+      "file": "20261008182336_tenant_documents_commercial.sql",
+      "area": "documents"
+    },
+    {
+      "file": "20261008190049_tenant_platform_document_actors.sql",
+      "area": "documents"
+    },
+    {
+      "file": "20261008230000_tenant_payments.sql",
+      "area": "payments"
+    },
+    {
+      "file": "20261008200833_tenant_company_identity_boundary.sql",
+      "area": "analytics"
+    },
+    {
+      "file": "20261008202028_tenant_account_initialization.sql",
+      "area": "analytics"
+    },
+    {
+      "file": "20261009190000_tenant_password_recovery.sql",
+      "area": "analytics"
+    },
+    {
+      "file": "20261009210000_tenant_payment_evidence.sql",
+      "area": "payments"
+    },
+    {
+      "file": "20261009223000_tenant_payment_acceptance.sql",
+      "area": "payments"
+    }
+  ]
+}

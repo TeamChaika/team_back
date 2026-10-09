@@ -14,7 +14,6 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-import httpx
 import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
@@ -30,8 +29,18 @@ from app.services.iiko_topology import (
     read_departments,
     read_replication,
 )
+from app.tenancy.config import load_runtime
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import (
+    collector_client,
+    collector_url,
+    namespaced_lock,
+    runtime_directory,
+    validate_runtime_path,
+)
+from app.tenancy.sql import ANALYTICS_SCHEMA
 
-LOCK_ID = 7623011091001
+LOCK_ID = namespaced_lock(7623011091001)
 
 
 class SyncError(Exception):
@@ -73,6 +82,11 @@ def configured_sources(settings: Settings) -> list[Source]:
 
 
 def check_local_api(url: str) -> str:
+    runtime = load_runtime()
+    if runtime.mode == "tenant":
+        if url.rstrip("/") != collector_url():
+            raise SyncError("api_must_match_tenant_collector")
+        return collector_url()
     parsed = urlsplit(url)
     if (
         parsed.scheme != "http"
@@ -89,6 +103,7 @@ def check_local_api(url: str) -> str:
 
 def capture_snapshot(directory: Path, source: Source, resource: str, response: dict) -> dict:
     """Validate immutable RAW against HTTP metadata and the configured source."""
+    directory = validate_runtime_path(directory)
     snapshot_id = str(UUID(response["snapshot_id"]))
     if resource == "stores":
         folder, suffix = directory / "stores", "xml"
@@ -146,12 +161,14 @@ def register_sources(db: psycopg.Connection, sources: list[Source]) -> None:
     with db.transaction():
         for source in sources:
             existing = db.execute(
-                "SELECT base_url, fingerprint FROM chaika.sources WHERE id = %s", (source.id,)
+                f"SELECT base_url, fingerprint FROM {ANALYTICS_SCHEMA}.sources WHERE id = %s",
+                (source.id,),
             ).fetchone()
             if existing and existing != (source.base_url, source.fingerprint):
                 raise SyncError("source_identity_changed")
             db.execute(
-                "INSERT INTO chaika.sources (id,label,base_url,fingerprint) VALUES (%s,%s,%s,%s) "
+                f"INSERT INTO {ANALYTICS_SCHEMA}.sources (id,label,base_url,fingerprint) "
+                f"VALUES (%s,%s,%s,%s) "
                 "ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label",
                 (source.id, source.label, source.base_url, source.fingerprint),
             )
@@ -159,7 +176,7 @@ def register_sources(db: psycopg.Connection, sources: list[Source]) -> None:
 
 def append_snapshot(db: psycopg.Connection, run_id: UUID, snapshot: dict) -> None:
     db.execute(
-        "INSERT INTO chaika.raw_snapshots "
+        f"INSERT INTO {ANALYTICS_SCHEMA}.raw_snapshots "
         "(id,run_id,source_id,resource,observed_at,sha256,source_bytes,raw,normalized) "
         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (
@@ -209,19 +226,20 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
         ],
     }
     with db.transaction():
-        db.execute("UPDATE chaika.sources SET configured = false")
+        db.execute(f"UPDATE {ANALYTICS_SCHEMA}.sources SET configured = false")
         for source in sources:
             observed = snapshots[(source.id, "server_type")]
             db.execute(
-                "UPDATE chaika.sources SET configured=true,server_type=%s,verified_at=%s "
+                f"UPDATE {ANALYTICS_SCHEMA}.sources SET configured=true,server_type=%s,"
+                f"verified_at=%s "
                 "WHERE id=%s",
                 (observed["payload"]["server_type"], observed["observed_at"], source.id),
             )
         for table, snapshot in [("corporate_nodes", primary), ("stores", stores)]:
             db.execute(
-                sql.SQL("UPDATE chaika.{} SET present_in_latest=false WHERE source_id=%s").format(
-                    sql.Identifier(table)
-                ),
+                sql.SQL(
+                    f"UPDATE {ANALYTICS_SCHEMA}.{{}} SET present_in_latest=false WHERE source_id=%s"
+                ).format(sql.Identifier(table)),
                 ("primary",),
             )
             columns = ["source_id", "id", "parent_id", "code", "name"]
@@ -230,7 +248,8 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
             columns += ["first_seen_at", "last_seen_at", "last_snapshot_id"]
             updates = [c for c in columns if c not in {"source_id", "id", "first_seen_at"}]
             statement = sql.SQL(
-                "INSERT INTO chaika.{} ({}) VALUES ({}) ON CONFLICT (source_id,id) "
+                f"INSERT INTO {ANALYTICS_SCHEMA}.{{}} ({{}}) VALUES ({{}}) ON CONFLICT "
+                f"(source_id,id) "
                 "DO UPDATE SET {}, present_in_latest=true"
             ).format(
                 sql.Identifier(table),
@@ -251,10 +270,13 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
                 }
                 db.execute(statement, [values.get(c) for c in columns])
         # Clear old matches inside this transaction, allowing restaurants to swap RMS.
-        db.execute("UPDATE chaika.rms_bindings SET state='not_configured',department_id=NULL")
+        db.execute(
+            f"UPDATE {ANALYTICS_SCHEMA}.rms_bindings SET state='not_configured',department_id=NULL"
+        )
         for binding in mapping.bindings:
             db.execute(
-                "INSERT INTO chaika.rms_bindings (source_id,chain_source_id,department_id,state,"
+                f"INSERT INTO {ANALYTICS_SCHEMA}.rms_bindings (source_id,chain_source_id,"
+                f"department_id,state,"
                 "details,observed_at,chain_snapshot_id,rms_snapshot_id,groups_snapshot_id) "
                 "VALUES (%s,'primary',%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (source_id) DO UPDATE SET "
                 "department_id=EXCLUDED.department_id,state=EXCLUDED.state,details=EXCLUDED.details,"
@@ -276,6 +298,7 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
 
 
 def synchronize(settings: Settings, api_url: str, output: Path) -> dict:
+    output = validate_runtime_path(output)
     api_url = check_local_api(api_url)
     sources = configured_sources(settings)
     if not settings.database_url.get_secret_value():
@@ -283,23 +306,26 @@ def synchronize(settings: Settings, api_url: str, output: Path) -> dict:
     run_id = uuid4()
     # Autocommit preserves RAW and the run journal if later collection/publication fails.
     with (
-        psycopg.connect(
+        tenant_connect(
             settings.database_url.get_secret_value(),
             autocommit=True,
             connect_timeout=10,
             application_name="chaika-reference-sync",
+            connector=psycopg.connect,
         ) as db,
         reference_lock(db),
     ):
         register_sources(db, sources)
         db.execute(
-            "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),"
+            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' WHERE status='running'"
         )
-        db.execute("INSERT INTO chaika.sync_runs (id,status) VALUES (%s,'running')", (run_id,))
+        db.execute(
+            f"INSERT INTO {ANALYTICS_SCHEMA}.sync_runs (id,status) VALUES (%s,'running')", (run_id,)
+        )
         snapshots, touched, logout_errors = {}, [], []
         counts, failure = {}, None
-        with httpx.Client(
+        with collector_client(
             base_url=api_url, timeout=180, trust_env=False, follow_redirects=False
         ) as client:
 
@@ -313,7 +339,9 @@ def synchronize(settings: Settings, api_url: str, output: Path) -> dict:
                 if source.id not in touched:
                     touched.append(source.id)
                 payload = request(method, path)
-                snapshot = capture_snapshot(BACKEND_DIR / ".local", source, resource, payload)
+                snapshot = capture_snapshot(
+                    runtime_directory("local", BACKEND_DIR / ".local"), source, resource, payload
+                )
                 append_snapshot(db, run_id, snapshot)
                 snapshots[(source.id, resource)] = snapshot
                 print(json.dumps({"source": source.id, "loaded": resource}), flush=True)
@@ -351,7 +379,8 @@ def synchronize(settings: Settings, api_url: str, output: Path) -> dict:
                     with db.transaction():
                         counts = publish(db, sources, snapshots)
                         db.execute(
-                            "UPDATE chaika.sync_runs SET status='succeeded',finished_at=now(),"
+                            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='succeeded',"
+                            f"finished_at=now(),"
                             "counts=%s WHERE id=%s",
                             (Jsonb(counts), run_id),
                         )
@@ -360,7 +389,8 @@ def synchronize(settings: Settings, api_url: str, output: Path) -> dict:
         if failure is not None:
             code = str(failure) if isinstance(failure, SyncError) else type(failure).__name__
             db.execute(
-                "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),error_code=%s,"
+                f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
+                f"error_code=%s,"
                 "counts=%s WHERE id=%s",
                 (
                     code,
@@ -387,8 +417,12 @@ def synchronize(settings: Settings, api_url: str, output: Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--api-url", default="http://127.0.0.1:8010")
-    parser.add_argument("--output", type=Path, default=BACKEND_DIR / ".local/sync/latest.json")
+    parser.add_argument("--api-url", default=collector_url())
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=runtime_directory("local", BACKEND_DIR / ".local") / "sync/latest.json",
+    )
     args = parser.parse_args()
     try:
         report = synchronize(Settings(), args.api_url, args.output)

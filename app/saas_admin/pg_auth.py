@@ -45,7 +45,8 @@ class PostgresAuth:
         )
         return token, csrf
 
-    def _verified(self, db, token, tenant=False, slug=None, rate_peer=None):
+    def _verified(self, db, token, tenant=False, slug=None, rate_peer=None, token_hash=None):
+        hashed = token_hash or digest(token)
         table, members, field = (
             ("tenant_sessions", "memberships", "admin_id")
             if tenant
@@ -58,7 +59,7 @@ class PostgresAuth:
             scope = db.execute(
                 "SELECT m.company_id,m.id FROM tenant_sessions s JOIN memberships m ON "
                 "m.id=s.admin_id WHERE s.token_hash=%s",
-                (digest(token),),
+                (hashed,),
             ).fetchone()
             if not scope:
                 raise Problem(401, "unauthorized", "Требуется вход")
@@ -66,14 +67,18 @@ class PostgresAuth:
             db.execute("SELECT id FROM memberships WHERE id=%s FOR UPDATE", (scope["id"],))
         session = db.execute(
             f"SELECT * FROM {table} WHERE token_hash=%s AND expires>%s FOR UPDATE",
-            (digest(token), time.time()),
+            (hashed, time.time()),
         ).fetchone()
         if not session:
             raise Problem(401, "unauthorized", "Требуется вход")
         row = db.execute(
             f"SELECT * FROM {members} WHERE id=%s AND active=true", (session[field],)
         ).fetchone()
-        if not row or not row["auth_user_id"] or (tenant and row["role"] != "company_admin"):
+        if (
+            not row
+            or not row["auth_user_id"]
+            or (tenant and row["role"] not in {"company_admin", "employee"})
+        ):
             raise Problem(401, "unauthorized", "Доступ закрыт")
         if tenant:
             company = db.execute(
@@ -97,19 +102,19 @@ class PostgresAuth:
                 if tokens["expires_at"] <= time.time() + 30:
                     raise Problem(401, "unauthorized", "Требуется повторный вход")
             except Problem:
-                db.execute(f"DELETE FROM {table} WHERE token_hash=%s", (digest(token),))
+                db.execute(f"DELETE FROM {table} WHERE token_hash=%s", (hashed,))
                 # Caller must commit this invalidation before propagating.
                 return None
             db.execute(
                 f"UPDATE {table} SET tokens_ciphertext=%s WHERE token_hash=%s",
-                (self.vault.encrypt(json.dumps(tokens)), digest(token)),
+                (self.vault.encrypt(json.dumps(tokens)), hashed),
             )
             # Persist rotation before later authorization/CSRF checks can roll back.
             db.commit()
             db.execute("SET LOCAL search_path TO restcontrol,pg_catalog")
             db.execute("SET LOCAL statement_timeout='30s'")
             db.execute("SET LOCAL lock_timeout='5s'")
-            return self._verified(db, token, tenant, slug, rate_peer)
+            return self._verified(db, token, tenant, slug, rate_peer, token_hash=hashed)
         user = self.auth.user(tokens["access_token"])
         if str(user.get("id")) != str(row["auth_user_id"]) or str(tokens["user_id"]) != str(
             row["auth_user_id"]

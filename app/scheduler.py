@@ -14,11 +14,15 @@ import psycopg
 
 from app.core.config import BACKEND_DIR, Settings
 from app.sync_references import SyncError
+from app.tenancy.config import load_runtime
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_client, collector_url, namespaced_lock
+from app.tenancy.sql import ANALYTICS_SCHEMA
 from app.web.coverage import ZONE
 
 log = logging.getLogger(__name__)
-LEADER_LOCK = 7623011091051
-API = "http://127.0.0.1:8010"
+LEADER_LOCK = namespaced_lock(7623011091051)
+API = collector_url()
 
 
 @dataclass(frozen=True)
@@ -241,24 +245,25 @@ def run_due(db, settings, stop, *, now=None, execute=run_job, manual=False):
         with db.transaction():
             job_lock(db, job.key)
             pending = db.execute(
-                "SELECT 1 FROM chaika.manual_sync_requests "
+                f"SELECT 1 FROM {ANALYTICS_SCHEMA}.manual_sync_requests "
                 "WHERE job=%s AND state IN ('pending','running') LIMIT 1",
                 (job.key,),
             ).fetchone()
             if pending:
                 continue
             previous = db.execute(
-                "SELECT status,next_retry_at FROM chaika.scheduled_sync_runs "
+                f"SELECT status,next_retry_at FROM {ANALYTICS_SCHEMA}.scheduled_sync_runs "
                 "WHERE job=%s AND slot=%s",
                 (job.key, slot),
             ).fetchone()
             if previous and (previous[0] == "succeeded" or (previous[1] and previous[1] > now)):
                 continue
             db.execute(
-                "INSERT INTO chaika.scheduled_sync_runs(job,slot,status) VALUES(%s,%s,'running') "
+                f"INSERT INTO {ANALYTICS_SCHEMA}.scheduled_sync_runs(job,slot,status) "
+                "VALUES(%s,%s,'running') "
                 "ON CONFLICT(job,slot) DO UPDATE SET status='running',"
                 "started_at=now(),finished_at=NULL,"
-                "attempts=chaika.scheduled_sync_runs.attempts+1,error_code=NULL,next_retry_at=NULL",
+                f"attempts={ANALYTICS_SCHEMA}.scheduled_sync_runs.attempts+1,error_code=NULL,next_retry_at=NULL",
                 (job.key, slot),
             )
         try:
@@ -268,7 +273,7 @@ def run_due(db, settings, stop, *, now=None, execute=run_job, manual=False):
 
             code = error_code(error)
             db.execute(
-                "UPDATE chaika.scheduled_sync_runs SET status='failed',"
+                f"UPDATE {ANALYTICS_SCHEMA}.scheduled_sync_runs SET status='failed',"
                 "finished_at=now(),error_code=%s,"
                 "next_retry_at=now()+interval '5 minutes' WHERE job=%s AND slot=%s",
                 (code, job.key, slot),
@@ -276,7 +281,7 @@ def run_due(db, settings, stop, *, now=None, execute=run_job, manual=False):
             log.warning("Scheduled sync failed: %s (%s)", job.key, code)
         else:
             db.execute(
-                "UPDATE chaika.scheduled_sync_runs SET status='succeeded',"
+                f"UPDATE {ANALYTICS_SCHEMA}.scheduled_sync_runs SET status='succeeded',"
                 "finished_at=now(),error_code=NULL "
                 "WHERE job=%s AND slot=%s",
                 (job.key, slot),
@@ -300,27 +305,42 @@ def main():
     stop = Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
-    collector = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "app.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "8010",
-            "--no-access-log",
-        ],
-        cwd=BACKEND_DIR,
+    if load_runtime().mode == "tenant":
+        load_runtime().runtime_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    external = (
+        load_runtime().mode == "tenant"
+        and os.environ.get("RESTCONTROL_TENANT_EXTERNAL_COLLECTOR") == "true"
     )
+    if external:
+        from app.tenancy.collector_probe import ExternalCollector
+
+        collector = ExternalCollector(load_runtime())
+    else:
+        collector = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "app.main:app",
+                "--host",
+                "127.0.0.1",
+                *(
+                    ["--uds", str(load_runtime().collector_socket)]
+                    if load_runtime().mode == "tenant" and load_runtime().collector_port is None
+                    else ["--port", str(load_runtime().collector_port or 8010)]
+                ),
+                "--no-access-log",
+            ],
+            cwd=BACKEND_DIR,
+        )
     try:
         for _ in range(30):
             if stop.is_set() or collector.poll() is not None:
                 return
             try:
-                if httpx.get(API + "/api/v1/health", timeout=2).status_code == 200:
-                    break
+                with collector_client(base_url=API, timeout=2) as client:
+                    if client.get("/api/v1/health").status_code == 200:
+                        break
             except httpx.HTTPError:
                 pass
             stop.wait(1)
@@ -328,11 +348,12 @@ def main():
             raise SyncError("scheduler_collector_unavailable")
         while not stop.is_set():
             try:
-                with psycopg.connect(
+                with tenant_connect(
                     settings.database_url.get_secret_value(),
                     autocommit=True,
                     connect_timeout=10,
                     application_name="chaika-scheduler",
+                    connector=psycopg.connect,
                 ) as db:
                     if not db.execute("SELECT pg_try_advisory_lock(%s)", (LEADER_LOCK,)).fetchone()[
                         0
@@ -342,7 +363,7 @@ def main():
                     try:
                         # Retry slots left behind by a vanished leader.
                         db.execute(
-                            "UPDATE chaika.scheduled_sync_runs SET status='failed',"
+                            f"UPDATE {ANALYTICS_SCHEMA}.scheduled_sync_runs SET status='failed',"
                             "error_code='interrupted',"
                             "finished_at=now(),next_retry_at=now() WHERE status='running'"
                         )

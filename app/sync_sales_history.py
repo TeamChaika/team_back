@@ -16,7 +16,6 @@ from threading import Event
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-import httpx
 import psycopg
 
 from app.core.config import BACKEND_DIR, Settings
@@ -26,10 +25,14 @@ from app.integrations.iiko.errors import IikoError
 from app.services.iiko_auth import IikoAuthService
 from app.services.sync_jobs import write_json
 from app.sync_references import SyncError, configured_sources, reference_lock, register_sources
+from app.tenancy.config import load_runtime
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_client, collector_url, runtime_directory, validate_runtime_path
+from app.tenancy.sql import ANALYTICS_SCHEMA
 
-DIRECTORY = BACKEND_DIR / ".local/sync"
-REPORTS = BACKEND_DIR / ".local/reports"
-ZONE = ZoneInfo("Europe/Simferopol")
+DIRECTORY = runtime_directory("local", BACKEND_DIR / ".local") / "sync"
+REPORTS = runtime_directory("local", BACKEND_DIR / ".local") / "reports"
+ZONE = ZoneInfo(load_runtime().timezone if load_runtime().mode == "tenant" else "Europe/Simferopol")
 REPORT_ORDER = ("daily", "dishes", "payments", "discounts", "returns", "waiters", "hours")
 
 
@@ -57,13 +60,16 @@ def history_days(start: date, end: date, *, include_today=False) -> list[date]:
 
 def approved_templates(db):
     row = db.execute(
-        "SELECT id FROM chaika.sales_report_sets WHERE source_id='primary' AND reviewed "
+        f"SELECT id FROM {ANALYTICS_SCHEMA}.sales_report_sets WHERE source_id='primary' AND "
+        f"reviewed "
         "ORDER BY business_date DESC,observed_at DESC LIMIT 1"
     ).fetchone()
     if not row:
         raise SyncError("sales_approved_templates_missing")
     templates = dict(
-        db.execute("SELECT kind,request FROM chaika.sales_reports WHERE set_id=%s", row).fetchall()
+        db.execute(
+            f"SELECT kind,request FROM {ANALYTICS_SCHEMA}.sales_reports WHERE set_id=%s", row
+        ).fetchall()
     )
     if set(templates) != KINDS:
         raise SyncError("sales_approved_templates_incomplete")
@@ -288,6 +294,7 @@ def synchronize_history(
     refresh=False,
 ):
     days = history_days(start, end, include_today=include_today)
+    directory = validate_runtime_path(directory)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(directory / "sales-history.lock", os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(descriptor, "w") as lock:
@@ -297,8 +304,11 @@ def synchronize_history(
             raise SyncError("sales_history_already_running") from None
         source = configured_sources(settings)[0]
         with (
-            psycopg.connect(
-                settings.database_url.get_secret_value(), autocommit=True, connect_timeout=10
+            tenant_connect(
+                settings.database_url.get_secret_value(),
+                autocommit=True,
+                connect_timeout=10,
+                connector=psycopg.connect,
             ) as db,
             reference_lock(db),
         ):
@@ -306,14 +316,14 @@ def synchronize_history(
             template_id, templates = approved_templates(db)
             rows = db.execute(
                 "SELECT d.business_date,jsonb_object_agg(r.kind,r.row_count) "
-                "FROM chaika.sales_report_days d "
-                "JOIN chaika.sales_report_sets s ON s.id=d.current_set_id "
-                "JOIN chaika.sales_reports r ON r.set_id=s.id "
+                f"FROM {ANALYTICS_SCHEMA}.sales_report_days d "
+                f"JOIN {ANALYTICS_SCHEMA}.sales_report_sets s ON s.id=d.current_set_id "
+                f"JOIN {ANALYTICS_SCHEMA}.sales_reports r ON r.set_id=s.id "
                 "WHERE d.source_id=%s AND d.business_date BETWEEN %s AND %s "
                 "GROUP BY d.business_date HAVING count(*)=7 "
                 "AND min(r.observed_at) >= ((d.business_date + 1)::timestamp "
-                "AT TIME ZONE 'Europe/Simferopol')",
-                (source.id, start, end),
+                "AT TIME ZONE %s)",
+                (source.id, start, end, ZONE.key),
             ).fetchall()
             coverage = {day: counts for day, counts in rows if set(counts) == KINDS}
             if refresh:
@@ -321,8 +331,8 @@ def synchronize_history(
             warning_days = {
                 row[0]
                 for row in db.execute(
-                    "SELECT d.business_date FROM chaika.sales_report_days d JOIN "
-                    "chaika.sales_report_sets s ON s.id=d.current_set_id "
+                    f"SELECT d.business_date FROM {ANALYTICS_SCHEMA}.sales_report_days d JOIN "
+                    f"{ANALYTICS_SCHEMA}.sales_report_sets s ON s.id=d.current_set_id "
                     "WHERE d.source_id=%s AND d.business_date BETWEEN %s AND %s "
                     "AND EXISTS(SELECT 1 FROM jsonb_array_elements(s.checks) c "
                     "WHERE c->>'exact_match'='false')",
@@ -330,8 +340,8 @@ def synchronize_history(
                 ).fetchall()
             }
             # Release any token cached by the technical API before using this worker's session.
-            with httpx.Client(timeout=30, trust_env=False) as http:
-                response = http.post("http://127.0.0.1:8010/api/v1/iiko/connections/primary/logout")
+            with collector_client(base_url=collector_url(), timeout=30, trust_env=False) as http:
+                response = http.post("/api/v1/iiko/connections/primary/logout")
                 if response.status_code != 200 or response.json().get("state") != "logged_out":
                     raise SyncError("sales_api_logout_failed")
             write_json(

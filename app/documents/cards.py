@@ -5,10 +5,10 @@ from datetime import datetime
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageDraw, ImageFont
 
+from app.documents.context import local_zone, runtime_of
 from app.documents.messages import quantity
 
 WIDTH, MAX_HEIGHT = 960, 1440
@@ -107,7 +107,7 @@ def document_rows(kind: str, doc: dict) -> list[Row]:
     if doc.get("created_at"):
         created = datetime.fromisoformat(doc["created_at"])
         if created.tzinfo is not None:
-            created = created.astimezone(ZoneInfo("Europe/Simferopol"))
+            created = created.astimezone(local_zone())
         add(created.strftime("%d.%m.%Y · %H:%M"), "meta")
     return rows
 
@@ -136,7 +136,8 @@ def render_page(kind: str, doc: dict, rows: list[Row], page: int, total: int) ->
     image = Image.new("RGB", (WIDTH, height), BACKGROUND)
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle((16, 16, WIDTH - 17, height - 17), radius=30, outline=BORDER, width=2)
-    draw.text((LEFT, 56), "C H A I K A", font=font(33, 800), fill=TEAL)
+    brand = "C H A I K A" if runtime_of().mode == "legacy" else "ДОКУМЕНТЫ"
+    draw.text((LEFT, 56), brand, font=font(33, 800), fill=TEAL)
     draw.text((RIGHT, 65), f"Версия {doc['version']}", font=font(23), fill=MUTED, anchor="ra")
     draw.text(
         (LEFT, 116),

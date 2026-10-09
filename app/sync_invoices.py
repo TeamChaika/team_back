@@ -29,6 +29,10 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.tenancy.config import load_runtime
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_client, collector_url, runtime_directory, validate_runtime_path
+from app.tenancy.sql import ANALYTICS_SCHEMA
 from app.transfer_storage import publish_transfers
 
 RESOURCE = "incoming_invoices"
@@ -69,7 +73,8 @@ def prepare_run(
     with db.transaction():
         if resume:
             row = db.execute(
-                "SELECT job,counts FROM chaika.sync_runs WHERE id=%s FOR UPDATE", (resume,)
+                f"SELECT job,counts FROM {ANALYTICS_SCHEMA}.sync_runs WHERE id=%s FOR UPDATE",
+                (resume,),
             ).fetchone()
             scope = ("resource", "mode", "source_fingerprint", "date_from", "date_to", "total_days")
             if not row or row[0] != "inventory" or any(row[1].get(k) != progress[k] for k in scope):
@@ -81,13 +86,14 @@ def prepare_run(
             ):
                 raise SyncError("invoice_history_invalid_checkpoint")
             db.execute(
-                "UPDATE chaika.sync_runs SET status='running',finished_at=NULL,error_code=NULL "
+                f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='running',finished_at=NULL,"
+                f"error_code=NULL "
                 "WHERE id=%s",
                 (run_id,),
             )
         else:
             db.execute(
-                "INSERT INTO chaika.sync_runs(id,job,status,counts) "
+                f"INSERT INTO {ANALYTICS_SCHEMA}.sync_runs(id,job,status,counts) "
                 "VALUES(%s,'inventory','running',%s)",
                 (run_id, Jsonb(progress)),
             )
@@ -130,7 +136,7 @@ def publish_invoices(db, snapshot: dict, day: date) -> None:
 
     upsert_rows(db, RESOURCE, header_fields, ["source_id", "id"], headers())
     db.execute(
-        "UPDATE chaika.incoming_invoice_items SET present_in_latest=false "
+        f"UPDATE {ANALYTICS_SCHEMA}.incoming_invoice_items SET present_in_latest=false "
         "WHERE source_id=%s AND document_id=ANY(%s::uuid[])",
         (source_id, [r["id"] for r in parents]),
     )
@@ -202,7 +208,7 @@ def commit_day(db, run_id: UUID, progress: dict, snapshot: dict) -> dict:
         else:
             raise SyncError("unsupported_history_resource")
         result = db.execute(
-            "UPDATE chaika.sync_runs SET counts=%s WHERE id=%s AND status='running' "
+            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET counts=%s WHERE id=%s AND status='running' "
             "AND counts->>'next_date'=%s",
             (Jsonb(updated), run_id, day.isoformat()),
         )
@@ -300,6 +306,8 @@ def synchronize_histories(
 ) -> list[dict]:
     """Round-robin days under one lock and one shared iiko session."""
     stop = stop if stop is not None else Event()
+    for job in requests:
+        validate_runtime_path(job.output)
     api_url = check_local_api(api_url)
     source = configured_sources(settings)[0]
     if (
@@ -313,19 +321,20 @@ def synchronize_histories(
     if not settings.database_url.get_secret_value():
         raise SyncError("database_not_configured")
     with (
-        psycopg.connect(
+        tenant_connect(
             settings.database_url.get_secret_value(),
             autocommit=True,
             connect_timeout=10,
             application_name="chaika-document-history",
             options="-c statement_timeout=120000",
+            connector=psycopg.connect,
         ) as db,
         reference_lock(db),
-        httpx.Client(base_url=api_url, timeout=180, trust_env=False) as client,
+        collector_client(base_url=api_url, timeout=180, trust_env=False) as client,
     ):
         register_sources(db, [source])
         if not db.execute(
-            "SELECT 1 FROM chaika.sources WHERE id='primary' AND server_type='CHAIN'"
+            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources WHERE id='primary' AND server_type='CHAIN'"
         ).fetchone():
             raise SyncError("reference_sync_required")
         response = client.get("/api/v1/iiko/connections")
@@ -358,7 +367,8 @@ def synchronize_histories(
                     status = "succeeded" if day == end else "running"
                     if status == "succeeded":
                         db.execute(
-                            "UPDATE chaika.sync_runs SET status='succeeded',finished_at=now() "
+                            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='succeeded',"
+                            f"finished_at=now() "
                             "WHERE id=%s",
                             (run_id,),
                         )
@@ -388,7 +398,8 @@ def synchronize_histories(
             job_code = code if status == "failed" else None
             try:
                 db.execute(
-                    "UPDATE chaika.sync_runs SET status=%s,finished_at=coalesce(finished_at,now()),"
+                    f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status=%s,"
+                    f"finished_at=coalesce(finished_at,now()),"
                     "error_code=%s WHERE id=%s",
                     (status, job_code, run_id),
                 )
@@ -433,12 +444,19 @@ def main():
     parser.add_argument(
         "--date-to",
         type=date.fromisoformat,
-        default=datetime.now(ZoneInfo("Europe/Simferopol")).date() - timedelta(days=1),
+        default=datetime.now(
+            ZoneInfo(
+                load_runtime().timezone if load_runtime().mode == "tenant" else "Europe/Simferopol"
+            )
+        ).date()
+        - timedelta(days=1),
     )
     parser.add_argument("--resume-run", type=UUID)
-    parser.add_argument("--api-url", default="http://127.0.0.1:8010")
+    parser.add_argument("--api-url", default=collector_url())
     parser.add_argument(
-        "--output", type=Path, default=BACKEND_DIR / ".local/sync/invoices-latest.json"
+        "--output",
+        type=Path,
+        default=runtime_directory("local", BACKEND_DIR / ".local") / "sync/invoices-latest.json",
     )
     args = parser.parse_args()
     stop = Event()

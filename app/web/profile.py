@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.documents import telegram_link
 from app.documents.service import DocumentService
+from app.tenancy.config import load_runtime
 from app.web.auth import ACCESS_COOKIE, LoginLimiter
 from app.web.repository import Scope
 
@@ -87,6 +88,7 @@ async def change_password(auth, caller_id, token, payload):
 
 def create_profile_router(access, repo):
     router = APIRouter(prefix="/api/profile", tags=["profile"])
+    runtime = getattr(repo, "runtime", load_runtime())
     User = Annotated[Scope, Depends(access)]
     passwords, links = LoginLimiter(5), LoginLimiter(10)
 
@@ -101,6 +103,44 @@ def create_profile_router(access, repo):
         auth = request.app.state.auth
         auth.check_origin(request)
         passwords.check(str(scope.user["id"]))
+        if runtime.mode == "tenant":
+            from app.saas_admin.repository import Problem
+
+            verifier = request.app.state.saas_auth_repository
+            try:
+                result = await run_in_threadpool(
+                    verifier.change_company_password,
+                    str(runtime.company_id),
+                    request.cookies.get("saas_tenant_session", ""),
+                    request.headers.get("x-csrf-token", ""),
+                    payload.current_password.get_secret_value(),
+                    payload.new_password.get_secret_value(),
+                )
+            except Problem as exc:
+                raise HTTPException(exc.status, exc.message) from None
+            outgoing = (
+                response
+                if result["completed"]
+                else JSONResponse(
+                    {
+                        "detail": "Пароль сохранён. Обновление доступа требует повторной проверки.",
+                        "csrf_token": result["csrf_token"],
+                    },
+                    status_code=503,
+                )
+            )
+            outgoing.set_cookie(
+                "saas_tenant_session",
+                result["token"],
+                max_age=8 * 3600,
+                secure=True,
+                httponly=True,
+                samesite="strict",
+                path="/",
+            )
+            if not result["completed"]:
+                return outgoing
+            return {"status": "ok", "csrf_token": result["csrf_token"]}
         session = await change_password(
             auth, scope.user["id"], request.cookies[ACCESS_COOKIE], payload
         )

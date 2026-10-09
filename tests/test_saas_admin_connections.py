@@ -36,6 +36,12 @@ def create(client):
         BASE + "/companies",
         json={
             "name": "Test company",
+            "subscription": {
+                "policy": "plans_v1",
+                "plan_id": "full",
+                "start_date": "2026-01-01",
+                "end_date": "2099-12-31",
+            },
             "slug": "test-one",
             "chain_url": URL,
             "connection_credentials": {"chain": {"login": LOGIN, "password": SECRET}},
@@ -395,6 +401,12 @@ def test_rms_credentials_and_archive_removal(client):
         BASE + "/companies",
         json={
             "name": "RMS company",
+            "subscription": {
+                "policy": "plans_v1",
+                "plan_id": "full",
+                "start_date": "2026-01-01",
+                "end_date": "2099-12-31",
+            },
             "slug": "rms-company",
             "rms": [{"id": rms_id, "label": "Kitchen", "url": URL, "enabled": True}],
             "connection_credentials": {rms_id: {"login": LOGIN, "password": SECRET}},

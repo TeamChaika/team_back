@@ -13,6 +13,10 @@ from psycopg_pool import ConnectionPool
 
 from app.core.config import Settings
 from app.sync_indicator_filters import read_filters
+from app.tenancy.actor import ActorContext
+from app.tenancy.config import load_runtime
+from app.tenancy.connection import configure_connection
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 from app.web.balances import product_suggestions, read_balances
 from app.web.coverage import partial_days
 from app.web.overview import read_overview
@@ -38,6 +42,7 @@ class Scope:
     selected: UUID | tuple[UUID, ...] | None
     store_ids: tuple[UUID, ...]
     rms_ids: tuple[str, ...]
+    actor: ActorContext | None = None
 
     @property
     def warehouse_restricted(self):
@@ -85,6 +90,7 @@ class Repository:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.runtime = load_runtime()
         from app.web.warehouse_sales import WarehouseSales
 
         self.warehouse_sales = WarehouseSales(settings)
@@ -102,6 +108,7 @@ class Repository:
             max_waiting=20,
             timeout=10,
             check=ConnectionPool.check_connection,
+            configure=configure_connection,
             open=False,
             name="chaika-web",
         )
@@ -138,24 +145,30 @@ class Repository:
             # Queue independent reads before fetching: one network round trip, fresh permissions.
             users = db.execute(
                 "SELECT id,display_name,role,sections,is_portal_admin,all_departments,"
-                "password_change_required,warehouse_scope_mode FROM "
-                "chaika.web_users WHERE id=%s AND active",
+                "password_change_required,warehouse_scope_mode"
+                + (
+                    ",active,revision"
+                    if getattr(self, "runtime", load_runtime()).mode == "tenant"
+                    else ""
+                )
+                + " FROM "
+                f"{DB}.web_users WHERE id=%s AND active",
                 (user_id,),
             )
             node_rows = db.execute(
-                "SELECT id,parent_id,name,code,type FROM chaika.corporate_nodes WHERE "
+                f"SELECT id,parent_id,name,code,type FROM {DB}.corporate_nodes WHERE "
                 "source_id='primary'"
             )
             grants = db.execute(
-                "SELECT department_id FROM chaika.web_department_access WHERE user_id=%s "
+                f"SELECT department_id FROM {DB}.web_department_access WHERE user_id=%s "
                 "AND source_id='primary'",
                 (user_id,),
             )
             store_rows = db.execute(
-                "SELECT id,parent_id,name FROM chaika.stores WHERE source_id='primary'"
+                f"SELECT id,parent_id,name FROM {DB}.stores WHERE source_id='primary'"
             )
             rms_rows = db.execute(
-                "SELECT source_id,department_id FROM chaika.rms_bindings WHERE "
+                f"SELECT source_id,department_id FROM {DB}.rms_bindings WHERE "
                 "state='matched' AND chain_source_id='primary'"
             )
             user = users.fetchone()
@@ -180,7 +193,7 @@ class Repository:
                 warehouse_ids = {
                     r["store_id"]
                     for r in db.execute(
-                        "SELECT store_id FROM chaika.web_warehouse_access WHERE user_id=%s "
+                        f"SELECT store_id FROM {DB}.web_warehouse_access WHERE user_id=%s "
                         "AND source_id='primary'",
                         (user_id,),
                     ).fetchall()
@@ -218,11 +231,78 @@ class Repository:
                 rms_ids,
             )
 
+    def actor_scope(self, actor, selected=None):
+        """Platform privileges are explicit; never persist a tenant owner profile."""
+        from app.web.permissions import SECTIONS
+
+        if not isinstance(actor, ActorContext):
+            raise HTTPException(403, "Требуется проверенный субъект компании.")
+        if self.runtime.mode != "tenant" or actor.company_id != self.runtime.company_id:
+            raise HTTPException(403, "Неверная компания авторизации.")
+        if actor.kind != "platform_owner":
+            scope = (
+                self.portal_scope(actor.auth_user_id)
+                if selected is None else self.scope(actor.auth_user_id, selected)
+            )
+            return Scope(
+                {**scope.user, "actor": actor.as_dict()},
+                scope.departments,
+                scope.selected,
+                scope.store_ids,
+                scope.rms_ids,
+                actor,
+            )
+        selection = tuple(
+            sorted(set((selected,) if isinstance(selected, UUID) else selected or ()), key=str)
+        )
+        with self.connection() as db:
+            nodes = db.execute(
+                f"SELECT id,parent_id,name,code,type FROM {DB}.corporate_nodes "
+                "WHERE source_id='primary'"
+            ).fetchall()
+            stores = db.execute(
+                f"SELECT id,parent_id,name FROM {DB}.stores WHERE source_id='primary'"
+            ).fetchall()
+            rms = db.execute(
+                f"SELECT source_id,department_id FROM {DB}.rms_bindings "
+                "WHERE state='matched' AND chain_source_id='primary'"
+            ).fetchall()
+        departments = tuple(
+            sorted(
+                (n for n in nodes if n["type"] in {"DEPARTMENT", "CENTRALSTORE", "MANUFACTURE"}),
+                key=lambda n: n["name"] or "",
+            )
+        )
+        allowed = {n["id"] for n in departments}
+        if not set(selection).issubset(allowed):
+            raise HTTPException(403, "Нет выбранного ресторана в компании.")
+        visible = set(selection) if selection else allowed
+        parents = {n["id"]: n["parent_id"] for n in nodes + stores}
+        user = {
+            "id": actor.auth_user_id,
+            "display_name": actor.display_name,
+            "role": "owner",
+            "sections": list(SECTIONS),
+            "is_portal_admin": True,
+            "all_departments": True,
+            "password_change_required": False,
+            "warehouse_scope_mode": "all",
+            "actor": actor.as_dict(),
+        }
+        return Scope(
+            user,
+            departments,
+            selection[0] if len(selection) == 1 else selection or None,
+            tuple(s["id"] for s in stores if has_store_scope(s["id"], parents, visible)),
+            tuple(r["source_id"] for r in rms if r["department_id"] in visible),
+            actor,
+        )
+
     def resolve_login_email(self, candidates: tuple[str, ...]) -> str:
         # Never merge accounts or choose one silently when phone aliases collide.
         with self.connection() as db:
             matches = db.execute(
-                "SELECT email FROM chaika.portal_identities WHERE lower(email)=ANY(%s) LIMIT 2",
+                f"SELECT email FROM {DB}.portal_identities WHERE lower(email)=ANY(%s) LIMIT 2",
                 (list(candidates),),
             ).fetchall()
         if len(matches) > 1:
@@ -236,8 +316,14 @@ class Repository:
         with self.connection() as db:
             user = db.execute(
                 "SELECT id,display_name,role,sections,is_portal_admin,all_departments,"
-                "password_change_required,warehouse_scope_mode FROM "
-                "chaika.web_users WHERE id=%s AND active",
+                "password_change_required,warehouse_scope_mode"
+                + (
+                    ",active,revision"
+                    if getattr(self, "runtime", load_runtime()).mode == "tenant"
+                    else ""
+                )
+                + " FROM "
+                f"{DB}.web_users WHERE id=%s AND active",
                 (user_id,),
             ).fetchone()
         if not user:
@@ -253,7 +339,7 @@ class Repository:
         ) and not user.get("all_departments", user["role"] == "owner"):
             with self.connection() as db:
                 analytics_grant = db.execute(
-                    "SELECT department_id FROM chaika.web_department_access WHERE user_id=%s "
+                    f"SELECT department_id FROM {DB}.web_department_access WHERE user_id=%s "
                     "AND source_id='primary' LIMIT 1",
                     (user_id,),
                 ).fetchone()
@@ -267,7 +353,7 @@ class Repository:
         with self._pool.connection() as db, db.transaction():
             db.execute("SET LOCAL statement_timeout='15000ms'")
             changed = db.execute(
-                "UPDATE chaika.web_users SET password_change_required=false,"
+                f"UPDATE {DB}.web_users SET password_change_required=false,"
                 "password_changed_at=now() WHERE id=%s AND active RETURNING id",
                 (user_id,),
             ).fetchone()
@@ -278,7 +364,7 @@ class Repository:
         with self.connection() as db:
             return serial(
                 db.execute(
-                    "SELECT id,display_name FROM chaika.web_users WHERE active ORDER BY "
+                    f"SELECT id,display_name FROM {DB}.web_users WHERE active ORDER BY "
                     "display_name,id"
                 ).fetchall()
             )
@@ -295,11 +381,11 @@ class Repository:
             )
         with self.connection() as db:
             dates = db.execute(
-                "SELECT business_date FROM chaika.sales_report_days WHERE "
+                f"SELECT business_date FROM {DB}.sales_report_days WHERE "
                 "source_id='primary' ORDER BY business_date DESC"
             )
             balances = db.execute(
-                "SELECT accounting_timestamp FROM chaika.store_balance_reports WHERE "
+                f"SELECT accounting_timestamp FROM {DB}.store_balance_reports WHERE "
                 "source_id='primary' ORDER BY accounting_timestamp DESC"
             )
             dates, balances = dates.fetchall(), balances.fetchall()
@@ -344,9 +430,9 @@ class Repository:
         else:
             with self.connection() as db:
                 coverage = db.execute(
-                    "SELECT d.business_date,s.checks,r.observed_at FROM chaika.sales_report_days d "
-                    "JOIN chaika.sales_report_sets s ON s.id=d.current_set_id "
-                    "JOIN chaika.sales_reports r ON r.set_id=d.current_set_id "
+                    f"SELECT d.business_date,s.checks,r.observed_at FROM {DB}.sales_report_days d "
+                    f"JOIN {DB}.sales_report_sets s ON s.id=d.current_set_id "
+                    f"JOIN {DB}.sales_reports r ON r.set_id=d.current_set_id "
                     "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s "
                     "AND r.kind=%s ORDER BY d.business_date",
                     (start, end, kind),
@@ -357,11 +443,11 @@ class Repository:
                     "x.ordinal,x.department_id,n.name AS department,"
                     "x.revenue,x.cost,x.checks,x.guests,"
                     "x.discount,x.return_sum,x.quantity,x.dimensions "
-                    "FROM chaika.sales_report_days d JOIN chaika.sales_report_sets s ON "
+                    f"FROM {DB}.sales_report_days d JOIN {DB}.sales_report_sets s ON "
                     "s.id=d.current_set_id "
-                    "JOIN chaika.sales_reports r ON r.set_id=s.id JOIN "
-                    "chaika.sales_report_rows x ON x.report_id=r.id "
-                    "LEFT JOIN chaika.corporate_nodes n ON n.source_id=d.source_id AND "
+                    f"JOIN {DB}.sales_reports r ON r.set_id=s.id JOIN "
+                    f"{DB}.sales_report_rows x ON x.report_id=r.id "
+                    f"LEFT JOIN {DB}.corporate_nodes n ON n.source_id=d.source_id AND "
                     "n.id=x.department_id "
                     "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s "
                     "AND r.kind=%s "
@@ -546,8 +632,8 @@ class Repository:
             items = "incoming_invoice_items" if incoming else "outgoing_invoice_items"
             counterparty = "supplier_id" if incoming else "counteragent_id"
             base = (
-                f"chaika.{table} t LEFT JOIN chaika.stores s ON s.source_id=t.source_id "
-                "AND s.id=t.default_store_id LEFT JOIN chaika.counteragents c ON "
+                f"{DB}.{table} t LEFT JOIN {DB}.stores s ON s.source_id=t.source_id "
+                f"AND s.id=t.default_store_id LEFT JOIN {DB}.counteragents c ON "
                 f"c.source_id=t.source_id AND c.id=t.{counterparty}"
             )
             fields = (
@@ -564,9 +650,9 @@ class Repository:
             if not scope.unrestricted:
                 guard = (
                     "(t.default_store_id=ANY(%s::uuid[]) OR EXISTS(SELECT 1 FROM "
-                    f"chaika.{items} i WHERE i.source_id=t.source_id AND i.document_id=t.id "
+                    f"{DB}.{items} i WHERE i.source_id=t.source_id AND i.document_id=t.id "
                     "AND i.present_in_latest AND i.store_id=ANY(%s::uuid[]))) AND NOT "
-                    f"EXISTS(SELECT 1 FROM chaika.{items} i WHERE i.source_id=t.source_id AND "
+                    f"EXISTS(SELECT 1 FROM {DB}.{items} i WHERE i.source_id=t.source_id AND "
                     "i.document_id=t.id AND i.present_in_latest AND NOT "
                     "COALESCE(COALESCE(i.store_id,t.default_store_id)=ANY(%s::uuid[]),false))"
                 )
@@ -578,7 +664,7 @@ class Repository:
             table = "internal_transfers" if transfer else "writeoffs"
             store = "store_from_id" if transfer else "store_id"
             base = (
-                f"chaika.{table} t LEFT JOIN chaika.stores s ON s.source_id=t.source_id "
+                f"{DB}.{table} t LEFT JOIN {DB}.stores s ON s.source_id=t.source_id "
                 f"AND s.id=t.{store}"
             )
             fields = (
@@ -594,14 +680,14 @@ class Repository:
             if not transfer:
                 fields += (
                     ", (SELECT CASE WHEN count(*)>0 AND count(i.cost)=count(*) "
-                    "THEN sum(i.cost) END FROM chaika.writeoff_items i "
+                    f"THEN sum(i.cost) END FROM {DB}.writeoff_items i "
                     "WHERE i.source_id=t.source_id AND i.document_id=t.id "
                     "AND i.present_in_latest) AS writeoff_sum"
                 )
                 columns.append(("writeoff_sum", "Сумма списания, ₽"))
             if transfer:
                 base += (
-                    " LEFT JOIN chaika.stores dst ON dst.source_id=t.source_id AND "
+                    f" LEFT JOIN {DB}.stores dst ON dst.source_id=t.source_id AND "
                     "dst.id=t.store_to_id"
                 )
                 fields += ",dst.name AS destination"
@@ -616,9 +702,9 @@ class Repository:
             search = "concat_ws(' ',t.document_number,s.name)"
         elif resource == "products":
             base = (
-                "chaika.products t LEFT JOIN chaika.product_groups g ON "
+                f"{DB}.products t LEFT JOIN {DB}.product_groups g ON "
                 "g.source_id=t.source_id AND g.id=t.group_id LEFT JOIN "
-                "chaika.measure_units u ON u.source_id=t.source_id AND "
+                f"{DB}.measure_units u ON u.source_id=t.source_id AND "
                 "u.id=t.main_unit_id"
             )
             fields = (
@@ -638,7 +724,7 @@ class Repository:
             search = "concat_ws(' ',t.name,t.code,t.num,g.name)"
         elif resource == "charts":
             base = (
-                "chaika.assembly_charts t LEFT JOIN chaika.products p ON "
+                f"{DB}.assembly_charts t LEFT JOIN {DB}.products p ON "
                 "p.source_id=t.source_id AND p.id=t.product_id"
             )
             fields = (
@@ -656,10 +742,10 @@ class Repository:
             search = "concat_ws(' ',p.name,t.product_id)"
         elif resource == "cash-shifts":
             base = (
-                "chaika.cash_shifts t LEFT JOIN chaika.corporate_nodes n ON "
+                f"{DB}.cash_shifts t LEFT JOIN {DB}.corporate_nodes n ON "
                 "n.source_id=t.source_id AND n.id=t.department_id "
-                "LEFT JOIN chaika.employees m ON m.source_id=t.source_id AND m.id=t.manager_id "
-                "LEFT JOIN chaika.employees e ON e.source_id=t.source_id "
+                f"LEFT JOIN {DB}.employees m ON m.source_id=t.source_id AND m.id=t.manager_id "
+                f"LEFT JOIN {DB}.employees e ON e.source_id=t.source_id "
                 "AND e.id=t.responsible_user_id"
             )
             fields = (
@@ -691,7 +777,7 @@ class Repository:
             search = "concat_ws(' ',t.session_number,n.name,t.point_of_sale_name,m.name,e.name)"
         elif resource == "employees":
             base = (
-                "chaika.employees t LEFT JOIN chaika.employee_roles r ON "
+                f"{DB}.employees t LEFT JOIN {DB}.employee_roles r ON "
                 "r.source_id=t.source_id AND r.id=t.main_role_id"
             )
             fields = (
@@ -843,7 +929,7 @@ class Repository:
                 order = ",".join("i." + k for k in order.split(","))
                 items = db.execute(
                     "SELECT i.product_id,COALESCE(p.name,i.product_id::text) AS product,"
-                    f"{fields} FROM chaika.{table} i LEFT JOIN chaika.products p ON "
+                    f"{fields} FROM {DB}.{table} i LEFT JOIN {DB}.products p ON "
                     "p.source_id=i.source_id AND p.id=i.product_id WHERE "
                     f"i.source_id='primary' AND i.{parent}=%s AND i.present_in_latest ORDER BY "
                     f"{order} LIMIT 2001",
@@ -867,21 +953,21 @@ class Repository:
                 "cash-shifts": "cash_shifts",
             }.get(resource, resource)
             provenance = db.execute(
-                f"SELECT r.id,r.resource,r.observed_at,r.sha256 FROM chaika.{parent_table} "
-                "t JOIN chaika.raw_snapshots r ON r.id=t.last_snapshot_id WHERE "
+                f"SELECT r.id,r.resource,r.observed_at,r.sha256 FROM {DB}.{parent_table} "
+                f"t JOIN {DB}.raw_snapshots r ON r.id=t.last_snapshot_id WHERE "
                 "t.source_id='primary' AND t.id=%s",
                 (item_id,),
             ).fetchone()
             if resource == "charts":
                 extra = db.execute(
                     "SELECT details->>'technology_description' AS technology FROM "
-                    "chaika.assembly_charts WHERE source_id='primary' AND id=%s",
+                    f"{DB}.assembly_charts WHERE source_id='primary' AND id=%s",
                     (item_id,),
                 ).fetchone()
                 header.update(extra)
             if resource == "cash-shifts":
                 evidence = db.execute(
-                    "SELECT id,observed_at,sha256 FROM chaika.raw_snapshots WHERE id=%s",
+                    f"SELECT id,observed_at,sha256 FROM {DB}.raw_snapshots WHERE id=%s",
                     (header["groups_snapshot_id"],),
                 ).fetchone()
                 provenance.update(
@@ -913,7 +999,8 @@ class Repository:
 
     def events(self, scope, start, end, q="", offset=0):
         require_warehouse_section(scope, "events")
-        params = [list(scope.rms_ids), start, end]
+        zone = self.runtime.timezone if self.runtime.mode == "tenant" else "Europe/Simferopol"
+        params = [list(scope.rms_ids), start, zone, end, zone]
         extra = ""
         if q:
             extra = " AND e.order_number=%s"
@@ -924,16 +1011,16 @@ class Repository:
                 "COALESCE(t.label,e.event_type) AS event,n.name AS department,e.event_sum,"
                 "e.order_sum_after_discount,"
                 "COALESCE(emp.name,e.actor_id::text) AS actor,count(*) OVER() AS total "
-                "FROM chaika.rms_events e LEFT JOIN chaika.rms_event_types t ON "
+                f"FROM {DB}.rms_events e LEFT JOIN {DB}.rms_event_types t ON "
                 "t.source_id=e.source_id AND t.id=e.event_type "
-                "JOIN chaika.rms_bindings b ON b.source_id=e.source_id LEFT JOIN "
-                "chaika.corporate_nodes n ON n.source_id=b.chain_source_id AND "
+                f"JOIN {DB}.rms_bindings b ON b.source_id=e.source_id LEFT JOIN "
+                f"{DB}.corporate_nodes n ON n.source_id=b.chain_source_id AND "
                 "n.id=b.department_id "
-                "LEFT JOIN chaika.employees emp ON emp.source_id='primary' AND emp.id=e.actor_id "
+                f"LEFT JOIN {DB}.employees emp ON emp.source_id='primary' AND emp.id=e.actor_id "
                 "WHERE e.source_id=ANY(%s::text[]) AND e.order_id IS NOT NULL "
                 "AND e.order_number IS NOT NULL AND "
-                "e.occurred_at>=(%s::date::timestamp AT TIME ZONE 'Europe/Simferopol') "
-                "AND e.occurred_at<((%s::date+1)::timestamp AT TIME ZONE 'Europe/Simferopol')"
+                "e.occurred_at>=(%s::date::timestamp AT TIME ZONE %s) "
+                "AND e.occurred_at<((%s::date+1)::timestamp AT TIME ZONE %s)"
                 + extra
                 + " ORDER BY e.occurred_at DESC,e.id LIMIT 50 OFFSET %s",
                 [*params, offset],
@@ -980,8 +1067,8 @@ class Repository:
             coverage = db.execute(
                 "SELECT d.source_id,n.name AS restaurant,min(d.event_date) AS date_from,"
                 "max(d.event_date) AS date_to,count(*) AS days,max(d.observed_at) AS "
-                "observed_at FROM chaika.rms_event_days d JOIN chaika.rms_bindings b ON "
-                "b.source_id=d.source_id JOIN chaika.corporate_nodes n ON "
+                f"observed_at FROM {DB}.rms_event_days d JOIN {DB}.rms_bindings b ON "
+                f"b.source_id=d.source_id JOIN {DB}.corporate_nodes n ON "
                 "n.source_id=b.chain_source_id AND n.id=b.department_id WHERE "
                 "d.source_id=ANY(%s::text[]) GROUP BY d.source_id,n.name ORDER BY n.name",
                 (list(scope.rms_ids),),
@@ -992,7 +1079,7 @@ class Repository:
                 runs = db.execute(
                     "SELECT job,status,started_at,finished_at,error_code,counts->>'resource' "
                     "AS resource,counts->>'completed_through' AS completed_through FROM "
-                    "chaika.sync_runs ORDER BY started_at DESC LIMIT 20"
+                    f"{DB}.sync_runs ORDER BY started_at DESC LIMIT 20"
                 ).fetchall()
                 if self.settings.sync_enabled:
                     from app.scheduler import JOBS
@@ -1000,7 +1087,7 @@ class Repository:
                     latest = db.execute(
                         "SELECT DISTINCT ON (job) job,status,slot,started_at,finished_at,"
                         "error_code,"
-                        "next_retry_at,attempts FROM chaika.scheduled_sync_runs "
+                        f"next_retry_at,attempts FROM {DB}.scheduled_sync_runs "
                         "ORDER BY job,slot DESC"
                     ).fetchall()
                     by_key = {r["job"]: r for r in latest}
@@ -1013,7 +1100,7 @@ class Repository:
                     active = {
                         row["job"]
                         for row in db.execute(
-                            "SELECT DISTINCT job FROM chaika.scheduled_sync_runs "
+                            f"SELECT DISTINCT job FROM {DB}.scheduled_sync_runs "
                             "WHERE status='running'"
                         ).fetchall()
                     }
@@ -1037,7 +1124,7 @@ class Repository:
             observations = (
                 db.execute(
                     "SELECT resource,max(observed_at) AS observed_at FROM "
-                    "chaika.raw_snapshots WHERE source_id='primary' GROUP BY resource ORDER "
+                    f"{DB}.raw_snapshots WHERE source_id='primary' GROUP BY resource ORDER "
                     "BY resource"
                 ).fetchall()
                 if scope.unrestricted
@@ -1046,13 +1133,13 @@ class Repository:
             cash_days = (
                 db.execute(
                     "SELECT d.open_day AS date,d.row_count AS shifts,d.observed_at "
-                    "FROM chaika.cash_shift_days d WHERE d.source_id='primary' ORDER BY d.open_day"
+                    f"FROM {DB}.cash_shift_days d WHERE d.source_id='primary' ORDER BY d.open_day"
                 ).fetchall()
                 if scope.unrestricted
                 else db.execute(
                     "SELECT open_date::date AS date,count(*) AS shifts,"
                     "max(last_seen_at) AS observed_at "
-                    "FROM chaika.cash_shifts WHERE source_id='primary' AND mapping_state='matched' "
+                    f"FROM {DB}.cash_shifts WHERE source_id='primary' AND mapping_state='matched' "
                     "AND department_id=ANY(%s::uuid[]) "
                     "GROUP BY open_date::date ORDER BY open_date::date",
                     (scope.ids,),

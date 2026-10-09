@@ -10,6 +10,7 @@ from uuid import UUID
 from app.core.config import BACKEND_DIR, Settings
 from app.sync_invoices import HistoryRequest, synchronize_histories
 from app.sync_references import SyncError
+from app.tenancy.io import collector_url, runtime_directory
 
 
 def main():
@@ -26,7 +27,7 @@ def main():
         choices=["writeoffs", "invoices", "outgoing", "transfers"],
         default=["writeoffs", "invoices"],
     )
-    parser.add_argument("--api-url", default="http://127.0.0.1:8010")
+    parser.add_argument("--api-url", default=collector_url())
     args = parser.parse_args()
     stop = Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -42,7 +43,9 @@ def main():
                     {"invoices": "incoming_invoices", "outgoing": "outgoing_invoices"}.get(
                         key, key
                     ),
-                    BACKEND_DIR / f".local/sync/{key}-latest.json",
+                    runtime_directory("local", BACKEND_DIR / ".local")
+                    / "sync"
+                    / f"{key}-latest.json",
                     {
                         "writeoffs": args.writeoff_run,
                         "invoices": args.invoice_run,

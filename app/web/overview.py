@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal, localcontext
 
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 from app.web.coverage import partial_days
 
 FIELDS = ("revenue", "cost", "checks", "guests")
@@ -195,9 +196,9 @@ def read_overview(db, scope, start: date, end: date, grain: str, *, live_bundle=
     require_department_report(scope)
     previous_start = start - timedelta(days=(end - start).days + 1)
     base = (
-        " FROM chaika.sales_report_days d "
-        "JOIN chaika.sales_report_sets s ON s.id=d.current_set_id "
-        "JOIN chaika.sales_reports r ON r.set_id=s.id "
+        f" FROM {DB}.sales_report_days d "
+        f"JOIN {DB}.sales_report_sets s ON s.id=d.current_set_id "
+        f"JOIN {DB}.sales_reports r ON r.set_id=s.id "
     )
     bounds = "d.source_id='primary' AND d.business_date BETWEEN %s AND %s"
     live_day = date.fromisoformat(live_bundle["manifest"]["business_date"]) if live_bundle else None
@@ -213,7 +214,7 @@ def read_overview(db, scope, start: date, end: date, grain: str, *, live_bundle=
     daily = db.execute(
         "SELECT d.business_date,x.department_id,x.revenue,x.cost,x.checks,x.guests"
         + base
-        + "JOIN chaika.sales_report_rows x ON x.report_id=r.id WHERE "
+        + f"JOIN {DB}.sales_report_rows x ON x.report_id=r.id WHERE "
         + bounds
         + " AND r.kind='daily' AND x.department_id=ANY(%s::uuid[]) ORDER BY d.business_date",
         (previous_start, end, live_day, live_day, scope.ids),
@@ -233,7 +234,7 @@ def read_overview(db, scope, start: date, end: date, grain: str, *, live_bundle=
         "NULLIF(x.dimensions->>'DishId','') AS dish_id,x.dimensions->>'DishName' AS dish_name,"
         "x.revenue,x.quantity"
         + base
-        + "JOIN chaika.sales_report_rows x ON x.report_id=r.id WHERE "
+        + f"JOIN {DB}.sales_report_rows x ON x.report_id=r.id WHERE "
         + bounds
         + " AND r.kind='dishes' AND x.department_id=ANY(%s::uuid[])), grouped AS ("
         "SELECT is_current,dish_id,"

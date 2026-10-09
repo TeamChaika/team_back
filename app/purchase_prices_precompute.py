@@ -10,6 +10,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.core.config import Settings
+from app.tenancy.connection import tenant_connect
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 
 ALGORITHM_VERSION = 1
 LOCK_ID = 7623011071900
@@ -33,7 +35,7 @@ def source_revision(db):
         "max(finished_at) FILTER (WHERE status='succeeded') AS finished_at,"
         "md5(string_agg(id::text||':'||(counts->>'last_snapshot_id'),',' ORDER BY id) "
         "FILTER (WHERE counts->>'resource'='incoming_invoices')) AS invoice_checkpoints "
-        "FROM chaika.sync_runs WHERE job='inventory'"
+        f"FROM {DB}.sync_runs WHERE job='inventory'"
     ).fetchone()
     return dict(
         version=ALGORITHM_VERSION,
@@ -50,9 +52,9 @@ def publish_prepared(db, revision, *, stop=None):
     check_stop(stop)
     generation_id, prepared_at = uuid4(), datetime.now(UTC)
     with db.transaction():
-        db.execute("DELETE FROM chaika.purchase_prices_prepared WHERE source_id='primary'")
+        db.execute(f"DELETE FROM {DB}.purchase_prices_prepared WHERE source_id='primary'")
         db.execute(
-            "INSERT INTO chaika.purchase_prices_prepared(id,source_id,prepared_at,revision) "
+            f"INSERT INTO {DB}.purchase_prices_prepared(id,source_id,prepared_at,revision) "
             "VALUES (%s,'primary',%s,%s)",
             (generation_id, prepared_at, Jsonb(revision)),
         )
@@ -62,7 +64,7 @@ def publish_prepared(db, revision, *, stop=None):
         # stores are known/allowed, an explicit store or its default also satisfies
         # resource_query's anchor. No independent default-store check is necessary.
         db.execute(
-            "INSERT INTO chaika.purchase_prices_prepared_receipts "
+            f"INSERT INTO {DB}.purchase_prices_prepared_receipts "
             "(generation_id,required_store_ids,has_unknown_store,product_id,unit_id,linked,"
             "date,amount,sum,valid) "
             "WITH signatures AS MATERIALIZED ("
@@ -98,8 +100,9 @@ def publish_prepared(db, revision, *, stop=None):
 def ensure_prepared(settings, stop=None):
     """Background entry point. Skip heavy work until published inventory changes."""
     check_stop(stop)
-    with psycopg.connect(
+    with tenant_connect(
         settings.database_url.get_secret_value(),
+        connector=psycopg.connect,
         autocommit=True,
         connect_timeout=10,
         row_factory=dict_row,
@@ -114,7 +117,7 @@ def ensure_prepared(settings, stop=None):
                 return dict(status="busy")
             revision = source_revision(db)
             current = db.execute(
-                "SELECT id,revision,prepared_at FROM chaika.purchase_prices_prepared "
+                f"SELECT id,revision,prepared_at FROM {DB}.purchase_prices_prepared "
                 "WHERE source_id='primary'"
             ).fetchone()
             if current and current["revision"] == revision:

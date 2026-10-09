@@ -24,3 +24,25 @@ CREATE TABLE IF NOT EXISTS restcontrol.auth_provisioning (
 CREATE TABLE IF NOT EXISTS restcontrol.tenant_events (
  id uuid PRIMARY KEY,company_id uuid NOT NULL REFERENCES restcontrol.companies(id),
  admin_id uuid NOT NULL REFERENCES restcontrol.memberships(id),action text NOT NULL,created_at text NOT NULL);
+
+-- Opaque, company-bound delegated handles. Refresh tokens stay in central sessions.
+CREATE TABLE IF NOT EXISTS restcontrol.platform_sso_codes (
+ code_hash text PRIMARY KEY,
+ parent_hash text NOT NULL REFERENCES restcontrol.sessions(token_hash) ON DELETE CASCADE,
+ company_id uuid NOT NULL REFERENCES restcontrol.companies(id),
+ frontend_origin text NOT NULL, api_origin text NOT NULL,
+ state text NOT NULL, nonce text NOT NULL, challenge text NOT NULL,
+ expires double precision NOT NULL
+);
+CREATE TABLE IF NOT EXISTS restcontrol.platform_tenant_sessions (
+ token_hash text PRIMARY KEY,
+ parent_hash text NOT NULL REFERENCES restcontrol.sessions(token_hash) ON DELETE CASCADE,
+ company_id uuid NOT NULL REFERENCES restcontrol.companies(id),
+ frontend_origin text NOT NULL, api_origin text NOT NULL,
+ csrf text NOT NULL, expires double precision NOT NULL
+);
+CREATE TABLE IF NOT EXISTS restcontrol.platform_tenant_events (
+ id uuid PRIMARY KEY, company_id uuid NOT NULL REFERENCES restcontrol.companies(id),
+ actor_id uuid NOT NULL, actor_name text NOT NULL,
+ action text NOT NULL, object_id text, result text NOT NULL, created_at text NOT NULL
+);

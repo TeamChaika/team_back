@@ -6,6 +6,7 @@ from decimal import ROUND_HALF_UP, Decimal, localcontext
 
 from fastapi import HTTPException
 
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 from app.web.coverage import ZONE, partial_days
 from app.web.purchase_prices import read_purchase_prices
 
@@ -112,9 +113,9 @@ def load_graphs(db, targets, day, *, limit=20000, compact=False):
         ""
         if compact
         else (
-            "LEFT JOIN chaika.products child "
+            f"LEFT JOIN {DB}.products child "
             "ON child.source_id='primary' AND child.id=a.ingredient_id "
-            "LEFT JOIN chaika.measure_units cu "
+            f"LEFT JOIN {DB}.measure_units cu "
             "ON cu.source_id='primary' AND cu.id=child.main_unit_id"
         )
     )
@@ -126,7 +127,7 @@ def load_graphs(db, targets, day, *, limit=20000, compact=False):
     )
     rows = db.execute(
         f"""WITH RECURSIVE charts AS MATERIALIZED (
-            SELECT c.* FROM chaika.assembly_chart_scopes s JOIN chaika.assembly_charts c
+            SELECT c.* FROM {DB}.assembly_chart_scopes s JOIN {DB}.assembly_charts c
                 ON (c.source_id,c.id)=(s.source_id,s.chart_id)
             WHERE s.source_id='primary' AND s.business_date=%s AND s.present_in_latest
                 AND c.date_from<=%s AND (c.date_to IS NULL OR c.date_to>%s)
@@ -134,7 +135,7 @@ def load_graphs(db, targets, day, *, limit=20000, compact=False):
             SELECT c.id AS chart_id,c.product_id,c.date_from,c.date_to,c.assembled_amount,
                 {chart_details} AS chart_details,i.id AS item_id,i.product_id AS ingredient_id,
                 i.amount_in,{item_details} AS item_details
-            FROM charts c JOIN chaika.assembly_chart_items i
+            FROM charts c JOIN {DB}.assembly_chart_items i
                 ON (i.source_id,i.chart_id)=(c.source_id,c.id)
             WHERE i.present_in_latest
         ), chart_counts AS (
@@ -145,8 +146,8 @@ def load_graphs(db, targets, day, *, limit=20000, compact=False):
         ) SELECT {projection}
             FROM active a JOIN ancestors f ON f.id=a.ingredient_id
             JOIN chart_counts cc ON cc.product_id=a.product_id
-            LEFT JOIN chaika.products p ON p.source_id='primary' AND p.id=a.product_id
-            LEFT JOIN chaika.measure_units u ON u.source_id='primary' AND u.id=p.main_unit_id
+            LEFT JOIN {DB}.products p ON p.source_id='primary' AND p.id=a.product_id
+            LEFT JOIN {DB}.measure_units u ON u.source_id='primary' AND u.id=p.main_unit_id
             {child_joins} {grouping} LIMIT %s""",
         (day, day, day, list(targets), limit + 1),
     ).fetchall()
@@ -356,15 +357,15 @@ def read_purchase_impact(
     if store_id is not None and department not in scope.ids:
         raise HTTPException(422, "Склад не сопоставлен с доступным заведением.")
     product = db.execute(
-        "SELECT p.id,p.main_unit_id,u.name AS unit FROM chaika.products p "
-        "LEFT JOIN chaika.measure_units u ON u.source_id=p.source_id AND u.id=p.main_unit_id "
+        f"SELECT p.id,p.main_unit_id,u.name AS unit FROM {DB}.products p "
+        f"LEFT JOIN {DB}.measure_units u ON u.source_id=p.source_id AND u.id=p.main_unit_id "
         "WHERE p.source_id='primary' AND p.id=%s",
         (product_id,),
     ).fetchone()
     if not product:
         raise HTTPException(422, "Товар отсутствует в номенклатуре.")
     recipe_day = db.execute(
-        "SELECT max(business_date) AS day FROM chaika.assembly_chart_scopes "
+        f"SELECT max(business_date) AS day FROM {DB}.assembly_chart_scopes "
         "WHERE source_id='primary' AND business_date<=%s",
         (datetime.now(ZONE).date(),),
     ).fetchone()["day"]
@@ -372,9 +373,9 @@ def read_purchase_impact(
     selling_ids = [
         r["department_id"]
         for r in db.execute(
-            "SELECT DISTINCT x.department_id FROM chaika.sales_report_days d "
-            "JOIN chaika.sales_reports r ON r.set_id=d.current_set_id "
-            "JOIN chaika.sales_report_rows x ON x.report_id=r.id "
+            f"SELECT DISTINCT x.department_id FROM {DB}.sales_report_days d "
+            f"JOIN {DB}.sales_reports r ON r.set_id=d.current_set_id "
+            f"JOIN {DB}.sales_report_rows x ON x.report_id=r.id "
             "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s "
             "AND r.kind='dishes' AND x.department_id=ANY(%s::uuid[])",
             (start, end, [d["id"] for d in scope.departments]),
@@ -392,21 +393,21 @@ def read_purchase_impact(
         else analysis_scope(scope, department, selling_ids, analysis_department_id, all_departments)
     )
     coverage = db.execute(
-        "SELECT d.business_date,r.observed_at,s.checks FROM chaika.sales_report_days d "
-        "JOIN chaika.sales_report_sets s ON s.id=d.current_set_id "
-        "JOIN chaika.sales_reports r ON r.set_id=s.id AND r.kind='dishes' "
+        f"SELECT d.business_date,r.observed_at,s.checks FROM {DB}.sales_report_days d "
+        f"JOIN {DB}.sales_report_sets s ON s.id=d.current_set_id "
+        f"JOIN {DB}.sales_reports r ON r.set_id=s.id AND r.kind='dishes' "
         "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s",
         (start, end),
     ).fetchall()
     sales = db.execute(
-        """SELECT x.department_id,x.dimensions->>'DishId' AS dish_id,
+        f"""SELECT x.department_id,x.dimensions->>'DishId' AS dish_id,
             max(x.dimensions->>'DishName') AS dish,sum(x.quantity) AS quantity,
             bool_or(x.quantity IS NULL OR x.quantity<0) AS invalid_quantity,
             jsonb_agg(jsonb_build_object('date',d.business_date,'report_id',r.id,
                 'ordinal',x.ordinal,'quantity',x.quantity::text)
                 ORDER BY d.business_date,x.ordinal) AS sales_sources
-        FROM chaika.sales_report_days d JOIN chaika.sales_reports r ON r.set_id=d.current_set_id
-        JOIN chaika.sales_report_rows x ON x.report_id=r.id
+        FROM {DB}.sales_report_days d JOIN {DB}.sales_reports r ON r.set_id=d.current_set_id
+        JOIN {DB}.sales_report_rows x ON x.report_id=r.id
         WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s
             AND r.kind='dishes' AND x.department_id=ANY(%s::uuid[])
             AND x.dimensions->>'DishId'=ANY(%s::text[]) GROUP BY 1,2""",

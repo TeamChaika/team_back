@@ -7,7 +7,10 @@ from datetime import UTC, datetime
 
 from psycopg.types.json import Jsonb
 
+from app.documents.actors import audit, display_user, local_id, owner_actor, same_actor
+from app.documents.actors import snapshot as actor_snapshot
 from app.documents.catalog import products
+from app.documents.context import local_zone, lock_resource, runtime_of
 from app.documents.costs import (
     displayed_estimate,
     estimate,
@@ -39,7 +42,7 @@ def has_receipt_approver(db, store_id):
             "WHERE g.kind='waybill' AND g.store_id=%s AND g.actions @> '[\"edit\"]'::jsonb "
             "AND u.is_active AND ((l.supabase_id IS NULL AND u.telegram_id IS NOT NULL) "
             "OR (p.active AND p.sections @> '[\"transfers\"]'::jsonb))"
-            + warehouse_grant_guard("portal_documents_grant", alias="g")
+            + warehouse_grant_guard("portal_documents_grant", alias="g", db=db)
             + " LIMIT 1",
             (store_id,),
         ).fetchone()
@@ -97,12 +100,16 @@ def validate_items(db, rows):
 
 
 def event(db, kind, doc, user_id, action, data=None):
+    value = actor_snapshot(user_id)
+    extra, placeholder = (",actor", ",%s") if value else ("", "")
     db.execute(
         "INSERT INTO portal_documents_event "
-        "(kind,document_id,version,actor_id,action,data,created_at) VALUES "
-        "(%s,%s,%s,%s,%s,%s,now())",
-        (kind, doc["id"], doc["version"], user_id, action, Jsonb(data or {})),
+        f"(kind,document_id,version,actor_id,action,data,created_at{extra}) VALUES "
+        f"(%s,%s,%s,%s,%s,%s,now(){placeholder})",
+        (kind, doc["id"], doc["version"], local_id(user_id), action, Jsonb(data or {}))
+        + ((Jsonb(value),) if value else ()),
     )
+    audit(db, user_id, action, kind, doc["id"], data)
 
 
 def enqueue(db, kind, doc):
@@ -171,7 +178,9 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
     except (ValueError, TypeError):
         invalid()
     with database.connection() as db:
-        db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (str(key),))
+        db.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (lock_resource(db, str(key)),)
+        )
         user = actor(
             db,
             None if telegram else identity,
@@ -183,7 +192,7 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
             "SELECT * FROM portal_documents_operation WHERE id=%s", (key,)
         ).fetchone()
         if previous:
-            if previous["actor_id"] != user["id"] or previous["fingerprint"] != fingerprint:
+            if not same_actor(previous, user["id"]) or previous["fingerprint"] != fingerprint:
                 fail(409, "Этот идентификатор уже использован другим запросом.")
             visible = stores_for(db, user["id"], kind)
             doc = db.execute(
@@ -237,7 +246,11 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
             discrepancy = any(
                 r["amount"] != o["amount"] for r, o in zip(receipt_rows, original, strict=True)
             )
-            if discrepancy and not has_receipt_approver(db, doc["store_id"]):
+            if (
+                discrepancy
+                and not owner_actor(db, user["id"])
+                and not has_receipt_approver(db, doc["store_id"])
+            ):
                 fail(
                     409,
                     "У отправителя нет активного согласующего с правом изменения накладных. "
@@ -255,15 +268,20 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
                 fields[k] != doc[k] for k in ("store_id", "counteragent_id")
             ):
                 invalid("Склады созданной накладной нельзя менять.")
+        actor_value = actor_snapshot(user["id"])
+        extra, placeholder = (",actor", ",%s") if actor_value else ("", "")
         db.execute(
             "INSERT INTO portal_documents_operation "
-            "(id,actor_id,kind,action,document_id,fingerprint,state,result,created_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,'pending','{}',now())",
-            (key, user["id"], kind, action, document_id, fingerprint),
+            f"(id,actor_id,kind,action,document_id,fingerprint,state,result,created_at{extra}) "
+            "VALUES (%s,%s,%s,%s,%s,%s,'pending','{}',now()" + placeholder + ")",
+            (key, local_id(user["id"]), kind, action, document_id, fingerprint)
+            + ((Jsonb(actor_value),) if actor_value else ()),
         )
         if action in {"create", "copy"}:
             if kind == "writeoff":
                 fields["cost_estimate"] = Jsonb(estimate(db, fields["store_id"], rows))
+            if actor_value:
+                fields["created_actor"] = Jsonb(actor_value)
             # Field names come only from validate(), not the request.
             columns = ",".join(fields)
             placeholders = ",".join(["%s"] * len(fields))
@@ -271,7 +289,7 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
                 f"INSERT INTO {parent} "
                 f"({columns},created_by_id,status,version,submission_state,created_at) "
                 f"VALUES ({placeholders},%s,'Created',1,'idle',now()) RETURNING *",
-                (*fields.values(), user["id"]),
+                (*fields.values(), local_id(user["id"])),
             ).fetchone()
         elif action == "edit":
             previous_items = db.execute(
@@ -329,13 +347,24 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
             )
             doc = db.execute(
                 f"UPDATE {parent} SET version=version+1,receipt_state=%s,submission_state=%s,"
-                "processed_by_id=%s WHERE id=%s RETURNING *",
+                "processed_by_id=%s "
+                + (",processed_actor=%s " if runtime_of(db).mode == "tenant" else "")
+                + "WHERE id=%s RETURNING *",
                 (
                     state,
                     "queued" if queue else "idle",
-                    user["id"] if queue else doc["processed_by_id"],
-                    doc["id"],
-                ),
+                    local_id(user["id"]) if queue else doc["processed_by_id"],
+                )
+                + (
+                    (
+                        Jsonb(actor_value if queue else doc.get("processed_actor"))
+                        if (actor_value if queue else doc.get("processed_actor"))
+                        else None,
+                    )
+                    if runtime_of(db).mode == "tenant"
+                    else ()
+                )
+                + (doc["id"],),
             ).fetchone()
             snapshot = db.execute(
                 f"SELECT product_id,amount,received_amount FROM {child} "
@@ -385,14 +414,21 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
             )
             doc = db.execute(
                 f"UPDATE {parent} SET processed_by_id=%s,version=version+1,status=%s, "
-                "submission_state=%s,processed_at=%s WHERE id=%s RETURNING *",
+                "submission_state=%s,processed_at=%s "
+                + (",processed_actor=%s " if runtime_of(db).mode == "tenant" else "")
+                + "WHERE id=%s RETURNING *",
                 (
-                    user["id"],
+                    local_id(user["id"]),
                     status,
                     "queued" if action == "confirm" else doc["submission_state"],
                     doc["processed_at"] if action == "confirm" else datetime.now(UTC),
-                    doc["id"],
-                ),
+                )
+                + (
+                    (Jsonb(actor_value) if actor_value else None,)
+                    if runtime_of(db).mode == "tenant"
+                    else ()
+                )
+                + (doc["id"],),
             ).fetchone()
             event(
                 db,
@@ -426,6 +462,8 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
                 "SELECT first_name,last_name,username FROM authentication_user WHERE id=%s",
                 (doc["created_by_id"],),
             ).fetchone()
+            if doc.get("created_actor"):
+                creator = display_user(doc["created_actor"])
             target = (
                 db.execute(
                     "SELECT name FROM stores WHERE id=%s", (doc["counteragent_id"],)
@@ -443,15 +481,22 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
             receiver = user
             if kind == "waybill" and doc.get("receipt_state") == "accepted":
                 receiver = db.execute(
-                    "SELECT u.* FROM portal_documents_event e "
-                    "JOIN authentication_user u ON u.id=e.actor_id "
+                    "SELECT u.*"
+                    + (", e.actor AS actor_snapshot" if runtime_of(db).mode == "tenant" else "")
+                    + " FROM portal_documents_event e "
+                    "LEFT JOIN authentication_user u ON u.id=e.actor_id "
                     "WHERE e.kind='waybill' AND e.document_id=%s AND e.action='receive' "
                     "ORDER BY e.id DESC LIMIT 1",
                     (doc["id"],),
                 ).fetchone()
+                if receiver and receiver.get("actor_snapshot"):
+                    receiver = display_user(receiver["actor_snapshot"])
                 if receiver is None:
                     fail(409, "Не найдена история приёмки. Требуется проверка документа.")
-            payload = provider.payload(kind, doc, rows, creator, receiver, source, target, reason)
+            options = {"timezone": local_zone(db)} if runtime_of(db).mode == "tenant" else {}
+            payload = provider.payload(
+                kind, doc, rows, creator, receiver, source, target, reason, **options
+            )
             db.execute(
                 "INSERT INTO native_dispatch (operation_id,kind,document_id,version,payload) "
                 "VALUES (%s,%s,%s,%s,%s)",

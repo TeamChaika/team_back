@@ -6,7 +6,6 @@ import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
-import httpx
 import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
@@ -25,12 +24,15 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_client, collector_url, runtime_directory
+from app.tenancy.sql import ANALYTICS_SCHEMA
 
 
 def capture_dictionary(
     settings: Settings, source: Source, kind: DictionaryKind, response: dict
 ) -> dict:
-    folder = BACKEND_DIR / ".local/dictionaries" / kind
+    folder = runtime_directory("local", BACKEND_DIR / ".local") / "dictionaries" / kind
     spec = DICTIONARIES[kind]
     metadata = json.loads((folder / "current.json").read_text())
     if metadata["source_fingerprint"] != source.fingerprint:
@@ -75,40 +77,50 @@ def reference_links(db, source_id: str) -> dict:
     checks = [
         (
             "invoice_suppliers",
-            "SELECT DISTINCT supplier_id AS id FROM chaika.incoming_invoices WHERE source_id=%s",
+            (
+                f"SELECT DISTINCT supplier_id AS id FROM {ANALYTICS_SCHEMA}.incoming_invoices "
+                f"WHERE source_id=%s"
+            ),
             "counteragents",
         ),
         (
             "product_units",
-            "SELECT DISTINCT main_unit_id AS id FROM chaika.products WHERE source_id=%s",
+            (
+                f"SELECT DISTINCT main_unit_id AS id FROM {ANALYTICS_SCHEMA}.products WHERE "
+                f"source_id=%s"
+            ),
             "measure_units",
         ),
         (
             "invoice_units",
-            "SELECT DISTINCT amount_unit_id AS id FROM chaika.incoming_invoice_items "
+            f"SELECT DISTINCT amount_unit_id AS id FROM {ANALYTICS_SCHEMA}.incoming_invoice_items "
             "WHERE source_id=%s AND present_in_latest",
             "measure_units",
         ),
         (
             "writeoff_units",
-            "SELECT DISTINCT measure_unit_id AS id FROM chaika.writeoff_items "
+            f"SELECT DISTINCT measure_unit_id AS id FROM {ANALYTICS_SCHEMA}.writeoff_items "
             "WHERE source_id=%s AND present_in_latest",
             "measure_units",
         ),
         (
             "product_categories",
-            "SELECT DISTINCT category_id AS id FROM chaika.products WHERE source_id=%s",
+            (
+                f"SELECT DISTINCT category_id AS id FROM {ANALYTICS_SCHEMA}.products WHERE "
+                f"source_id=%s"
+            ),
             "product_categories",
         ),
         (
             "group_categories",
-            "SELECT DISTINCT (details->>'category_id')::uuid AS id FROM chaika.product_groups "
+            f"SELECT DISTINCT (details->>'category_id')::uuid AS id FROM "
+            f"{ANALYTICS_SCHEMA}.product_groups "
             "WHERE source_id=%s",
             "product_categories",
         ),
         (
             "counteragent_stores",
-            "SELECT DISTINCT represented_store_id AS id FROM chaika.counteragents "
+            f"SELECT DISTINCT represented_store_id AS id FROM {ANALYTICS_SCHEMA}.counteragents "
             "WHERE source_id=%s",
             "stores",
         ),
@@ -117,7 +129,7 @@ def reference_links(db, source_id: str) -> dict:
         total, missing = db.execute(
             sql.SQL(
                 "WITH refs AS ({}) SELECT count(*),count(*) FILTER(WHERE d.id IS NULL) "
-                "FROM refs r LEFT JOIN chaika.{} d ON d.source_id=%s AND d.id=r.id "
+                f"FROM refs r LEFT JOIN {ANALYTICS_SCHEMA}.{{}} d ON d.source_id=%s AND d.id=r.id "
                 "WHERE r.id IS NOT NULL"
             ).format(sql.SQL(query), sql.Identifier(table)),
             (source_id, source_id),
@@ -151,9 +163,9 @@ def publish_dictionaries(db, snapshots: dict) -> tuple[dict, dict]:
             ):
                 raise SyncError("dictionary_scope_mismatch")
             db.execute(
-                sql.SQL("UPDATE chaika.{} SET present_in_latest=false WHERE source_id=%s").format(
-                    sql.Identifier(spec.table)
-                ),
+                sql.SQL(
+                    f"UPDATE {ANALYTICS_SCHEMA}.{{}} SET present_in_latest=false WHERE source_id=%s"
+                ).format(sql.Identifier(spec.table)),
                 (snap["source_id"],),
             )
 
@@ -189,38 +201,43 @@ def publish_dictionaries(db, snapshots: dict) -> tuple[dict, dict]:
     return counts, links
 
 
-def synchronize_dictionaries(settings: Settings, api_url: str = "http://127.0.0.1:8010") -> dict:
+def synchronize_dictionaries(settings: Settings, api_url: str = collector_url()) -> dict:
     api_url = check_local_api(api_url)
     if not settings.database_url.get_secret_value():
         raise SyncError("database_not_configured")
     source = configured_sources(settings)[0]
     run_id = uuid4()
     with (
-        psycopg.connect(
+        tenant_connect(
             settings.database_url.get_secret_value(),
             autocommit=True,
             connect_timeout=10,
             application_name="chaika-dictionary-sync",
+            connector=psycopg.connect,
         ) as db,
         reference_lock(db),
     ):
         register_sources(db, [source])
         if not db.execute(
-            "SELECT 1 FROM chaika.sources WHERE id=%s AND server_type='CHAIN'", (source.id,)
+            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources WHERE id=%s AND server_type='CHAIN'",
+            (source.id,),
         ).fetchone():
             raise SyncError("reference_sync_required")
         db.execute(
-            "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),"
+            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' "
             "WHERE job='dictionaries' AND status='running'"
         )
         db.execute(
-            "INSERT INTO chaika.sync_runs(id,job,status) VALUES(%s,'dictionaries','running')",
+            (
+                f"INSERT INTO {ANALYTICS_SCHEMA}.sync_runs(id,job,status) "
+                f"VALUES(%s,'dictionaries','running')"
+            ),
             (run_id,),
         )
         snapshots = {}
         touched, logout_ok, failure = False, True, None
-        with httpx.Client(base_url=api_url, timeout=180, trust_env=False) as client:
+        with collector_client(base_url=api_url, timeout=180, trust_env=False) as client:
             try:
                 response = client.get("/api/v1/iiko/connections")
                 response.raise_for_status()
@@ -254,7 +271,8 @@ def synchronize_dictionaries(settings: Settings, api_url: str = "http://127.0.0.
                     counts, links = publish_dictionaries(db, snapshots)
                     counts["logout_ok"] = True
                     db.execute(
-                        "UPDATE chaika.sync_runs SET status='succeeded',finished_at=now(),"
+                        f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='succeeded',"
+                        f"finished_at=now(),"
                         "counts=%s WHERE id=%s",
                         (Jsonb({**counts, "links": links}), run_id),
                     )
@@ -263,7 +281,8 @@ def synchronize_dictionaries(settings: Settings, api_url: str = "http://127.0.0.
         if failure is not None:
             code = str(failure) if isinstance(failure, SyncError) else type(failure).__name__
             db.execute(
-                "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),error_code=%s,"
+                f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
+                f"error_code=%s,"
                 "counts=%s WHERE id=%s",
                 (code, Jsonb({"logout_ok": logout_ok}), run_id),
             )
@@ -281,7 +300,7 @@ def synchronize_dictionaries(settings: Settings, api_url: str = "http://127.0.0.
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--api-url", default="http://127.0.0.1:8010")
+    parser.add_argument("--api-url", default=collector_url())
     args = parser.parse_args()
     try:
         result = synchronize_dictionaries(Settings(), args.api_url)

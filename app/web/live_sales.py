@@ -5,7 +5,6 @@ import logging
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from threading import Event, Lock
 from time import monotonic
 from uuid import UUID, uuid5
@@ -17,6 +16,8 @@ from fastapi import HTTPException
 from app.import_sales_review import METRICS, parse_review
 from app.sync_references import configured_sources, reference_lock
 from app.sync_sales_history import approved_templates, collect_day, error_code
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_post, temporary_directory
 from app.web.coverage import ZONE
 from app.web.warehouse_analytics import require_department_report
 
@@ -27,8 +28,9 @@ def fetch_today(settings):
     day = datetime.now(ZONE).date()
     source = configured_sources(settings)[0]
     with (
-        psycopg.connect(
+        tenant_connect(
             settings.database_url.get_secret_value(),
+            connector=psycopg.connect,
             autocommit=True,
             connect_timeout=10,
             application_name="chaika-live-sales",
@@ -38,8 +40,8 @@ def fetch_today(settings):
         template_id, templates = approved_templates(db)
         # Workers use this private collector too. Drop its idle session before taking a licence.
         try:
-            response = httpx.post(
-                "http://127.0.0.1:8010/api/v1/iiko/connections/primary/logout",
+            response = collector_post(
+                "/api/v1/iiko/connections/primary/logout",
                 timeout=10,
                 trust_env=False,
             )
@@ -48,7 +50,7 @@ def fetch_today(settings):
                 raise ValueError("live_sales_logout_failed")
         except httpx.ConnectError:
             pass  # Standalone portal, no private collector session exists.
-        with TemporaryDirectory(prefix="chaika-live-") as directory:
+        with temporary_directory(prefix="chaika-live-") as directory:
             root = Path(directory)
 
             async def collect():

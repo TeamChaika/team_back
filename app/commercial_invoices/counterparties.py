@@ -13,6 +13,8 @@ from app.commercial_invoices.counterparty_models import (
 )
 from app.commercial_invoices.counterparty_transport import source_key
 from app.commercial_invoices.policy import actor, stores_for
+from app.documents.actors import audit, local_id, owner_actor, principal_uuid, same_actor, snapshot
+from app.documents.context import lock_resource
 from app.documents.policy import fail, identifier, invalid, profile
 
 CATALOG_LOCK = 7623011102053
@@ -28,6 +30,8 @@ ERRORS = {
 
 
 def permitted(db, user_id, kind):
+    if owner_actor(db, user_id) is not None:
+        return bool(stores_for(db, user_id, kind, "create"))
     row = db.execute(
         "SELECT can_create FROM commercial_counterparty_grants WHERE user_id=%s",
         (user_id,),
@@ -75,8 +79,8 @@ def command(service, portal_id, kind, body):
         ).fetchone()
         if old:
             if (
-                old["actor_id"] != user["id"]
-                or str(old["portal_id"]) != str(portal_id)
+                not same_actor(old, user["id"])
+                or str(old["portal_id"]) != str(principal_uuid(portal_id))
                 or old["fingerprint"] != digest
             ):
                 fail(409, "Этот request_id уже использован другой командой.")
@@ -103,15 +107,15 @@ def command(service, portal_id, kind, body):
         user = require_creator(db, portal_id, kind)
         db.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-            ("counterparty:" + str(operation_id),),
+            (lock_resource(db, "counterparty:" + str(operation_id)),),
         )
         old = db.execute(
             "SELECT * FROM commercial_counterparty_operations WHERE id=%s", (operation_id,)
         ).fetchone()
         if old:
             if (
-                old["actor_id"] != user["id"]
-                or str(old["portal_id"]) != str(portal_id)
+                not same_actor(old, user["id"])
+                or str(old["portal_id"]) != str(principal_uuid(portal_id))
                 or old["fingerprint"] != digest
             ):
                 fail(409, "Этот request_id уже использован другой командой.")
@@ -120,7 +124,7 @@ def command(service, portal_id, kind, body):
         # Serialize admission by source, then use the same matching rule as iiko preflight.
         db.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-            ("counterparty-source:" + origin,),
+            (lock_resource(db, "counterparty-source:" + origin),),
         )
         existing = db.execute(
             "SELECT * FROM commercial_counterparty_operations WHERE source_key=%s "
@@ -152,14 +156,19 @@ def command(service, portal_id, kind, body):
                 "Создание контрагента с такими реквизитами уже проверяется. Дождитесь результата.",
             )
         remote_id = uuid4()
+        attributed = snapshot(user["id"])
+        extra_columns = ",actor" if attributed else ""
+        extra_values = ",%s" if attributed else ""
+        extra_params = (Jsonb(attributed),) if attributed else ()
         row = db.execute(
             "INSERT INTO commercial_counterparty_operations "
-            "(id,actor_id,portal_id,kind,fingerprint,source_key,iiko_id,code,payload,identity_key) "
-            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+            "(id,actor_id,portal_id,kind,fingerprint,source_key,iiko_id,code,"
+            f"payload,identity_key{extra_columns}) "
+            f"VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s{extra_values}) RETURNING *",
             (
                 operation_id,
-                user["id"],
-                portal_id,
+                local_id(user["id"]),
+                principal_uuid(portal_id),
                 kind,
                 digest,
                 origin,
@@ -167,12 +176,14 @@ def command(service, portal_id, kind, body):
                 code_for(remote_id),
                 Jsonb(payload),
                 identity,
-            ),
+            )
+            + extra_params,
         ).fetchone()
         db.execute(
             "INSERT INTO commercial_counterparty_events(operation_id,state) VALUES(%s,'queued')",
             (operation_id,),
         )
+        audit(db, user["id"], "create", "counterparty", operation_id)
         return serialize(db, row)
 
 
@@ -181,10 +192,10 @@ def operation(service, portal_id, kind, operation_id):
         user = actor(db, portal_id, kind=kind)
         row = db.execute(
             "SELECT * FROM commercial_counterparty_operations "
-            "WHERE id=%s AND actor_id=%s AND portal_id=%s AND kind=%s",
-            (identifier(operation_id), user["id"], portal_id, kind),
+            "WHERE id=%s AND portal_id=%s AND kind=%s",
+            (identifier(operation_id), principal_uuid(portal_id), kind),
         ).fetchone()
-        if not row:
+        if not row or not same_actor(row, user["id"]):
             fail(404, "Операция не найдена.")
         return serialize(db, row)
 
@@ -205,7 +216,7 @@ def grants(database, portal_id, *, user_id=None, body=None):
             digest = fingerprint({"user_id": user_id, "body": body})
             db.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-                ("counterparty-grant:" + str(request_id),),
+                (lock_resource(db, "counterparty-grant:" + str(request_id)),),
             )
             previous = db.execute(
                 "SELECT * FROM commercial_counterparty_grant_operations WHERE request_id=%s",
@@ -213,7 +224,7 @@ def grants(database, portal_id, *, user_id=None, body=None):
             ).fetchone()
             if previous:
                 if (
-                    str(previous["portal_id"]) != str(portal_id)
+                    str(previous["portal_id"]) != str(principal_uuid(portal_id))
                     or previous["fingerprint"] != digest
                 ):
                     fail(409, "Этот request_id уже использован другой командой.")
@@ -238,8 +249,9 @@ def grants(database, portal_id, *, user_id=None, body=None):
                 db.execute(
                     "INSERT INTO commercial_counterparty_grant_operations "
                     "(request_id,portal_id,fingerprint,user_id) VALUES(%s,%s,%s,%s)",
-                    (request_id, portal_id, digest, user_id),
+                    (request_id, principal_uuid(portal_id), digest, user_id),
                 )
+                audit(db, portal_id, "counterparty_grants", "user", user_id)
         return {
             "users": db.execute(
                 "SELECT u.id,coalesce(g.can_create,false) AS can_create,"

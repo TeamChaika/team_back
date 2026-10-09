@@ -13,6 +13,9 @@ import psycopg
 from app.core.config import BACKEND_DIR, Settings
 from app.sync_invoices import synchronize_invoices
 from app.sync_references import SyncError, configured_sources
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_url, runtime_directory
+from app.tenancy.sql import ANALYTICS_SCHEMA
 
 
 def prerequisite_state(row, start: date, end: date, fingerprint: str) -> bool:
@@ -43,13 +46,14 @@ def wait_for_invoices(settings: Settings, run_id: UUID, start: date, end: date, 
     fingerprint = configured_sources(settings)[0].fingerprint
     print(json.dumps({"status": "waiting_for_invoices", "invoice_run_id": str(run_id)}), flush=True)
     while not stop.is_set():
-        with psycopg.connect(
+        with tenant_connect(
             settings.database_url.get_secret_value(),
             connect_timeout=10,
             options="-c default_transaction_read_only=on -c statement_timeout=10000",
+            connector=psycopg.connect,
         ) as db:
             row = db.execute(
-                "SELECT status,counts FROM chaika.sync_runs WHERE id=%s", (run_id,)
+                f"SELECT status,counts FROM {ANALYTICS_SCHEMA}.sync_runs WHERE id=%s", (run_id,)
             ).fetchone()
             if prerequisite_state(row, start, end, fingerprint):
                 return
@@ -63,9 +67,11 @@ def main():
     parser.add_argument("--date-to", type=date.fromisoformat, required=True)
     parser.add_argument("--resume-run", type=UUID)
     parser.add_argument("--after-invoice-run", type=UUID)
-    parser.add_argument("--api-url", default="http://127.0.0.1:8010")
+    parser.add_argument("--api-url", default=collector_url())
     parser.add_argument(
-        "--output", type=Path, default=BACKEND_DIR / ".local/sync/writeoffs-latest.json"
+        "--output",
+        type=Path,
+        default=runtime_directory("local", BACKEND_DIR / ".local") / "sync/writeoffs-latest.json",
     )
     args = parser.parse_args()
     stop = Event()

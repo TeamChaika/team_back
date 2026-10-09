@@ -1,6 +1,7 @@
 """Select current, authorized prepared timestamps without reading source invoice lines."""
 
 from app.purchase_prices_precompute import source_revision
+from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 
 
 def prepared_receipts_query(db, scope, kind, excluded_products=None):
@@ -10,12 +11,12 @@ def prepared_receipts_query(db, scope, kind, excluded_products=None):
     source revision and receipt rows on the same snapshot during publication.
     """
     available = db.execute(
-        "SELECT to_regclass('chaika.purchase_prices_prepared') IS NOT NULL AS available"
+        f"SELECT to_regclass('{DB}.purchase_prices_prepared') IS NOT NULL AS available"
     ).fetchone()["available"]
     if not available:
         return None
     current = db.execute(
-        "SELECT id,revision FROM chaika.purchase_prices_prepared WHERE source_id='primary'"
+        f"SELECT id,revision FROM {DB}.purchase_prices_prepared WHERE source_id='primary'"
     ).fetchone()
     if current is None or current["revision"] != source_revision(db):
         return None
@@ -34,7 +35,7 @@ def prepared_receipts_query(db, scope, kind, excluded_products=None):
     return (
         "SELECT product_id,NULL::uuid AS store_id,unit_id,linked,date,"
         "sum(amount) AS amount,sum(sum) AS sum,bool_and(valid) AS valid "
-        "FROM chaika.purchase_prices_prepared_receipts WHERE "
+        f"FROM {DB}.purchase_prices_prepared_receipts WHERE "
         + " AND ".join(clauses)
         + " GROUP BY 1,2,3,4,5",
         params,

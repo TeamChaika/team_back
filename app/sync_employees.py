@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-import httpx
 import psycopg
 from psycopg.types.json import Jsonb
 
@@ -24,13 +23,20 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.tenancy.connection import tenant_connect
+from app.tenancy.io import collector_client, collector_url, runtime_directory
+from app.tenancy.sql import ANALYTICS_SCHEMA
 
 
 def capture_employees(
     settings: Settings, source: Source, response: dict, directory: Path | None = None
 ) -> dict:
     """Only publish a complete, source-matched export whose RAW hash is verified."""
-    folder = directory if directory is not None else BACKEND_DIR / ".local/employees"
+    folder = (
+        directory
+        if directory is not None
+        else runtime_directory("local", BACKEND_DIR / ".local") / "employees"
+    )
     metadata = json.loads((folder / "current.json").read_text())
     if metadata["source_fingerprint"] != source.fingerprint:
         raise SyncError("employees_source_mismatch")
@@ -101,7 +107,7 @@ def publish_employees(db, snapshot: dict) -> dict:
 
     with db.transaction():
         db.execute(
-            "UPDATE chaika.employees SET present_in_latest=false WHERE source_id=%s",
+            f"UPDATE {ANALYTICS_SCHEMA}.employees SET present_in_latest=false WHERE source_id=%s",
             (source_id,),
         )
         count = upsert_rows(
@@ -120,42 +126,50 @@ def publish_employees(db, snapshot: dict) -> dict:
             records(),
         )
         absent = db.execute(
-            "SELECT count(*) FROM chaika.employees WHERE source_id=%s AND NOT present_in_latest",
+            (
+                f"SELECT count(*) FROM {ANALYTICS_SCHEMA}.employees WHERE source_id=%s AND "
+                f"NOT present_in_latest"
+            ),
             (source_id,),
         ).fetchone()[0]
     return {"employees": count, "absent_from_latest": absent, **summarize_employees(rows)}
 
 
-def synchronize_employees(settings: Settings, api_url: str = "http://127.0.0.1:8010") -> dict:
+def synchronize_employees(settings: Settings, api_url: str = collector_url()) -> dict:
     api_url = check_local_api(api_url)
     if not settings.database_url.get_secret_value():
         raise SyncError("database_not_configured")
     source = configured_sources(settings)[0]
     run_id = uuid4()
     with (
-        psycopg.connect(
+        tenant_connect(
             settings.database_url.get_secret_value(),
             autocommit=True,
             connect_timeout=10,
             application_name="chaika-employee-sync",
+            connector=psycopg.connect,
         ) as db,
         reference_lock(db),
     ):
         register_sources(db, [source])
         if not db.execute(
-            "SELECT 1 FROM chaika.sources WHERE id=%s AND server_type='CHAIN'", (source.id,)
+            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources WHERE id=%s AND server_type='CHAIN'",
+            (source.id,),
         ).fetchone():
             raise SyncError("reference_sync_required")
         db.execute(
-            "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),"
+            f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' WHERE job='employees' AND status='running'"
         )
         db.execute(
-            "INSERT INTO chaika.sync_runs(id,job,status) VALUES(%s,'employees','running')",
+            (
+                f"INSERT INTO {ANALYTICS_SCHEMA}.sync_runs(id,job,status) "
+                f"VALUES(%s,'employees','running')"
+            ),
             (run_id,),
         )
         touched, logout_ok, failure, counts = False, True, None, {}
-        with httpx.Client(base_url=api_url, timeout=180, trust_env=False) as client:
+        with collector_client(base_url=api_url, timeout=180, trust_env=False) as client:
             try:
                 response = client.get("/api/v1/iiko/connections")
                 response.raise_for_status()
@@ -187,7 +201,8 @@ def synchronize_employees(settings: Settings, api_url: str = "http://127.0.0.1:8
                     counts = publish_employees(db, snapshot)
                     counts["logout_ok"] = logout_ok
                     db.execute(
-                        "UPDATE chaika.sync_runs SET status='succeeded',finished_at=now(),"
+                        f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='succeeded',"
+                        f"finished_at=now(),"
                         "counts=%s WHERE id=%s",
                         (Jsonb(counts), run_id),
                     )
@@ -196,7 +211,8 @@ def synchronize_employees(settings: Settings, api_url: str = "http://127.0.0.1:8
         if failure is not None:
             code = str(failure) if isinstance(failure, SyncError) else type(failure).__name__
             db.execute(
-                "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),error_code=%s,"
+                f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
+                f"error_code=%s,"
                 "counts=%s WHERE id=%s",
                 (code, Jsonb({"logout_ok": logout_ok}), run_id),
             )
@@ -214,7 +230,7 @@ def synchronize_employees(settings: Settings, api_url: str = "http://127.0.0.1:8
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--api-url", default="http://127.0.0.1:8010")
+    parser.add_argument("--api-url", default=collector_url())
     args = parser.parse_args()
     try:
         report = synchronize_employees(Settings(), args.api_url)

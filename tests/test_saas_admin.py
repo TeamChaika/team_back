@@ -29,7 +29,13 @@ def login(client):
 
 
 def company(**kwargs):
-    return {"name": "Example company", "slug": "company-one", **kwargs}
+    subscription = {"policy": "plans_v1", "plan_id": "analytics", **kwargs.pop("subscription", {})}
+    return {
+        "name": "Example company",
+        "slug": "company-one",
+        "subscription": subscription,
+        **kwargs,
+    }
 
 
 def test_auth_boundary(client):
@@ -284,3 +290,14 @@ def test_domain_search_normalized(client):
     for query in ["ПРИМЕР.РФ", "https://ПРИМЕР.РФ./", "xn--e1afmkfd.xn--p1ai"]:
         result = client.get(BASE + "/companies", params={"q": query})
         assert result.json()["total"] == 1
+
+
+def test_catalog_requires_owner_and_new_company_requires_named_plan(client):
+    assert client.get(BASE + "/entitlements/catalog").status_code == 401
+    login(client)
+    catalog = client.get(BASE + "/entitlements/catalog").json()
+    assert {plan["id"] for plan in catalog["plans"]} == {"analytics", "operations", "full"}
+    response = client.post(BASE + "/companies", json={"name": "New company", "slug": "new-company"})
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "subscription_required"
+    assert client.post(BASE + "/companies", json=company()).status_code == 201

@@ -105,6 +105,12 @@ def prepare_company(client):
         BASE + "/companies",
         json={
             "name": "Private company",
+            "subscription": {
+                "policy": "plans_v1",
+                "plan_id": "full",
+                "start_date": "2026-01-01",
+                "end_date": "2099-12-31",
+            },
             "slug": "tenant-one",
             "chain_url": "https://unit.iiko.it",
             "connection_credentials": {"chain": {"login": "test", "password": "secret-value"}},
@@ -248,7 +254,7 @@ def test_cli_uses_unix_socket_without_forwarded_trust(registry, tmp_path, monkey
     from app.saas_admin.__main__ import main
 
     root, dist = registry
-    monkeypatch.setattr("app.saas_admin.server.create_app", lambda *args: object())
+    monkeypatch.setattr("app.saas_admin.deployment.create_app", lambda *args: object())
     captured = {}
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
     socket = str(tmp_path / "run" / "saas.sock")
