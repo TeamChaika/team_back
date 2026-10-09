@@ -419,9 +419,15 @@ class FleetSupervisor:
 
             operator = RuntimeOperator(config, self.preparer.repo)
             try:
-                operator.provisioner().enqueue(
-                    company, str(operator.runtime.runtime_path("portal.sock"))
-                )
+                provisioner = operator.provisioner()
+                socket_path = str(operator.runtime.runtime_path("portal.sock"))
+                from .provisioning import additive_migration_refresh
+
+                if additive_migration_refresh(checks) or checks.get("migration_refresh"):
+                    if not provisioner.enqueue_migration_refresh(company, socket_path):
+                        provisioner.enqueue(company, socket_path)
+                else:
+                    provisioner.enqueue(company, socket_path)
             finally:
                 operator.close()
         self.start(path, "work", version)

@@ -23,6 +23,27 @@ STEPS = (
 assert set(STEPS) == REQUIRED_CHECKS
 
 
+def additive_migration_refresh(checks):
+    """Only the reviewed append-only bot maintenance may retain module evidence."""
+    import hashlib
+    import json
+
+    from app.tenancy.migrations import load_migrations
+
+    previous = checks.get("migrations", {})
+    if previous.get("ok") is not True:
+        return False
+    fingerprint = previous.get("evidence", {}).get("manifest_fingerprint")
+    entries = [(item.name, item.area, item.checksum) for item in load_migrations()]
+    approved = {
+        "20261010110000_tenant_telegram_bot_namespace.sql",
+    }
+    for count in range(1, len(entries)):
+        if hashlib.sha256(json.dumps(entries[:count]).encode()).hexdigest() == fingerprint:
+            return all(name in approved for name, _area, _checksum in entries[count:])
+    return False
+
+
 class PendingCheck(Exception):
     """Sanitized, adapter-owned missing configuration, never arbitrary exception text."""
 
@@ -52,10 +73,60 @@ class Provisioner:
                 "socket_path=excluded.socket_path,checks=CASE "
                 "WHEN "
                 "runtime_provisioning.configuration_version=excluded.configuration_version "
-                "THEN runtime_provisioning.checks ELSE '{}'::jsonb "
+                "THEN runtime_provisioning.checks-'migration_refresh' ELSE '{}'::jsonb "
                 "END,state='pending',error_code=NULL,updated_at=now()",
                 (company["id"], company["version"], socket_path),
             )
+
+    def enqueue_migration_refresh(self, company, socket_path):
+        """Persist maintenance intent without re-running independent acceptance checks."""
+        from app.tenancy.migrations import migration_fingerprint
+
+        target = migration_fingerprint()
+        ReadyRuntime(str(company["id"]), company["version"], socket_path)
+        with self.repository.connect(True) as db:
+            db.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("provision:" + str(company["id"]),),
+            )
+            row = db.execute(
+                "SELECT * FROM restcontrol.runtime_provisioning WHERE company_id=%s "
+                "AND configuration_version=%s FOR UPDATE",
+                (company["id"], company["version"]),
+            ).fetchone()
+            existing = row["checks"].get("migration_refresh", {}) if row else {}
+            if existing and existing.get("target_manifest_fingerprint") != target:
+                return False
+            if (
+                not row
+                or row["state"] not in {"ready", "failed"}
+                or not (
+                    additive_migration_refresh(row["checks"])
+                    or (
+                        row["checks"].get("migration_refresh", {}).get("configuration_version")
+                        == company["version"]
+                        and row["checks"]
+                        .get("migration_refresh", {})
+                        .get("target_manifest_fingerprint")
+                        == target
+                    )
+                )
+            ):
+                return False
+            checks = dict(row["checks"])
+            checks["migration_refresh"] = checks.get("migration_refresh") or {
+                "configuration_version": company["version"],
+                "target_manifest_fingerprint": target,
+                "state": row["state"],
+                "step": row["step"],
+                "error_code": row["error_code"],
+            }
+            db.execute(
+                "UPDATE restcontrol.runtime_provisioning SET checks=%s,state='pending',"
+                "error_code=NULL,updated_at=now() WHERE company_id=%s AND configuration_version=%s",
+                (Jsonb(checks), company["id"], company["version"]),
+            )
+            return True
 
     def run(self, company_id):
         # Session lock survives per-stage commits; crashes release it automatically.
@@ -75,8 +146,24 @@ class Provisioner:
                     raise ValueError("Provisioning must be enqueued first")
                 version, checks = row["configuration_version"], dict(row["checks"])
                 db.commit()
+                from app.tenancy.migrations import migration_fingerprint
+
+                refresh = checks.get("migration_refresh", {})
+                migration_only = (
+                    refresh.get("configuration_version") == version
+                    and refresh.get("state") in {"ready", "failed"}
+                    and refresh.get("target_manifest_fingerprint") == migration_fingerprint()
+                )
+                if refresh and not migration_only:
+                    checks.pop("migration_refresh", None)
+                    db.execute(
+                        "UPDATE restcontrol.runtime_provisioning SET checks=%s "
+                        "WHERE company_id=%s AND configuration_version=%s",
+                        (Jsonb(checks), company_id, version),
+                    )
+                    db.commit()
                 pending = []
-                for step in STEPS:
+                for step in ("migrations",) if migration_only else STEPS:
                     cached = checks.get(step, {})
                     proof = cached.get("evidence")
                     compatible = True
@@ -176,6 +263,23 @@ class Provisioner:
                             pending.append((step, error.code))
                             continue
                         return False
+                if migration_only:
+                    checks.pop("migration_refresh", None)
+                    db.execute(
+                        "UPDATE restcontrol.runtime_provisioning SET "
+                        "checks=%s,state=%s,step=%s,error_code=%s,"
+                        "updated_at=now() WHERE company_id=%s AND configuration_version=%s",
+                        (
+                            Jsonb(checks),
+                            refresh["state"],
+                            refresh.get("step"),
+                            refresh.get("error_code"),
+                            company_id,
+                            version,
+                        ),
+                    )
+                    db.commit()
+                    return True
                 if pending:
                     db.execute(
                         "UPDATE restcontrol.runtime_provisioning SET state='failed',"

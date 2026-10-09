@@ -505,3 +505,165 @@ def test_initial_history_plan_upgrade_reruns_old_proof_only_at_same_company_vers
             ]
             == 8
         )
+
+
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_additive_migration_refresh_preserves_partial_acceptance(control, fail_first):
+    import hashlib
+    import json
+
+    from psycopg.types.json import Jsonb
+
+    from app.tenancy.migrations import load_migrations
+
+    company = {"id": str(uuid4()), "version": 7, "status": "active"}
+    entries = [(item.name, item.area, item.checksum) for item in load_migrations()]
+    previous = hashlib.sha256(json.dumps(entries[:-1]).encode()).hexdigest()
+    modules = {
+        "ok": False,
+        "code": "module_configuration_required",
+        "evidence": {
+            "company_id": company["id"],
+            "configuration_version": 7,
+            "probes": [{"path": "/api/me", "ok": True}, {"path": "/api/overview", "ok": True}],
+            "services": {"telegram_identity": False, "assistant_configured": False},
+        },
+    }
+    checks = {
+        "migrations": {"ok": True, "evidence": {"manifest_fingerprint": previous}},
+        "modules": modules,
+        "payments": {"ok": False, "evidence": {"terminals": []}},
+    }
+    calls = []
+
+    def migrations(*args):
+        calls.append("migrations")
+        if fail_first and len(calls) == 1:
+            raise RuntimeError("Transient maintenance failure")
+        return {"ok": True, "evidence": {"manifest_fingerprint": migration_fingerprint()}}
+
+    def forbidden(*args):
+        pytest.fail("Migration maintenance must not rerun independent acceptance")
+
+    provision = Provisioner(
+        control, {step: migrations if step == "migrations" else forbidden for step in STEPS}
+    )
+    socket = f"/tmp/c_{company['id'].replace('-', '')}/portal.sock"
+    provision.enqueue(company, socket)
+    with control.connect(True) as db:
+        db.execute(
+            "UPDATE runtime_provisioning SET checks=%s,state='failed',step='modules',"
+            "error_code='module_configuration_required'",
+            (Jsonb(checks),),
+        )
+    assert provision.enqueue_migration_refresh(company, socket)
+    # Simulate service restart: the intent is persisted, not held in process memory.
+    restarted = Provisioner(control, provision.adapters)
+    if fail_first:
+        assert restarted.run(company["id"]) is False
+        with control.connect() as db:
+            failed = db.execute("SELECT * FROM runtime_provisioning").fetchone()
+        assert failed["checks"]["modules"] == modules
+        assert (
+            failed["checks"]["migration_refresh"]["error_code"] == "module_configuration_required"
+        )
+        assert restarted.enqueue_migration_refresh(company, socket)
+    assert restarted.run(company["id"])
+    with control.connect() as db:
+        row = db.execute("SELECT * FROM runtime_provisioning").fetchone()
+    assert calls == ["migrations"] * (2 if fail_first else 1)
+    assert row["state"] == "failed"
+    assert row["step"] == "modules"
+    assert row["error_code"] == "module_configuration_required"
+    assert row["checks"]["modules"] == modules
+    assert row["checks"]["payments"] == checks["payments"]
+    assert "migration_refresh" not in row["checks"]
+    assert (
+        row["checks"]["migrations"]["evidence"]["manifest_fingerprint"] == migration_fingerprint()
+    )
+
+
+def test_unknown_or_edited_migration_cannot_get_maintenance_scope(control):
+    from app.saas_admin.provisioning import additive_migration_refresh
+
+    assert not additive_migration_refresh(
+        {"migrations": {"ok": True, "evidence": {"manifest_fingerprint": "different-content"}}}
+    )
+    assert not additive_migration_refresh(
+        {"migrations": {"ok": False, "evidence": {"manifest_fingerprint": migration_fingerprint()}}}
+    )
+
+
+def test_identity_migration_append_requires_full_acceptance():
+    import hashlib
+    import json
+
+    from app.saas_admin.provisioning import additive_migration_refresh
+    from app.tenancy.migrations import load_migrations
+
+    entries = [(item.name, item.area, item.checksum) for item in load_migrations()]
+    primary_index = next(
+        index
+        for index, item in enumerate(entries)
+        if item[0] == "20261010100000_tenant_primary_admin_projection.sql"
+    )
+    fingerprint = hashlib.sha256(json.dumps(entries[:primary_index]).encode()).hexdigest()
+    assert not additive_migration_refresh(
+        {"migrations": {"ok": True, "evidence": {"manifest_fingerprint": fingerprint}}}
+    )
+
+
+@pytest.mark.parametrize("resume", ["run", "enqueue"])
+def test_interrupted_bot_refresh_cannot_skip_acceptance_for_new_release(
+    control, monkeypatch, resume
+):
+    from psycopg.types.json import Jsonb
+
+    from app.saas_admin.provisioning import PendingCheck
+
+    company = {"id": str(uuid4()), "version": 9, "status": "active"}
+    old_target = migration_fingerprint()
+    calls = []
+
+    def adapter(step):
+        def check(*args):
+            calls.append(step)
+            if step == "modules":
+                raise PendingCheck("fresh_acceptance_required", {"fresh": True})
+            return {
+                "ok": True,
+                "evidence": {"manifest_fingerprint": "new-identity-release"}
+                if step == "migrations"
+                else {"checked": True},
+            }
+
+        return check
+
+    provision = Provisioner(control, {step: adapter(step) for step in STEPS})
+    socket = f"/tmp/c_{company['id'].replace('-', '')}/portal.sock"
+    provision.enqueue(company, socket)
+    checks = {
+        "migration_refresh": {
+            "configuration_version": 9,
+            "target_manifest_fingerprint": old_target,
+            "state": "failed",
+            "step": "modules",
+            "error_code": "module_configuration_required",
+        },
+        "modules": {"ok": False, "evidence": {"old": True}},
+    }
+    with control.connect(True) as db:
+        db.execute("UPDATE runtime_provisioning SET state='failed',checks=%s", (Jsonb(checks),))
+    monkeypatch.setattr(
+        "app.tenancy.migrations.migration_fingerprint", lambda: "new-identity-release"
+    )
+    if resume == "enqueue":
+        assert provision.enqueue_migration_refresh(company, socket) is False
+        provision.enqueue(company, socket)
+    assert provision.run(company["id"]) is False
+    assert "modules" in calls
+    with control.connect() as db:
+        row = db.execute("SELECT * FROM runtime_provisioning").fetchone()
+    assert "migration_refresh" not in row["checks"]
+    assert row["checks"]["modules"]["code"] == "fresh_acceptance_required"
+    assert row["checks"]["modules"]["evidence"] == {"fresh": True}
