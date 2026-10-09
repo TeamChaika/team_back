@@ -312,7 +312,9 @@ def test_supervisor_quiesces_own_services_before_migration_upgrade(tmp_path, mon
     path = tmp_path / "own.json"
     foreign = tmp_path / "foreign.json"
     supervisor = FleetSupervisor(
-        SimpleNamespace(repo=SimpleNamespace(get=lambda _: company, connect=connect))
+        SimpleNamespace(
+            repo=SimpleNamespace(get=lambda _: company, connect=connect), prepare=lambda _: path
+        )
     )
     own = (str(path), "run-portal")
     other = (str(foreign), "run-portal")
@@ -378,7 +380,9 @@ def test_scheduler_requires_current_history_plan_and_requeues_old_ready_tenant(
 
     path, foreign = tmp_path / "own.json", tmp_path / "foreign.json"
     supervisor = FleetSupervisor(
-        SimpleNamespace(repo=SimpleNamespace(get=lambda _: company, connect=connect))
+        SimpleNamespace(
+            repo=SimpleNamespace(get=lambda _: company, connect=connect), prepare=lambda _: path
+        )
     )
     own_scheduler, foreign_scheduler = (str(path), "run-scheduler"), (str(foreign), "run-scheduler")
     own_portal, own_collector = (str(path), "run-portal"), (str(path), "run-collector")
@@ -412,3 +416,122 @@ def test_scheduler_requires_current_history_plan_and_requeues_old_ready_tenant(
         assert "run-scheduler" not in starts
         assert stopped == [own_scheduler]
         assert enqueued == [(8, str(path.parent / "portal.sock"))]
+
+
+@pytest.mark.parametrize("provisioning_state", ["pending", "running"])
+def test_supervisor_reconciles_existing_manifest_once_per_version_before_launch(
+    tmp_path, monkeypatch, provisioning_state
+):
+    import json
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from app.saas_admin.runtime_fleet import FleetSupervisor
+    from app.tenancy.migrations import migration_fingerprint
+
+    company = {
+        "id": str(uuid4()),
+        "status": "active",
+        "version": 8,
+        "modules": {"documents": True, "commercial_invoices": True},
+    }
+    state = {
+        "configuration_version": 8,
+        "state": provisioning_state,
+        "error_code": None,
+        "checks": {
+            "migrations": {
+                "ok": True,
+                "evidence": {"manifest_fingerprint": migration_fingerprint()},
+            },
+            "database_roles": {"ok": True},
+        },
+    }
+    pending_queries = []
+
+    def execute(query, *args):
+        if "WHERE state='pending'" in query:
+            pending_queries.append(query)
+            return SimpleNamespace(
+                fetchall=lambda: (
+                    [{"company_id": company["id"]}] if provisioning_state == "pending" else []
+                )
+            )  # In running state, an operator already won the pending claim race.
+        return SimpleNamespace(fetchone=lambda: state)
+
+    @contextmanager
+    def connect():
+        yield SimpleNamespace(execute=execute)
+
+    preparer = FleetPreparer(
+        {
+            "operator_directory": str(tmp_path / "control"),
+            "operator_template": {
+                "process_isolation": {"mode": "local-test"},
+                "operator_dsn": "host=localhost dbname=local user=ddl",
+                "runtime_root": str(tmp_path / "runtime"),
+            },
+        },
+        repository=SimpleNamespace(get=lambda _: company, connect=connect),
+    )
+    path = preparer.root / ("c_" + company["id"].replace("-", "") + ".json")
+    saved = {
+        "company_id": company["id"],
+        "process_isolation": {"mode": "local-test"},
+        "runtime_dsn": "own-runtime",
+        "payments_dsn": "own-payments",
+        "identity_dsn": "own-identity",
+        "collector_settings": {"sync_api_key": "own-sync-secret"},
+        "verifier_grants": [{"secret_file": "existing-own-secret-file"}],
+        "document_settings": {"commercial_counterparty_create_enabled": False},
+    }
+    path.write_text(json.dumps(saved))
+    path.chmod(0o600)
+    monkeypatch.setattr(
+        "app.saas_admin.runtime_fleet.secrets.token_urlsafe",
+        lambda *_: pytest.fail("Existing manifest must not create credentials"),
+    )
+    prepare_versions, launches = [], []
+    real_prepare = preparer.prepare
+
+    def prepare(current):
+        prepare_versions.append(current["version"])
+        return real_prepare(current)
+
+    monkeypatch.setattr(preparer, "prepare", prepare)
+    supervisor = FleetSupervisor(preparer)
+
+    def start(p, action, version):
+        settings = private_json(p)["document_settings"]
+        assert prepare_versions[-1] == version
+        assert settings["commercial_submit_enabled"] is True
+        assert settings["commercial_counterparty_create_enabled"] is False
+        launches.append((action, version, settings["commercial_enabled"]))
+
+    monkeypatch.setattr(supervisor, "start", start)
+    supervisor.tick()
+    assert pending_queries and prepare_versions == [8]
+    assert ("run-documents-worker", 8, True) in launches
+    assert private_json(path)["supervisor_managed"] is True
+    for field in (
+        "runtime_dsn",
+        "payments_dsn",
+        "identity_dsn",
+        "collector_settings",
+        "verifier_grants",
+    ):
+        assert private_json(path)[field] == saved[field]
+    supervisor.tick()
+    assert prepare_versions == [8]  # No manifest writes on unchanged three-second ticks.
+    company["version"] = state["configuration_version"] = 9
+    company["modules"]["commercial_invoices"] = False
+    supervisor.tick()
+    assert prepare_versions == [8, 9]
+    assert ("run-portal", 9, False) in launches
+    supervisor.tick()
+    assert prepare_versions == [8, 9]
+    # A fresh supervisor revalidates same-version manifests for a release upgrade.
+    restarted = FleetSupervisor(preparer)
+    monkeypatch.setattr(restarted, "start", start)
+    restarted.tick()
+    assert prepare_versions == [8, 9, 9]

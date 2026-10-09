@@ -161,7 +161,7 @@ class FleetPreparer:
         finally:
             os.close(descriptor)
 
-    def prepare_pending(self):
+    def prepare_pending(self, *, create_missing_only=False):
         with self.repo.connect() as db:
             pending = db.execute(
                 "SELECT company_id FROM runtime_provisioning "
@@ -170,6 +170,10 @@ class FleetPreparer:
         prepared = []
         for row in pending:
             try:
+                if create_missing_only:
+                    path = self.root / ("c_" + UUID(str(row["company_id"])).hex + ".json")
+                    if path.exists():
+                        continue
                 prepared.append(self.prepare(self.repo.get(str(row["company_id"]))))
             except (ValueError, OSError, KeyError, subprocess.SubprocessError):
                 logging.getLogger(__name__).warning(
@@ -186,6 +190,7 @@ class FleetSupervisor:
         self.children, self.retry_after, self.versions = {}, {}, {}
         self.restart_after = {}
         self.launch_errors = {}
+        self.prepared_versions = {}
 
     def start(self, path, action, version=None):
         key = (str(path), action)
@@ -326,7 +331,7 @@ class FleetSupervisor:
             socket.unlink()  # Only the socket of this terminated, owned child.
 
     def tick(self):
-        self.preparer.prepare_pending()
+        self.preparer.prepare_pending(create_missing_only=True)
         for path in self.preparer.root.glob("c_*.json"):
             try:
                 self.tick_company(path)
@@ -342,11 +347,20 @@ class FleetSupervisor:
             for key in list(self.children):
                 if key[0] == str(path):
                     self.stop(key)
+            self.prepared_versions.pop(str(path), None)
             return
         version = company["version"]
         for key in list(self.children):
             if key[0] == str(path) and self.versions.get(key) != version:
                 self.stop(key)
+        if self.prepared_versions.get(str(path)) != version:
+            # Reconcile existing manifests even if an operator already claimed
+            # the pending row, or a same-version release is starting up.
+            prepared = self.preparer.prepare(company)
+            if Path(prepared) != Path(path):
+                raise ValueError("Prepared operator path does not match supervised company")
+            config = read_operator_json(path)
+            self.prepared_versions[str(path)] = version
         with self.preparer.repo.connect() as db:
             state = db.execute(
                 "SELECT checks,error_code,state,configuration_version "
