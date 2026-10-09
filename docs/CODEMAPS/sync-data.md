@@ -19,4 +19,16 @@
 
 Миграции `supabase/migrations/*`: [reference_sync.sql](../../supabase/migrations/20260910171101_chaika_reference_sync.sql) задаёт RAW/RLS и опорные таблицы; [inventory_sync.sql](../../supabase/migrations/20260910172520_chaika_inventory_sync.sql) — товары, техкарты, документы; [portal_and_olap.sql](../../supabase/migrations/20260911013009_chaika_portal_and_olap.sql) — OLAP; [scheduled_sync.sql](../../supabase/migrations/20260915123000_scheduled_sync.sql) — cron; [indicator_filters.sql](../../supabase/migrations/20260918190000_indicator_filters.sql) — варианты фильтров. Схема нативных документов отдельна: [documents.md](documents.md).
 
+Tenant OLAP bootstrap (09.10.2026): `approved_templates` сначала ищет reviewed набор
+в собственной схеме. Если его нет, только runtime `tenant` использует общий кодовый
+контракт `tenant-sales-v1`: базовый `DailySalesQuery` и группировки семи аналитических
+отчётов в `tenant_sales_templates`. Это определения запросов без RAW, чужих данных
+или переноса approval; `publish` сохраняет обычный `reviewed=false`. Такой контракт
+остаётся доступен при следующих запусках до собственного reviewed набора. Неполный
+или неверный reviewed набор вызывает ошибку; legacy runtime без reviewed набора
+по-прежнему блокируется. Каждая загрузка получает свой fingerprint, RAW и manifest,
+подтверждённый logout; `parse_review` проверяет источник, хэши, поля/метрики и период
+перед транзакцией `publish`. Расхождения reconciliation остаются в `checks` и
+`warning_days`, как в обычной истории, и не превращаются в точное совпадение.
+
 [CI](../../.github/workflows/ci.yml) запускает Ruff, изолированный PostgreSQL через [prepare_test_database.py](../../tools/prepare_test_database.py), pytest и smoke контейнера. [Dockerfile](../../Dockerfile) собирает публичный портал. Операционные точки входа и ограничения размещения — [operations.md](operations.md). Тесты синхронизации: [test_reference_sync.py](../../tests/test_reference_sync.py), [test_sales_import.py](../../tests/test_sales_import.py), [test_scheduler.py](../../tests/test_scheduler.py), [test_sync_jobs.py](../../tests/test_sync_jobs.py).

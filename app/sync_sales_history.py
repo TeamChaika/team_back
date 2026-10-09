@@ -22,6 +22,7 @@ from app.core.config import BACKEND_DIR, Settings
 from app.import_sales_review import KINDS, parse_review, publish
 from app.integrations.iiko.client import IikoClient
 from app.integrations.iiko.errors import IikoError
+from app.schemas.iiko_olap_sales import DailySalesQuery
 from app.services.iiko_auth import IikoAuthService
 from app.services.sync_jobs import write_json
 from app.sync_references import SyncError, configured_sources, reference_lock, register_sources
@@ -34,6 +35,39 @@ DIRECTORY = runtime_directory("local", BACKEND_DIR / ".local") / "sync"
 REPORTS = runtime_directory("local", BACKEND_DIR / ".local") / "reports"
 ZONE = ZoneInfo(load_runtime().timezone if load_runtime().mode == "tenant" else "Europe/Simferopol")
 REPORT_ORDER = ("daily", "dishes", "payments", "discounts", "returns", "waiters", "hours")
+CODE_TEMPLATE_ID = "tenant-sales-v1"
+
+
+def tenant_sales_templates() -> dict[str, dict]:
+    """Shared request schema, with no tenant data or inherited review approval."""
+    daily = DailySalesQuery(business_date=date(2000, 1, 1)).iiko_body()
+    templates = {"daily": daily}
+    dimensions = {
+        "dishes": ["DishId", "DishName"],
+        "payments": ["PayTypes.Group", "PayTypes"],
+        "discounts": ["ItemSaleEventDiscountType"],
+        "returns": ["Storned"],
+        "waiters": ["OrderWaiter.Name"],
+        "hours": ["HourOpen"],
+    }
+    for kind, groups in dimensions.items():
+        request = deepcopy(daily)
+        request["groupByRowFields"] = ["OpenDate.Typed", "Department.Id", *groups]
+        fields = ["DishDiscountSumInt"]
+        if kind in {"dishes", "hours"}:
+            fields.append("ProductCostBase.ProductCost")
+        if kind in {"waiters", "hours"}:
+            fields.extend(["UniqOrderId", "GuestNum"])
+        fields.extend(
+            {
+                "dishes": ["DishAmountInt"],
+                "discounts": ["DiscountSum"],
+                "returns": ["DishReturnSum"],
+            }.get(kind, [])
+        )
+        request["aggregateFields"] = fields
+        templates[kind] = request
+    return templates
 
 
 def error_code(error: Exception) -> str:
@@ -65,7 +99,13 @@ def approved_templates(db):
         "ORDER BY business_date DESC,observed_at DESC LIMIT 1"
     ).fetchone()
     if not row:
-        raise SyncError("sales_approved_templates_missing")
+        if load_runtime().mode != "tenant":
+            raise SyncError("sales_approved_templates_missing")
+        # A new company has no reviewed captures. Its own capture still passes
+        # collect_day/logout and parse_review before publish can advance coverage.
+        # publish intentionally does not fabricate human review approval, so the
+        # code schema remains available on subsequent tenant history/live runs.
+        return CODE_TEMPLATE_ID, tenant_sales_templates()
     templates = dict(
         db.execute(
             f"SELECT kind,request FROM {ANALYTICS_SCHEMA}.sales_reports WHERE set_id=%s", row

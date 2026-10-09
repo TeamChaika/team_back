@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import date, timedelta
 from threading import Event
@@ -195,3 +196,161 @@ def test_today_requires_explicit_opt_in_and_future_stays_rejected():
     assert history.history_days(today, today, include_today=True) == [today]
     with pytest.raises(SyncError, match="invalid_sales_history_period"):
         history.history_days(today, today + timedelta(days=1), include_today=True)
+
+
+class TemplateDatabase:
+    def __init__(self, row=None, templates=None):
+        self.row = row
+        self.templates = templates
+
+    def execute(self, query, parameters=None):
+        return self
+
+    def fetchone(self):
+        return self.row
+
+    def fetchall(self):
+        return list(self.templates.items())
+
+
+def test_fresh_and_subsequent_tenant_use_code_schema_without_inherited_approval(monkeypatch):
+    monkeypatch.setattr(history, "load_runtime", lambda: SimpleNamespace(mode="tenant"))
+    # Neither an empty schema nor own unreviewed captures provide a reviewed row.
+    for _ in range(2):
+        template_id, templates = history.approved_templates(TemplateDatabase())
+        assert template_id == history.CODE_TEMPLATE_ID
+        assert set(templates) == KINDS
+        daily = history.DailySalesQuery(business_date=date(2000, 1, 1)).iiko_body()
+        assert templates["daily"] == daily
+        assert all(request["filters"] == daily["filters"] for request in templates.values())
+        assert all(
+            len(request["groupByRowFields"]) + len(request["aggregateFields"]) <= 7
+            for request in templates.values()
+        )
+        assert "DishAmountInt" in templates["dishes"]["aggregateFields"]
+        assert "DiscountSum" in templates["discounts"]["aggregateFields"]
+        assert "DishReturnSum" in templates["returns"]["aggregateFields"]
+        templates["hours"]["filters"]["OrderDeleted"]["values"].append("bad")
+        assert "bad" not in templates["daily"]["filters"]["OrderDeleted"]["values"]
+
+
+def test_legacy_missing_templates_still_rejected(monkeypatch):
+    monkeypatch.setattr(history, "load_runtime", lambda: SimpleNamespace(mode="legacy"))
+    with pytest.raises(SyncError, match="sales_approved_templates_missing"):
+        history.approved_templates(TemplateDatabase())
+
+
+@pytest.mark.parametrize("mode", ["legacy", "tenant"])
+def test_existing_reviewed_templates_preferred_and_invalid_not_replaced(review, monkeypatch, mode):
+    monkeypatch.setattr(history, "load_runtime", lambda: SimpleNamespace(mode=mode))
+    templates = {kind: info["request"] for kind, info in review[1]["reports"].items()}
+    db = TemplateDatabase(("own-reviewed",), templates)
+    assert history.approved_templates(db) == ("own-reviewed", templates)
+    del templates["returns"]
+    with pytest.raises(SyncError, match="sales_approved_templates_incomplete"):
+        history.approved_templates(db)
+    templates["returns"] = deepcopy(templates["daily"])
+    templates["hours"]["buildSummary"] = True
+    with pytest.raises(SyncError, match="sales_approved_templates_invalid"):
+        history.approved_templates(db)
+
+
+@pytest.mark.parametrize("fault", [None, "hash", "source", "shape", "logout", "discrepancy"])
+def test_tenant_bootstrap_uses_own_capture_and_only_valid_capture_advances(
+    tmp_path, monkeypatch, fault
+):
+    monkeypatch.setattr(history, "load_runtime", lambda: SimpleNamespace(mode="tenant"))
+    template_id, templates = history.approved_templates(TemplateDatabase())
+    calls, published, checkpoints = [], [], []
+    root = tmp_path / "own-capture"
+    source = SimpleNamespace(fingerprint="own-company")
+    day = date(2026, 8, 1)
+    writes = []
+
+    class PublicationDatabase(TemplateDatabase):
+        def transaction(self):
+            return nullcontext()
+
+        def cursor(self):
+            return nullcontext(self)
+
+        def execute(self, query, parameters=None):
+            if query.startswith("INSERT"):
+                writes.append((query, parameters))
+            return self
+
+        def executemany(self, query, parameters):
+            writes.append((query, parameters))
+
+    db = PublicationDatabase()
+
+    class Client:
+        def __init__(self, settings):
+            pass
+
+        async def aclose(self):
+            calls.append("closed")
+
+    class Auth:
+        def __init__(self, settings, client):
+            pass
+
+        async def download_daily_sales(self, path, *, query):
+            calls.append(path.stem)
+            request = query.iiko_body()
+            row = {
+                **{field: "own" for field in request["groupByRowFields"]},
+                **{field: 2 for field in request["aggregateFields"]},
+                "OpenDate.Typed": day.isoformat(),
+                "Department.Id": "00000000-0000-0000-0000-000000000002",
+            }
+            if fault == "shape" and path.stem == "hours":
+                row["UniqOrderId"] = True
+            if fault == "discrepancy" and path.stem == "payments":
+                row["DishDiscountSumInt"] = 3
+            raw = json.dumps({"data": [row], "summary": []}).encode()
+            path.write_bytes(raw)
+            return SimpleNamespace(sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw))
+
+        async def logout(self):
+            calls.append("logout")
+            return SimpleNamespace(state="failed" if fault == "logout" else "logged_out")
+
+    monkeypatch.setattr(history, "IikoClient", Client)
+    monkeypatch.setattr(history, "IikoAuthService", Auth)
+
+    def sync(capture_day):
+        asyncio.run(
+            history.collect_day(None, source, capture_day, templates, template_id, root, Event())
+        )
+        if fault == "hash":
+            (root / "raw" / "daily.json").write_text("{}")
+        bundle = parse_review(
+            root,
+            "wrong-company" if fault == "source" else source.fingerprint,
+            allow_discrepancies=True,
+        )
+        assert bundle["manifest"]["template_set_id"] == history.CODE_TEMPLATE_ID
+        assert bundle["manifest"]["source_fingerprint"] == "own-company"
+        assert all(check["exact_match"] for check in bundle["checks"]) == (fault != "discrepancy")
+        # This is the publication boundary; invalid RAW never reaches it.
+        published.append(bundle)
+        return history.publish(db, bundle)
+
+    report = history.run_history(
+        [day],
+        {},
+        sync,
+        lambda value: checkpoints.append(deepcopy(value)),
+        Event(),
+        template_id=template_id,
+    )
+    assert calls == [*history.REPORT_ORDER, "logout", "closed"]
+    invalid = fault not in {None, "discrepancy"}
+    assert report["counts"]["completed_days"] == (0 if invalid else 1)
+    assert report["status"] == ("failed" if invalid else "succeeded")
+    assert len(published) == (0 if invalid else 1)
+    assert bool(writes) == (not invalid)
+    assert all("reviewed" not in query for query, _ in writes)
+    assert report["counts"]["warning_days"] == (1 if fault == "discrepancy" else 0)
+    assert checkpoints[0]["counts"]["completed_days"] == 0
