@@ -44,6 +44,10 @@
     {
       "file": "20261009223000_tenant_payment_acceptance.sql",
       "area": "payments"
+    },
+    {
+      "file": "20261010100000_tenant_primary_admin_projection.sql",
+      "area": "analytics"
     }
   ]
 }

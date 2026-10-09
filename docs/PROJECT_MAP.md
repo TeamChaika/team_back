@@ -74,9 +74,13 @@ Secure SameSite=Strict cookie, CSRF. Нет wildcard или fallback к Чайк
 
 Новый полный runtime запускает существующий `app.portal` через
 `app.tenancy.bootstrap` и приватный gateway. Автоматическая подготовка:
-`runtime_fleet.py` → `fleet_discovery.py` → `runtime_operator.py`; Linux-запуск
+`runtime_fleet.py` → `fleet_discovery.py` → `runtime_operator.py`. Этап identity
+через `runtime_identity.py` проецирует только доказанного первоначального company_admin
+в новый собственный профиль (Auth/journal/UUID/email/marker, без Auth create/reset и без
+platform-owner профиля; повтор не меняет ACL/пароль). Fingerprint tenant migrations
+сбрасывает только устаревший cache этапа migrations при обновлении manifest. Operator
 нормализует старые подписки через `Subscription` при выборе timezone (без изменения
-записи/версии), изолирует UID/GID компаний через `runtime_process_identity.py` (root-owned central
+записи/версии); Linux-запуск изолирует UID/GID компаний через `runtime_process_identity.py` (root-owned central
 config, отдельные Unix accounts, central-group sockets, fail-closed policy); центральный
 вход и supervised fleet задаются в `ops/tenant-runtime/README.md`. Значение
 `full_dashboard_available` сохраняет историю ранее принятого кабинета при

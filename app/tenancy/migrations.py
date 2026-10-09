@@ -55,6 +55,13 @@ def load_migrations(directory: Path = MIGRATION_DIRECTORY) -> tuple[Migration, .
     return tuple(result)
 
 
+def migration_fingerprint() -> str:
+    """Detect added/changed migration files before trusting an earlier stage cache."""
+    return hashlib.sha256(
+        json.dumps([(item.name, item.area, item.checksum) for item in load_migrations()]).encode()
+    ).hexdigest()
+
+
 def _check_role(connection, runtime: TenantRuntime) -> bool:
     row = connection.execute(
         """
@@ -163,6 +170,7 @@ def _check_identity_role(connection, runtime: TenantRuntime) -> None:
             runtime.analytics_schema,
             [
                 f"{runtime.analytics_schema}.provision_company_identity(uuid,text,text,text)",
+                f"{runtime.analytics_schema}.provision_company_primary_admin(uuid,text,text,text,boolean)",
                 f"{runtime.analytics_schema}.set_company_identity_password_required(uuid,boolean)",
                 f"{runtime.analytics_schema}.company_identity_actor_is_admin(uuid)",
                 f"{runtime.analytics_schema}.consume_company_password_recovery(text)",

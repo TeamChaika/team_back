@@ -11,6 +11,7 @@ from psycopg.rows import dict_row
 
 from app.saas_admin.provisioning import STEPS, Provisioner
 from app.saas_admin.runtime_registry import RuntimeRegistry
+from app.tenancy.migrations import migration_fingerprint
 
 
 @pytest.fixture
@@ -65,7 +66,14 @@ def test_resume_durable_only_and_version_invalidates(control):
             calls.append(step)
             if step == "connections" and failing[0]:
                 raise RuntimeError("sensitive details must not persist")
-            return {"ok": True, "evidence": "synthetic test evidence"}
+            return {
+                "ok": True,
+                "evidence": (
+                    {"manifest_fingerprint": migration_fingerprint()}
+                    if step == "migrations"
+                    else "synthetic test evidence"
+                ),
+            }
 
         return check
 
@@ -281,7 +289,9 @@ def test_legacy_module_and_payment_evidence_is_rechecked_without_resync(control)
         def run(*_):
             calls.append(step)
             evidence = (
-                {"company_id": company["id"], "configuration_version": 1, "services": {}}
+                {"manifest_fingerprint": migration_fingerprint()}
+                if step == "migrations"
+                else {"company_id": company["id"], "configuration_version": 1, "services": {}}
                 if step == "modules"
                 else {"enabled": False}
                 if step == "payments"
@@ -347,3 +357,62 @@ def test_operator_constructs_from_actual_legacy_registry_row_without_rewrite(con
     assert not operator.manifest.exists()
     with control.connect() as db:
         assert db.execute("SELECT body FROM companies").fetchone()["body"] == legacy
+
+
+@pytest.mark.parametrize("change", ["legacy", "append", "checksum"])
+def test_migration_cache_revalidates_manifest_at_same_company_version(control, monkeypatch, change):
+    from app.tenancy import migrations
+
+    company = {"id": str(uuid4()), "version": 8, "status": "active"}
+    calls = []
+
+    def check(step):
+        def run(*_):
+            calls.append(step)
+            evidence = {"checked": True}
+            if step == "migrations":
+                evidence = {"manifest_fingerprint": migration_fingerprint()}
+            elif step == "modules":
+                evidence = {"company_id": company["id"], "configuration_version": 8, "services": {}}
+            elif step == "payments":
+                evidence = {"enabled": False}
+            return {"ok": True, "evidence": evidence}
+
+        return run
+
+    job = Provisioner(control, {step: check(step) for step in STEPS})
+    socket = f"/tmp/c_{company['id'].replace('-', '')}/portal.sock"
+    job.enqueue(company, socket)
+    assert job.run(company["id"])
+    previous = migration_fingerprint()
+    if change == "legacy":
+        with control.connect(True) as db:
+            db.execute(
+                "UPDATE runtime_provisioning SET checks=checks #- "
+                "'{migrations,evidence,manifest_fingerprint}'"
+            )
+    else:
+        manifest = migrations.load_migrations()
+        if change == "append":
+            changed = manifest + (migrations.Migration("future.sql", "analytics", "SELECT 1;"),)
+        else:
+            item = manifest[-1]
+            changed = manifest[:-1] + (
+                migrations.Migration(item.name, item.area, item.template + "\n-- changed"),
+            )
+        monkeypatch.setattr(migrations, "load_migrations", lambda: changed)
+        assert migration_fingerprint() != previous
+    calls.clear()
+    job.enqueue(company, socket)
+    assert job.run(company["id"])
+    assert calls == ["migrations"]
+    with control.connect() as db:
+        row = db.execute("SELECT configuration_version,checks FROM runtime_provisioning").fetchone()
+        assert row["configuration_version"] == 8
+        assert (
+            row["checks"]["migrations"]["evidence"]["manifest_fingerprint"]
+            == migration_fingerprint()
+        )
+    calls.clear()
+    assert job.run(company["id"])
+    assert calls == []

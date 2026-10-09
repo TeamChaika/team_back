@@ -26,7 +26,7 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import dict_row
 
 from app.tenancy.config import TenantRuntime, schema_names
-from app.tenancy.migrations import provision_tenant
+from app.tenancy.migrations import migration_fingerprint, provision_tenant
 from app.tenancy.sql import render, validate_database_runtime
 from app.tenant_payments.store import validate_payment_connection
 
@@ -429,6 +429,7 @@ class RuntimeOperator:
             "ok": True,
             "evidence": {
                 "migration_count": len(applied),
+                "manifest_fingerprint": migration_fingerprint(),
                 "version": self.runtime.configuration_version,
             },
         }
@@ -443,22 +444,9 @@ class RuntimeOperator:
         return {"ok": True, "evidence": "Both restricted login roles validated"}
 
     def identity(self, *_):
-        with self.repo.connect() as db:
-            members = db.execute(
-                "SELECT auth_user_id FROM memberships WHERE company_id=%s "
-                "AND active AND auth_user_id IS NOT NULL",
-                (self.runtime.company_id,),
-            ).fetchall()
-        with psycopg.connect(self.config["runtime_dsn"]) as db:
-            registered = {
-                str(row[0])
-                for row in db.execute(
-                    render("SELECT id FROM {analytics}.portal_identities", self.runtime)
-                )
-            }
-        if any(str(row["auth_user_id"]) not in registered for row in members):
-            raise ValueError("Company identities must be provisioned first")
-        return {"ok": True, "evidence": {"registered_members": len(members)}}
+        from .runtime_identity import ensure_company_identities
+
+        return {"ok": True, "evidence": ensure_company_identities(self)}
 
     def connections(self, *_):
         count = 0

@@ -296,3 +296,16 @@ The Linux test also checks central-group connection to a `0660` company socket
 and denial for the other tenant. Verify the actual production gateway service
 identity has that same access before enabling the fleet.
 A local/macOS pass with this Linux test skipped is not production isolation proof.
+
+
+Primary administrator initialization: the operator may create a fresh local company
+administrator only from an active, exclusive primary `company_admin` membership with
+matching Auth UUID/email/provision marker and completed central provisioning journal.
+Platform identities are excluded. The fixed execution-only identity routine preserves
+all existing profiles on replay; a mismatched receipt, missing employee profile, or
+ambiguous binding blocks identity acceptance. The new profile is a company member
+(`manager`, portal administrator, own company sections/departments), never a platform
+owner. Document warehouse/payment grants are configured separately through existing ACLs.
+The central completed-password state is preserved; no Auth creation or reset occurs.
+Tenant migration evidence contains a fingerprint of ordered filenames, areas and SQL
+checksums. Normal retry rechecks old/missing fingerprints even at the same company version.

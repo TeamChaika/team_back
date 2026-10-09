@@ -265,7 +265,7 @@ def test_concurrent_provisioning_single_committed_history(empty_database):
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(run, range(2)))
     assert sorted(map(len, results)) == [0, len(load_migrations())]
-    assert count_rows(operator, runtime, "analytics", "_tenant_migrations") == 4
+    assert count_rows(operator, runtime, "analytics", "_tenant_migrations") == 5
     assert count_rows(operator, runtime, "documents", "_tenant_migrations") == 4
     assert count_rows(operator, runtime, "payments", "_tenant_migrations") == 3
 
@@ -337,3 +337,22 @@ def test_non_superuser_migration_owner_and_invoker_views(empty_database):
             )
         operator.execute(sql.SQL("DROP OWNED BY {}").format(owner_identifier))
         operator.execute(sql.SQL("DROP ROLE {}").format(owner_identifier))
+
+
+def test_primary_admin_migration_upgrades_existing_journal_once(empty_database, tmp_path):
+    import json
+
+    operator, _dsn, tenant = empty_database
+    runtime = tenant()
+    manifest = json.loads((MIGRATION_DIRECTORY / "manifest.json").read_text())
+    assert (
+        manifest["migrations"][-1]["file"] == "20261010100000_tenant_primary_admin_projection.sql"
+    )
+    old = dict(manifest, migrations=manifest["migrations"][:-1])
+    (tmp_path / "manifest.json").write_text(json.dumps(old))
+    for entry in old["migrations"]:
+        shutil.copyfile(MIGRATION_DIRECTORY / entry["file"], tmp_path / entry["file"])
+    assert len(provision_tenant(operator, runtime, directory=tmp_path)) == len(old["migrations"])
+    applied = provision_tenant(operator, runtime)
+    assert applied == (manifest["migrations"][-1]["file"],)
+    assert provision_tenant(operator, runtime) == ()

@@ -80,7 +80,13 @@ class Provisioner:
                     cached = checks.get(step, {})
                     proof = cached.get("evidence")
                     compatible = True
-                    if step == "modules":
+                    if step == "migrations":
+                        from app.tenancy.migrations import migration_fingerprint
+
+                        compatible = isinstance(proof, dict) and (
+                            proof.get("manifest_fingerprint") == migration_fingerprint()
+                        )
+                    elif step == "modules":
                         compatible = (
                             isinstance(proof, dict)
                             and str(proof.get("company_id")) == str(company_id)

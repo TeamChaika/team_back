@@ -81,6 +81,11 @@ class IdentityTarget:
     def provision(self, user, email, marker, display_name):
         return self._call("provision_company_identity", user, email, marker, display_name)
 
+    def provision_primary(self, user, email, marker, display_name, password_required):
+        return self._call(
+            "provision_company_primary_admin", user, email, marker, display_name, password_required
+        )
+
     def password_complete(self, user):
         self._call("set_company_identity_password_required", user, False)
 
