@@ -18,6 +18,9 @@ from app.saas_admin.vault import Vault
 def deployment(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
+    # These factory tests exercise production HTTP rules with synthetic filesystem
+    # identities. Actual rejection of local-test in production is tested separately.
+    monkeypatch.setattr("app.saas_admin.deployment.policy", lambda configuration: {"mode": "linux"})
     monkeypatch.setattr(
         "app.saas_admin.company_module_settings.CompanyModuleSettings",
         lambda repo: SimpleNamespace(
@@ -107,6 +110,7 @@ def deployment(tmp_path, monkeypatch):
     capability.chmod(0o600)
     database = "host=127.0.0.1 port=55483 dbname=tenant_test"
     config = {
+        "process_isolation": {"mode": "local-test"},
         "company_id": str(company_id),
         "registry_data_directory": str(data),
         "runtime_root": str(tmp_path / "tenants"),

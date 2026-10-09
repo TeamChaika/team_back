@@ -294,19 +294,31 @@ def main():
     from pathlib import Path
 
     parser = argparse.ArgumentParser(description="Launch one company portal on its private socket")
-    parser.add_argument("--config", required=True, help="Private JSON environment manifest (0600)")
+    launch = parser.add_mutually_exclusive_group(required=True)
+    launch.add_argument("--config", help="Private JSON environment manifest (0600)")
+    launch.add_argument("--collector", action="store_true")
     args = parser.parse_args()
     import json
 
-    config_path = Path(args.config)
-    if config_path.stat().st_mode & 0o077:
-        raise SystemExit("Runtime configuration must have mode 0600")
-    config = json.loads(config_path.read_text())
+    if args.collector:
+        config = {
+            k: v
+            for k, v in os.environ.items()
+            if k == "RESTCONTROL_RUNTIME_MODE" or k.startswith("RESTCONTROL_TENANT_")
+        }
+    else:
+        config_path = Path(args.config)
+        if config_path.is_symlink() or config_path.stat().st_mode & 0o077:
+            raise SystemExit("Runtime configuration must have mode 0600")
+        config = json.loads(config_path.read_text())
     if config.get("RESTCONTROL_RUNTIME_MODE") != "tenant" or any(
         not (key == "RESTCONTROL_RUNTIME_MODE" or key.startswith("RESTCONTROL_TENANT_"))
         for key in config
     ):
         raise SystemExit("Only explicit tenant configuration is accepted")
+    for key in ("RESTCONTROL_TENANT_CENTRAL_GID", "RESTCONTROL_TENANT_PROCESS_UID"):
+        if key in os.environ and config.get(key) != os.environ[key]:
+            raise SystemExit("Runtime manifest changed its pinned launch identity")
     # Do not inherit legacy, service-role, or operator secrets into the child.
     for key in list(os.environ):
         if key not in {"PATH", "LANG", "LC_ALL", "TZ"}:
@@ -315,13 +327,19 @@ def main():
     from app.tenancy.config import load_runtime
 
     runtime = load_runtime()
-    runtime.runtime_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if runtime.runtime_directory.stat().st_mode & 0o077:
-        raise SystemExit("Tenant runtime directory must have mode 0700")
+    from app.saas_admin.runtime_process_identity import bind_socket, validate_child_directory
+
+    validate_child_directory(runtime, os.environ)
     os.umask(0o077)
     import uvicorn
 
-    uvicorn.run(build_portal(), uds=str(runtime.runtime_path("portal.sock")), access_log=False)
+    role = "collector" if args.collector else "portal"
+    application = build_collector() if args.collector else build_portal()
+    mode = 0o660 if os.environ.get("RESTCONTROL_TENANT_CENTRAL_GID") else 0o600
+    with bind_socket(runtime.runtime_path(role + ".sock"), mode) as bound:
+        uvicorn.Server(uvicorn.Config(application, access_log=False, proxy_headers=False)).run(
+            sockets=[bound]
+        )
 
 
 if __name__ == "__main__":

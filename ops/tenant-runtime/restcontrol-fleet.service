@@ -5,7 +5,10 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=restcontrol-operator
+# Closed privileged launcher only. Tenant subprocesses drop to dedicated UID/GID.
+# The gateway and verifier are separate unprivileged central services.
+User=root
+Group=root
 WorkingDirectory=/srv/restcontrol/backend
 ExecStart=/srv/restcontrol/venv/bin/python -m app.saas_admin.runtime_fleet --config /private/restcontrol/fleet.json work
 Restart=on-failure

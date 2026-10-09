@@ -1,7 +1,8 @@
 # Private tenant processes — explicit local operator workflow
 
 This tooling is not production rollout approval and does not mark incomplete modules
-ready. Use a reviewed operator manifest outside every tenant directory, mode 0600.
+ready. Use a reviewed operator manifest outside every tenant directory: Linux root:central
+0640, or explicit local-test 0600 (see the process identity section below).
 No production invocation was made while implementing/testing this workflow.
 
 Prerequisite: apply the reviewed control-plane migration
@@ -181,7 +182,7 @@ python -m app.saas_admin serve --mode production --origin https://admin.example.
 ```
 
 The fleet gateway needs no anchor company. Its private verifier and CompanyAccounts
-lazily discover validated UUID-named 0600 company operator files on each use; new
+lazily discover validated UUID-named company operator files on each use; new
 companies do not require a verifier/gateway restart or manual identity target edits.
 Launch/retry uses the logged-in owner's existing central session through normal
 server-side PKCE authorization/exchange. Only the company-bound opaque child is
@@ -206,3 +207,70 @@ configuration, not manually generated DSNs, grants or acceptance-session exports
 Payment terminal/settlement evidence and every other durable readiness check remain
 mandatory when the corresponding capability is enabled. No real deployment, provider
 payment or document submission was performed while implementing this automation.
+
+### Linux process identity boundary
+
+Production fleet configuration must now include in `operator_template`:
+
+```json
+"process_isolation": {"mode": "linux", "central_group": "restcontrol-saas"}
+```
+
+There is no implicit shared-user fallback. `local-test` is an explicit alternative
+for disposable tests only; a production gateway rejects that policy. The supervised
+fleet/operator CLI runs as root, creates dedicated system accounts named
+`rc_<full UUID encoded in base32>` (29 characters), and launches business processes
+with that company's own UID/GID and no supplementary groups. It does not add tenant
+accounts to the central group. Only trusted operator CLI operations create accounts;
+the HTTP gateway never creates them. `NoNewPrivileges` is set before Linux child
+launch, including initial synchronization. Direct CLI exec drops all UID/GID slots
+and closes inherited file descriptors. Existing accounts with unexpected home,
+shell, UID sharing or group memberships are rejected rather than modified.
+
+The trusted release and Python interpreter, and their ancestors, must be root-owned
+and not writable by group/others. Tenant processes start in their own directory;
+`PYTHONPATH` points only at the trusted release. Use these distinct filesystem rules:
+
+| Path | Ownership and mode | Purpose |
+| --- | --- | --- |
+| Fleet JSON and per-company operator JSON | `root:restcontrol-saas`, `0640` | Central read access, no gateway modification of root launch settings |
+| Operator directory | `root:restcontrol-saas`, `0750` | Outside tenant/static roots; central capability originals also live here |
+| Central capability originals `c_UUID.verifier.key`, `c_UUID.documents-worker.key` | `root:restcontrol-saas`, `0640` | Verifier authority; never read back from tenant copies |
+| Tenant root | `root:root`, `0711` | Traverse to own known company directory; cannot list/write |
+| Company directory `c_UUID` | `companyUID:restcontrol-saas`, `02750` | Own company writes, central gateway traversal, no access by another company |
+| Environment and company capability copies | `companyUID:companyGID`, `0600` | Only that company's processes and the root operator |
+| Portal/collector sockets | `companyUID:restcontrol-saas`, `0660` | Bound before Uvicorn with explicit mode; central gateway can connect |
+| Verifier socket directory | verifier service UID, `0711` | Separate directory containing only the socket; all ancestors root-owned and non-writable by others |
+| Verifier socket | verifier service UID, `0666` | Local capability-authenticated endpoint; exact company and role checks remain mandatory |
+| Registry, acceptance storage, encryption keys | Existing central service UID, `0700` directories / `0600` files | Never inside the traverse-only verifier or tenant roots |
+
+The gateway and verifier use the dedicated central group and remain unprivileged;
+no `CAP_DAC_OVERRIDE` is required. The verifier socket directory must be owned by
+its actual service UID; the root fleet must not place secret files in it. The fleet
+JSON and all central directories must be prepared by the operator with the stated
+ownership before gateway/verifier startup. The root fleet prepares company accounts,
+directories and immutable central originals; group modes are accepted only by narrow
+operator loaders, not by the generic private-JSON reader. Linux private child reads
+use descriptor-pinned, nonblocking, size-limited regular files with exact ownership.
+Corrupt tenant files produce a sanitized delayed launch failure for that company;
+other companies stay running. Detailed child stdout/stderr remains disabled.
+
+Tenant roles within one company intentionally share that company's Unix account;
+this boundary isolates companies and the central control plane, not same-company
+workers from each other. The trusted central gateway can traverse tenant directories
+and connect sockets but cannot read the `0600` tenant environment or payment vault.
+The root operator backs up tenant vaults separately.
+
+Linux acceptance must run in a **disposable root Linux Docker container**, with the
+checkout copied root-owned under `/srv/backend`, root-owned Python interpreter,
+`useradd`/`userdel`, group `nogroup`, user `nobody`, and full test dependencies installed. This test
+refuses ordinary hosts and is skipped unless explicitly enabled:
+
+```text
+RESTCONTROL_LINUX_IDENTITY_TESTS=1 python -m pytest tests/test_runtime_process_identity.py -q
+```
+
+The Linux test also checks central-group connection to a `0660` company socket
+and denial for the other tenant. Verify the actual production gateway service
+identity has that same access before enabling the fleet.
+A local/macOS pass with this Linux test skipped is not production isolation proof.

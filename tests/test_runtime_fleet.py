@@ -32,6 +32,7 @@ def test_fleet_prepares_distinct_durable_credentials_without_authority(tmp_path)
         {
             "operator_directory": str(tmp_path / "control"),
             "operator_template": {
+                "process_isolation": {"mode": "local-test"},
                 "operator_dsn": (
                     "host=localhost port=55483 dbname=local user=ddl "
                     "password=global-secret options='-c search_path=public'"
@@ -85,6 +86,7 @@ def test_discovery_accepts_new_binding_without_restart(tmp_path):
     config = {
         "operator_directory": str(tmp_path / "control"),
         "operator_template": {
+            "process_isolation": {"mode": "local-test"},
             "operator_dsn": common + " user=ddl",
             "registry_dsn": common + " user=registry",
             "registry_data_directory": str(tmp_path / "registry"),
@@ -114,7 +116,7 @@ def test_discovery_accepts_new_binding_without_restart(tmp_path):
         discovery[company["id"]]
 
 
-def test_supervisor_starts_only_own_roles_and_keeps_live_children(tmp_path):
+def test_supervisor_starts_only_own_roles_and_keeps_live_children(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from app.saas_admin.runtime_fleet import FleetSupervisor
@@ -133,7 +135,25 @@ def test_supervisor_starts_only_own_roles_and_keeps_live_children(tmp_path):
     path = tmp_path / "company.json"
     assert supervisor.start(path, "work") is True
     assert supervisor.start(path, "work") is False
+    # The privileged wrapper is never handed to an unprivileged child.
+    identity = SimpleNamespace(
+        spawn_options=lambda: {"user": 123, "group": 124, "extra_groups": []}
+    )
+    operator = SimpleNamespace(
+        foreground_command=lambda role: (
+            ["python", "-m", "app.documents.worker"],
+            {"own": "value"},
+        ),
+        process_identity=lambda: identity,
+        close=lambda: None,
+    )
+    supervisor.preparer.repo = object()
+    monkeypatch.setattr("app.saas_admin.runtime_fleet.read_operator_json", lambda path: {})
+    monkeypatch.setattr("app.saas_admin.runtime_operator.RuntimeOperator", lambda *args: operator)
     assert supervisor.start(path, "run-documents-worker") is True
+    assert calls[1][0] == ["python", "-m", "app.documents.worker"]
+    assert calls[1][1]["user"] == 123
+    assert calls[1][1]["extra_groups"] == []
     assert len(calls) == 2
     assert calls[0][0][-3:] == ["--config", str(path), "work"]
     assert set(calls[0][1]["env"]) == {"PATH", "LANG"}
@@ -192,7 +212,14 @@ def test_supervisor_does_not_unlink_existing_live_socket(tmp_path, request):
     runtime = tmp_path / ("c_" + company.hex)
     runtime.mkdir()
     path = tmp_path / "config.json"
-    atomic_private_json(path, {"company_id": str(company), "runtime_root": str(tmp_path)})
+    atomic_private_json(
+        path,
+        {
+            "company_id": str(company),
+            "runtime_root": str(tmp_path),
+            "process_isolation": {"mode": "local-test"},
+        },
+    )
     address = runtime / "portal.sock"
     supervisor = FleetSupervisor(SimpleNamespace(), popen=lambda *args, **kwargs: None)
     with socket.socket(socket.AF_UNIX) as server:

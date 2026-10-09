@@ -74,7 +74,9 @@ Secure SameSite=Strict cookie, CSRF. Нет wildcard или fallback к Чайк
 
 Новый полный runtime запускает существующий `app.portal` через
 `app.tenancy.bootstrap` и приватный gateway. Автоматическая подготовка:
-`runtime_fleet.py` → `fleet_discovery.py` → `runtime_operator.py`; центральный
+`runtime_fleet.py` → `fleet_discovery.py` → `runtime_operator.py`; Linux-запуск
+изолирует UID/GID компаний через `runtime_process_identity.py` (root-owned central
+config, отдельные Unix accounts, central-group sockets, fail-closed policy); центральный
 вход и supervised fleet задаются в `ops/tenant-runtime/README.md`. Значение
 `full_dashboard_available` сохраняет историю ранее принятого кабинета при
 изменении конфигурации, а `full_dashboard_ready` разрешает новые операции только

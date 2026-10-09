@@ -34,6 +34,7 @@ from .connection_check import check_connection
 from .connections import configured
 from .postgres_repository import PostgresRepository
 from .provisioning import Provisioner
+from .runtime_process_identity import ProcessIdentity, read_central_secret, read_operator_json
 
 
 def private_json(path):
@@ -118,18 +119,16 @@ class RuntimeOperator:
             raise ValueError("Company configuration changed or is inactive")
         return current
 
+    def process_identity(self, *, create: bool = False) -> ProcessIdentity:
+        return ProcessIdentity(self.config, self.runtime.company_id, create=create)
+
     def prepare_manifest(self):
         from .runtime_module_settings import apply_company_settings
 
         current = self.current(str(self.runtime.company_id), self.runtime.configuration_version)
         apply_company_settings(self.config, current, self.settings_service)
         runtime = self.runtime
-        runtime.runtime_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if (
-            runtime.runtime_directory.is_symlink()
-            or runtime.runtime_directory.stat().st_mode & 0o077
-        ):
-            raise ValueError("Runtime directory must be private")
+        identity = self.process_identity(create=True)
         url, login, password = self.repo.check_inputs(
             str(runtime.company_id), "chain", runtime.configuration_version
         )
@@ -160,12 +159,22 @@ class RuntimeOperator:
                 }
             )
         secret_file = runtime.runtime_path("verifier.key")
-        if not secret_file.exists():
-            descriptor = os.open(secret_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, "w") as stream:
-                stream.write(secrets.token_urlsafe(48))
-        if secret_file.is_symlink() or secret_file.stat().st_mode & 0o077:
-            raise ValueError("Verifier capability must be private")
+        if self.config.get("verifier_grants"):
+            for grant in self.config["verifier_grants"]:
+                filename = {
+                    "portal": "verifier.key",
+                    "documents-worker": "documents-worker.key",
+                }.get(grant["role"])
+                if filename is None or str(grant["company_id"]) != str(runtime.company_id):
+                    raise ValueError("Invalid company verifier grant")
+                identity.write_private(
+                    filename, read_central_secret(grant["secret_file"], self.config)
+                )
+        elif identity.policy["mode"] == "local-test":
+            if not secret_file.exists():
+                identity.write_private("verifier.key", secrets.token_urlsafe(48))
+        else:
+            raise ValueError("Linux tenant requires central pinned verifier capabilities")
         # Input DSNs are separate role credentials, never the operator or registry DSN.
         for field, role in [
             ("runtime_dsn", runtime.database_role),
@@ -239,14 +248,27 @@ class RuntimeOperator:
                 elif isinstance(value, bool):
                     value = str(value).lower()
                 env["RESTCONTROL_TENANT_" + prefix + name.upper()] = str(value)
-        atomic_private_json(self.manifest, env)
+        env.update(
+            {k: v for k, v in identity.environment().items() if k.startswith("RESTCONTROL_TENANT_")}
+        )
+        identity.write_private(self.manifest.name, json.dumps(env))
         return env
 
     def child_environment(self, role="collector"):
         if role not in {"portal", "collector", "documents-worker", "scheduler"}:
             raise ValueError("Unknown process role")
         self.current(str(self.runtime.company_id), self.runtime.configuration_version)
-        env = private_json(self.manifest)
+        identity = self.process_identity()
+        try:
+            env = json.loads(identity.read_private(self.manifest.name))
+        except RecursionError:
+            raise ValueError("Child manifest nesting is invalid") from None
+        if not isinstance(env, dict) or any(not isinstance(value, str) for value in env.values()):
+            raise ValueError("Child manifest must contain string environment values")
+        if any(
+            k != "RESTCONTROL_RUNTIME_MODE" and not k.startswith("RESTCONTROL_TENANT_") for k in env
+        ):
+            raise ValueError("Child manifest contains a non-tenant setting")
         if env.get("RESTCONTROL_TENANT_COMPANY_ID") != str(self.runtime.company_id) or env.get(
             "RESTCONTROL_TENANT_CONFIGURATION_VERSION"
         ) != str(self.runtime.configuration_version):
@@ -277,22 +299,24 @@ class RuntimeOperator:
             ]
             if len(matches) != 1:
                 raise ValueError("A distinct document-worker verifier capability is required")
-            secret = Path(matches[0]["secret_file"])
-            portal_secret = Path(
-                private_json(self.manifest)["RESTCONTROL_TENANT_VERIFIER_SECRET_FILE"]
-            )
-            if (
-                secret.is_symlink()
-                or not secret.is_file()
-                or secret.stat().st_mode & 0o077
-                or secret.read_text().strip() == portal_secret.read_text().strip()
-            ):
+            secret = self.runtime.runtime_path("documents-worker.key")
+            secret_value = identity.read_private(secret.name, limit=4096).strip()
+            central_value = read_central_secret(matches[0]["secret_file"], self.config)
+            if secret_value != central_value:
+                raise ValueError("Worker capability differs from its central pinned copy")
+            portal_value = identity.read_private("verifier.key", limit=4096).strip()
+            if secret_value == portal_value:
                 raise ValueError("Document worker requires its own private capability")
             env["RESTCONTROL_TENANT_VERIFIER_SECRET_FILE"] = str(secret)
             env["RESTCONTROL_TENANT_VERIFIER_SOCKET"] = self.config["verifier_socket"]
             if env.get("RESTCONTROL_TENANT_DOCUMENTS_WORKER_ENABLED") != "true":
                 raise ValueError("Document worker must be explicitly enabled")
-        return {"PATH": os.defpath, "LANG": "C.UTF-8", **env}
+        return {
+            "PATH": os.defpath,
+            "LANG": "C.UTF-8",
+            **env,
+            **self.process_identity().environment(),
+        }
 
     def foreground_command(self, role):
         """Supervisor-owned processes: never implicitly start external writers."""
@@ -308,12 +332,8 @@ class RuntimeOperator:
             return [
                 sys.executable,
                 "-m",
-                "uvicorn",
-                "app.tenancy.bootstrap:build_collector",
-                "--factory",
-                "--uds",
-                str(self.runtime.collector_socket),
-                "--no-access-log",
+                "app.tenancy.bootstrap",
+                "--collector",
             ], self.child_environment(role)
         if role == "documents-worker":
             return [sys.executable, "-m", "app.documents.worker"], self.child_environment(role)
@@ -355,28 +375,16 @@ class RuntimeOperator:
             from .provisioning import PendingCheck
 
             raise PendingCheck("runtime_process_pending", {"process": role})
-        command = (
-            [sys.executable, "-m", "app.tenancy.bootstrap", "--config", str(self.manifest)]
-            if role == "portal"
-            else [
-                sys.executable,
-                "-m",
-                "uvicorn",
-                "app.tenancy.bootstrap:build_collector",
-                "--factory",
-                "--uds",
-                str(socket),
-                "--no-access-log",
-            ]
-        )
+        command, environment = self.foreground_command(role)
         # No stdout or HTTP logs containing credentials or capabilities are retained.
         process = subprocess.Popen(
             command,
-            env=self.child_environment(role),
+            env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            **self.process_identity().spawn_options(),
         )
         atomic_private_json(
             self.runtime.runtime_path(role + ".pid.json"),
@@ -488,6 +496,7 @@ class RuntimeOperator:
                 stderr=subprocess.DEVNULL,
                 timeout=6 * 3600,
                 check=False,
+                **self.process_identity().spawn_options(),
             )
             if result.returncode:
                 raise ValueError("Initial synchronization failed")
@@ -642,13 +651,8 @@ class RuntimeOperator:
         grants = []
         for item in self.config["verifier_grants"]:
             secret_file = Path(item["secret_file"])
-            if secret_file.is_symlink() or secret_file.stat().st_mode & 0o077:
-                raise ValueError("Verifier capability files must be private")
-            grants.append(
-                VerifierGrant(
-                    str(UUID(item["company_id"])), item["role"], secret_file.read_text().strip()
-                )
-            )
+            secret = read_central_secret(secret_file, self.config)
+            grants.append(VerifierGrant(str(UUID(item["company_id"])), item["role"], secret))
         targets = {}
         definitions = self.config.get("identity_targets")
         if definitions is None:
@@ -661,6 +665,13 @@ class RuntimeOperator:
         target_fields = ("host", "hostaddr", "port", "dbname")
         database = conninfo_to_dict(self.config["operator_dsn"])
         for item in definitions:
+            if (
+                item.get("environment_file")
+                and self.config["process_isolation"]["mode"] != "local-test"
+            ):
+                raise ValueError(
+                    "Linux identity targets cannot read tenant-owned environment overrides"
+                )
             company_id = str(UUID(item["company_id"]))
             runtime = (
                 TenantRuntime.from_env(private_json(item["environment_file"]))
@@ -686,15 +697,11 @@ class RuntimeOperator:
         return create_verifier_app(self.repo, grants, company_accounts=self.company_accounts)
 
     def serve_verifier(self):
-        import uvicorn
+        from .runtime_process_identity import serve_verifier_socket
 
-        socket = Path(self.config["verifier_socket"])
-        if not socket.is_absolute() or socket.parent.stat().st_mode & 0o077:
-            raise ValueError("Verifier socket directory must be absolute and private")
-        os.umask(0o077)
         app = self.verifier_app()
         try:
-            uvicorn.run(app, uds=str(socket), access_log=False)
+            serve_verifier_socket(app, self.config["verifier_socket"], self.config)
         finally:
             self.close()
 
@@ -768,13 +775,13 @@ def main():
     )
     args = parser.parse_args()
     try:
-        operator = RuntimeOperator(private_json(args.config))
+        operator = RuntimeOperator(read_operator_json(args.config))
         if args.action.startswith("run-"):
             command, environment = operator.foreground_command(args.action.removeprefix("run-"))
-            os.execve(command[0], command, environment)
+            operator.process_identity().exec(command, environment)
         elif args.action == "work":
             while True:
-                current_operator = RuntimeOperator(private_json(args.config))
+                current_operator = RuntimeOperator(read_operator_json(args.config))
                 try:
                     current_operator.poll_once()
                 finally:

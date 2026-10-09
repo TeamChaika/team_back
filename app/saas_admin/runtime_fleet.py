@@ -5,6 +5,8 @@ owner, fabricate acceptance evidence, launch processes or submit external writes
 """
 
 import argparse
+import json
+import logging
 import os
 import secrets
 import signal
@@ -20,7 +22,12 @@ import httpx
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from .postgres_repository import PostgresRepository
-from .runtime_operator import atomic_private_json, private_json
+from .runtime_process_identity import (
+    ProcessIdentity,
+    central_directory,
+    read_operator_json,
+    write_central,
+)
 
 
 class FleetPreparer:
@@ -51,9 +58,7 @@ class FleetPreparer:
             raise ValueError(
                 "Central operator files must remain outside tenant runtime directories"
             )
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if self.root.is_symlink() or self.root.stat().st_mode & 0o077:
-            raise ValueError("Operator directory must be private")
+        central_directory(self.root, self.template, create=True)
         self.repo = repository or PostgresRepository(
             self.template["registry_dsn"], self.template["registry_data_directory"]
         )
@@ -74,7 +79,7 @@ class FleetPreparer:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             if path.exists():
-                saved = private_json(path)
+                saved = read_operator_json(path)
                 if saved["company_id"] != str(company_id):
                     raise ValueError("Existing operator belongs to another company")
                 saved["supervisor_managed"] = True
@@ -89,7 +94,7 @@ class FleetPreparer:
                 from .runtime_module_settings import apply_company_settings
 
                 apply_company_settings(saved, company, self.settings_service)
-                atomic_private_json(path, saved)
+                write_central(path, json.dumps(saved), self.template)
                 return path
             configuration = {**self.template, "company_id": str(company_id)}
             target = conninfo_to_dict(self.template["operator_dsn"])
@@ -107,22 +112,20 @@ class FleetPreparer:
                     user=f"c_{company_id.hex}_{suffix}",
                     password=secrets.token_urlsafe(36),
                 )
-            runtime = Path(self.template["runtime_root"]) / ("c_" + company_id.hex)
-            runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
-            if runtime.is_symlink() or runtime.stat().st_mode & 0o077:
-                raise ValueError("Runtime directory must be private")
+            identity = ProcessIdentity(configuration, company_id, create=True)
             grants = []
             for role, filename in [
                 ("portal", "verifier.key"),
                 ("documents-worker", "documents-worker.key"),
             ]:
-                key = runtime / filename
+                key = self.root / ("c_" + company_id.hex + "." + filename)
                 if not key.exists():
-                    key_fd = os.open(key, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                    with os.fdopen(key_fd, "w") as stream:
-                        stream.write(secrets.token_urlsafe(48))
-                if key.is_symlink() or key.stat().st_mode & 0o077:
-                    raise ValueError("Capability must be private")
+                    write_central(key, secrets.token_urlsafe(48), self.template)
+                # The central copy is authoritative, outside the writable tenant directory.
+                from .runtime_process_identity import read_central_secret
+
+                secret = read_central_secret(key, self.template)
+                identity.write_private(filename, secret)
                 grants.append(
                     {"company_id": str(company_id), "role": role, "secret_file": str(key)}
                 )
@@ -147,7 +150,7 @@ class FleetPreparer:
             from .runtime_module_settings import apply_company_settings
 
             apply_company_settings(configuration, company, self.settings_service)
-            atomic_private_json(path, configuration)
+            write_central(path, json.dumps(configuration), self.template)
             return path
         finally:
             os.close(descriptor)
@@ -158,7 +161,15 @@ class FleetPreparer:
                 "SELECT company_id FROM runtime_provisioning "
                 "WHERE state='pending' ORDER BY updated_at"
             ).fetchall()
-        return [self.prepare(self.repo.get(str(row["company_id"]))) for row in pending]
+        prepared = []
+        for row in pending:
+            try:
+                prepared.append(self.prepare(self.repo.get(str(row["company_id"]))))
+            except (ValueError, OSError, KeyError, subprocess.SubprocessError):
+                logging.getLogger(__name__).warning(
+                    "Tenant preparation failed; binding retained for explicit retry"
+                )
+        return prepared
 
 
 class FleetSupervisor:
@@ -168,8 +179,29 @@ class FleetSupervisor:
         self.preparer, self.popen = preparer, popen
         self.children, self.retry_after, self.versions = {}, {}, {}
         self.restart_after = {}
+        self.launch_errors = {}
 
     def start(self, path, action, version=None):
+        key = (str(path), action)
+        if key in self.launch_errors and time.monotonic() < self.restart_after.get(key, 0):
+            return False
+        try:
+            result = self._start(path, action, version)
+            self.launch_errors.pop(key, None)
+            return result
+        except (ValueError, OSError, KeyError, subprocess.SubprocessError):
+            self.launch_errors[key] = "runtime_launch_failed"
+            self.restart_after[key] = time.monotonic() + 30
+            logging.getLogger(__name__).warning(
+                "Tenant process launch failed (%s); retry delayed",
+                action
+                if action
+                in {"work", "run-portal", "run-collector", "run-documents-worker", "run-scheduler"}
+                else "invalid-action",
+            )
+            return False
+
+    def _start(self, path, action, version=None):
         key = (str(path), action)
         process = self.children.get(key)
         if (
@@ -183,7 +215,7 @@ class FleetSupervisor:
                 return False
             self.stop(key)
         if action in {"run-portal", "run-collector"}:
-            config = private_json(path)
+            config = read_operator_json(path)
             address = (
                 Path(config["runtime_root"])
                 / ("c_" + UUID(config["company_id"]).hex)
@@ -204,20 +236,34 @@ class FleetSupervisor:
                         return False  # Existing live process is never silently adopted or replaced.
         self.versions[key] = version
         self.restart_after[key] = time.monotonic() + 10
+        command = [
+            sys.executable,
+            "-m",
+            "app.saas_admin.runtime_operator",
+            "--config",
+            str(path),
+            action,
+        ]
+        environment = {"PATH": os.defpath, "LANG": "C.UTF-8"}
+        options = {}
+        if action.startswith("run-"):
+            from .runtime_operator import RuntimeOperator
+
+            config = read_operator_json(path)
+            operator = RuntimeOperator(config, self.preparer.repo)
+            try:
+                command, environment = operator.foreground_command(action.removeprefix("run-"))
+                options = operator.process_identity().spawn_options()
+            finally:
+                operator.close()
         self.children[key] = self.popen(
-            [
-                sys.executable,
-                "-m",
-                "app.saas_admin.runtime_operator",
-                "--config",
-                str(path),
-                action,
-            ],
-            env={"PATH": os.defpath, "LANG": "C.UTF-8"},
+            command,
+            env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            **options,
         )
         return True
 
@@ -227,7 +273,7 @@ class FleetSupervisor:
             return
         socket, identity = None, None
         if key[1] in {"run-portal", "run-collector"}:
-            config = private_json(key[0])
+            config = read_operator_json(key[0])
             socket = (
                 Path(config["runtime_root"])
                 / ("c_" + UUID(config["company_id"]).hex)
@@ -276,48 +322,56 @@ class FleetSupervisor:
     def tick(self):
         self.preparer.prepare_pending()
         for path in self.preparer.root.glob("c_*.json"):
-            config = private_json(path)
-            company = self.preparer.repo.get(config["company_id"])
-            if company.get("status") != "active" or company.get("archived_at"):
-                for key in list(self.children):
-                    if key[0] == str(path):
-                        self.stop(key)
-                continue
-            version = company["version"]
-            for key in list(self.children):
-                if key[0] == str(path) and self.versions.get(key) != version:
-                    self.stop(key)
-            self.start(path, "work", version)
-            with self.preparer.repo.connect() as db:
-                state = db.execute(
-                    "SELECT checks,error_code,state,configuration_version "
-                    "FROM runtime_provisioning WHERE company_id=%s",
-                    (company["id"],),
-                ).fetchone()
-            if not state or state["configuration_version"] != version:
-                continue
-            checks = state["checks"]
-            if checks.get("database_roles", {}).get("ok"):
-                self.start(path, "run-collector", version)
-                self.start(path, "run-portal", version)
-                if config.get("document_settings", {}).get("worker_enabled"):
-                    self.start(path, "run-documents-worker", version)
-            if checks.get("initial_sync", {}).get("ok"):
-                self.start(path, "run-scheduler", version)
-            missing = checks.get("modules", {}).get("evidence", {}).get("missing", [])
-            transient = state["error_code"] == "runtime_process_pending" or (
-                missing and set(missing) <= {"documents_worker_not_ready", "scheduler_not_ready"}
-            )
-            if state["state"] == "failed" and transient:
-                due = self.retry_after.setdefault(str(path), time.monotonic() + 30)
-                if time.monotonic() >= due:
-                    from .runtime_operator import RuntimeOperator
+            try:
+                self.tick_company(path)
+            except (ValueError, OSError, KeyError, subprocess.SubprocessError):
+                logging.getLogger(__name__).warning(
+                    "Tenant supervisor binding failed; other companies remain running"
+                )
 
-                    operator = RuntimeOperator(config, self.preparer.repo)
-                    operator.provisioner().enqueue(
-                        company, str(operator.runtime.runtime_path("portal.sock"))
-                    )
-                    self.retry_after[str(path)] = time.monotonic() + 60
+    def tick_company(self, path):
+        config = read_operator_json(path)
+        company = self.preparer.repo.get(config["company_id"])
+        if company.get("status") != "active" or company.get("archived_at"):
+            for key in list(self.children):
+                if key[0] == str(path):
+                    self.stop(key)
+            return
+        version = company["version"]
+        for key in list(self.children):
+            if key[0] == str(path) and self.versions.get(key) != version:
+                self.stop(key)
+        self.start(path, "work", version)
+        with self.preparer.repo.connect() as db:
+            state = db.execute(
+                "SELECT checks,error_code,state,configuration_version "
+                "FROM runtime_provisioning WHERE company_id=%s",
+                (company["id"],),
+            ).fetchone()
+        if not state or state["configuration_version"] != version:
+            return
+        checks = state["checks"]
+        if checks.get("database_roles", {}).get("ok"):
+            self.start(path, "run-collector", version)
+            self.start(path, "run-portal", version)
+            if config.get("document_settings", {}).get("worker_enabled"):
+                self.start(path, "run-documents-worker", version)
+        if checks.get("initial_sync", {}).get("ok"):
+            self.start(path, "run-scheduler", version)
+        missing = checks.get("modules", {}).get("evidence", {}).get("missing", [])
+        transient = state["error_code"] == "runtime_process_pending" or (
+            missing and set(missing) <= {"documents_worker_not_ready", "scheduler_not_ready"}
+        )
+        if state["state"] == "failed" and transient:
+            due = self.retry_after.setdefault(str(path), time.monotonic() + 30)
+            if time.monotonic() >= due:
+                from .runtime_operator import RuntimeOperator
+
+                operator = RuntimeOperator(config, self.preparer.repo)
+                operator.provisioner().enqueue(
+                    company, str(operator.runtime.runtime_path("portal.sock"))
+                )
+                self.retry_after[str(path)] = time.monotonic() + 60
 
     def close(self):
         for key in list(self.children):
@@ -332,19 +386,16 @@ def main():
     )
     args = parser.parse_args()
     os.umask(0o077)
-    config = private_json(args.config)
+    config = read_operator_json(args.config)
     preparer = FleetPreparer(config)
     if args.action == "serve-verifier":
-        import uvicorn
-
         from .fleet_discovery import build_fleet_verifier
+        from .runtime_process_identity import serve_verifier_socket
 
         app, repo, _ = build_fleet_verifier(config, preparer.repo)
         socket = Path(config["operator_template"]["verifier_socket"])
-        if not socket.is_absolute() or socket.parent.stat().st_mode & 0o077:
-            raise ValueError("Verifier socket must be private")
         try:
-            uvicorn.run(app, uds=str(socket), access_log=False, proxy_headers=False)
+            serve_verifier_socket(app, socket, config["operator_template"])
         finally:
             repo.auth.close()
     elif args.action == "work":

@@ -7,26 +7,22 @@ from uuid import UUID
 from psycopg.conninfo import conninfo_to_dict
 
 from .company_accounts import CompanyAccounts, IdentityTarget
-from .runtime_operator import RuntimeOperator, private_json
+from .runtime_operator import RuntimeOperator
+from .runtime_process_identity import central_directory, read_central_secret, read_operator_json
 
 
 class FleetDiscovery(Mapping):
     def __init__(self, configuration, repository):
         self.configuration, self.repository = configuration, repository
         self.root = Path(configuration["operator_directory"])
-        if (
-            not self.root.is_absolute()
-            or self.root.is_symlink()
-            or self.root.stat().st_mode & 0o077
-        ):
-            raise ValueError("Fleet registry must be a private absolute directory")
+        central_directory(self.root, configuration["operator_template"])
 
     def operator(self, company_id):
         company_id = str(UUID(str(company_id)))
         path = self.root / ("c_" + UUID(company_id).hex + ".json")
         if not path.exists():
             raise KeyError(company_id)
-        config = private_json(path)
+        config = read_operator_json(path)
         template = self.configuration["operator_template"]
         if (
             config["company_id"] != company_id
@@ -74,17 +70,11 @@ class FleetDiscovery(Mapping):
             if filename is None or str(item["company_id"]) != str(operator.runtime.company_id):
                 raise ValueError("Invalid company verifier role")
             path = Path(item["secret_file"])
-            if (
-                path != operator.runtime.runtime_path(filename)
-                or path.is_symlink()
-                or path.stat().st_mode & 0o077
-            ):
-                raise ValueError("Verifier capability is outside its private company runtime")
-            grants.append(
-                VerifierGrant(
-                    str(operator.runtime.company_id), item["role"], path.read_text().strip()
-                )
-            )
+            expected = self.root / (operator.runtime.key + "." + filename)
+            if path != expected:
+                raise ValueError("Verifier capability is outside its central company binding")
+            secret = read_central_secret(path, operator.config)
+            grants.append(VerifierGrant(str(operator.runtime.company_id), item["role"], secret))
         return grants
 
 

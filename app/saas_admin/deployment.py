@@ -11,7 +11,8 @@ from pathlib import Path
 from starlette.concurrency import run_in_threadpool
 
 from .provisioning_routes import public_targets
-from .runtime_operator import RuntimeOperator, private_json
+from .runtime_operator import RuntimeOperator
+from .runtime_process_identity import policy, read_operator_json
 from .runtime_registry import RuntimeRegistry
 from .server import create_app
 
@@ -23,7 +24,12 @@ def create_deployment_app(
     if runtime_config is None:
         return create_app(data_dir, dist_dir, origin, mode)
 
-    configuration = private_json(runtime_config)
+    configuration = read_operator_json(runtime_config)
+    if (
+        mode == "production"
+        and policy(configuration.get("operator_template", configuration))["mode"] != "linux"
+    ):
+        raise ValueError("Production requires Linux process isolation")
     if "operator_template" in configuration:
         return create_fleet_deployment_app(configuration, data_dir, dist_dir, origin, mode)
     if Path(configuration["registry_data_directory"]).resolve() != Path(data_dir).resolve():

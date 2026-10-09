@@ -48,6 +48,7 @@ def test_render_uses_saved_own_credentials_and_scoped_roles(tmp_path, monkeypatc
 
     common = "host=127.0.0.1 port=55483 dbname=tenant_test"
     config = {
+        "process_isolation": {"mode": "local-test"},
         "company_id": str(company_id),
         "runtime_root": str(tmp_path),
         "operator_dsn": common + " user=operator password=operator-secret",
