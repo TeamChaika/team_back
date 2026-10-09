@@ -339,9 +339,58 @@ def test_initial_sync_stock_command_accepted_by_real_cli_in_company_time(monkeyp
     balances.main()
     assert captured == [datetime(2026, 10, 10, 8, 4, 5)]
     assert result["ok"] is True
-    assert len(result["evidence"]["completed_jobs"]) == 8
-    for command in commands[-3:]:
+    assert len(result["evidence"]["completed_jobs"]) == 17
+    for command in (commands[5], commands[7]):
         assert command[3:] == ["--date-from", "2026-08-10", "--date-to", "2026-10-08"]
+
+
+def test_initial_sync_document_and_cash_history_commands_use_actual_cli(monkeypatch):
+    from datetime import date, timedelta
+    from types import SimpleNamespace
+
+    import app.saas_admin.runtime_operator as module
+    import app.sync_cash_shifts as cash_shifts
+    import app.sync_documents as documents
+    from app.saas_admin.initial_sync_plan import initial_sync_compatible
+
+    commands = []
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, **kwargs: commands.append(command) or SimpleNamespace(returncode=0),
+    )
+    result = initial_sync_operator(monkeypatch).initial_sync()
+    assert initial_sync_compatible(result)
+    captured = []
+    monkeypatch.setattr(documents, "Settings", lambda: object())
+    monkeypatch.setattr(documents.signal, "signal", lambda *_: None)
+    monkeypatch.setattr(documents, "synchronize_histories", lambda *args: captured.append(args))
+    command = next(command for command in commands if command[2] == "app.sync_documents")
+    monkeypatch.setattr(module.sys, "argv", [command[2], *command[3:]])
+    documents.main()
+    assert [request.resource for request in captured[0][4]] == [
+        "writeoffs",
+        "incoming_invoices",
+        "outgoing_invoices",
+        "transfers",
+    ]
+    monkeypatch.setattr(cash_shifts, "Settings", lambda: object())
+    periods = []
+    monkeypatch.setattr(
+        cash_shifts,
+        "synchronize_cash_shifts",
+        lambda settings, query: periods.append(query) or {"status": "succeeded"},
+    )
+    for command in commands:
+        if command[2] == "app.sync_cash_shifts":
+            monkeypatch.setattr(module.sys, "argv", [command[2], *command[3:]])
+            cash_shifts.main()
+    days = [
+        query.open_date_from + timedelta(days=offset)
+        for query in periods
+        for offset in range((query.open_date_to - query.open_date_from).days + 1)
+    ]
+    assert days == [date(2026, 8, 10) + timedelta(days=offset) for offset in range(60)]
 
 
 @pytest.mark.parametrize("timeout", [False, True])

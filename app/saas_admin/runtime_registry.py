@@ -30,10 +30,13 @@ WORKING_CHECKS = REQUIRED_CHECKS - {"modules", "payments"}
 
 
 def completed(checks, required):
+    from .initial_sync_plan import initial_sync_compatible
+
     return all(
         isinstance(checks.get(step), dict)
         and checks[step].get("ok") is True
         and bool(checks[step].get("evidence"))
+        and (step != "initial_sync" or initial_sync_compatible(checks[step]))
         for step in required
     )
 
@@ -71,12 +74,7 @@ class RuntimeRegistry:
             ).fetchone()
         if not row or row["state"] != "ready" or row["configuration_version"] != company["version"]:
             return None
-        if any(
-            not isinstance(row["checks"].get(key), dict)
-            or row["checks"][key].get("ok") is not True
-            or not row["checks"][key].get("evidence")
-            for key in REQUIRED_CHECKS
-        ):
+        if not completed(row["checks"], REQUIRED_CHECKS):
             return None
         return ReadyRuntime(str(company["id"]), row["configuration_version"], row["socket_path"])
 
@@ -181,12 +179,7 @@ class RuntimeRegistry:
             ).fetchone()
         if not row or row["configuration_version"] != company["version"]:
             return None
-        if any(
-            not isinstance(row["checks"].get(key), dict)
-            or row["checks"][key].get("ok") is not True
-            or not row["checks"][key].get("evidence")
-            for key in SETUP_CHECKS
-        ):
+        if not completed(row["checks"], SETUP_CHECKS):
             return None
         try:
             runtime = ReadyRuntime(str(company["id"]), company["version"], row["socket_path"])

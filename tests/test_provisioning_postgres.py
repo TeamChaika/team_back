@@ -2,6 +2,7 @@
 
 import os
 from contextlib import contextmanager
+from datetime import date
 from uuid import uuid4
 
 import psycopg
@@ -9,9 +10,17 @@ import pytest
 from psycopg import sql
 from psycopg.rows import dict_row
 
+from app.saas_admin.initial_sync_plan import REQUIRED_JOBS, initial_sync_plan
 from app.saas_admin.provisioning import STEPS, Provisioner
 from app.saas_admin.runtime_registry import RuntimeRegistry
 from app.tenancy.migrations import migration_fingerprint
+
+
+def history_evidence():
+    return {
+        **initial_sync_plan(date(2026, 10, 8), date(2026, 10, 8)),
+        "completed_jobs": list(REQUIRED_JOBS),
+    }
 
 
 @pytest.fixture
@@ -71,6 +80,8 @@ def test_resume_durable_only_and_version_invalidates(control):
                 "evidence": (
                     {"manifest_fingerprint": migration_fingerprint()}
                     if step == "migrations"
+                    else history_evidence()
+                    if step == "initial_sync"
                     else "synthetic test evidence"
                 ),
             }
@@ -183,6 +194,7 @@ def test_setup_requires_current_durable_checks_and_own_live_health(control, monk
     provision.enqueue(company, f"/tmp/c_{company['id'].replace('-', '')}/portal.sock")
     assert registry.resolve_setup(company) is None
     checks = {key: {"ok": True, "evidence": "test prerequisite"} for key in SETUP_CHECKS}
+    checks["initial_sync"]["evidence"] = history_evidence()
     with control.connect(True) as db:
         db.execute("UPDATE runtime_provisioning SET checks=%s", (Jsonb(checks),))
     health = {"status": "ok", "company_id": company["id"], "configuration_version": 1}
@@ -225,7 +237,12 @@ def test_independent_checks_continue_and_working_is_not_full_ready(control):
                     "configuration_missing",
                     {"company_id": company["id"], "configuration_version": 1},
                 )
-            return {"ok": True, "evidence": "synthetic foundation proof"}
+            return {
+                "ok": True,
+                "evidence": history_evidence()
+                if step == "initial_sync"
+                else "synthetic foundation proof",
+            }
 
         return check
 
@@ -258,7 +275,15 @@ def test_payment_mutation_lock_revokes_proof_and_blocks_provisioner(control):
     from app.saas_admin.repository import Problem
 
     company = {"id": str(uuid4()), "version": 1, "status": "active"}
-    adapters = {step: lambda *_: {"ok": True, "evidence": "synthetic"} for step in STEPS}
+    adapters = {
+        step: (
+            lambda *_, step=step: {
+                "ok": True,
+                "evidence": history_evidence() if step == "initial_sync" else "synthetic",
+            }
+        )
+        for step in STEPS
+    }
     job, registry = Provisioner(control, adapters), RuntimeRegistry(control)
     job.enqueue(company, f"/tmp/c_{company['id'].replace('-', '')}/portal.sock")
     assert job.run(company["id"]) is True
@@ -295,6 +320,8 @@ def test_legacy_module_and_payment_evidence_is_rechecked_without_resync(control)
                 if step == "modules"
                 else {"enabled": False}
                 if step == "payments"
+                else history_evidence()
+                if step == "initial_sync"
                 else "synthetic"
             )
             return {"ok": True, "evidence": evidence}
@@ -376,6 +403,8 @@ def test_migration_cache_revalidates_manifest_at_same_company_version(control, m
                 evidence = {"company_id": company["id"], "configuration_version": 8, "services": {}}
             elif step == "payments":
                 evidence = {"enabled": False}
+            elif step == "initial_sync":
+                evidence = history_evidence()
             return {"ok": True, "evidence": evidence}
 
         return run
@@ -416,3 +445,63 @@ def test_migration_cache_revalidates_manifest_at_same_company_version(control, m
     calls.clear()
     assert job.run(company["id"])
     assert calls == []
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_initial_history_plan_upgrade_reruns_old_proof_only_at_same_company_version(
+    control, legacy
+):
+    from psycopg.types.json import Jsonb
+
+    company = {"id": str(uuid4()), "version": 8, "status": "active"}
+    calls = []
+
+    def adapter(step):
+        def run(*_):
+            calls.append(step)
+            proof = {"checked": True}
+            if step == "migrations":
+                proof = {"manifest_fingerprint": migration_fingerprint()}
+            elif step == "initial_sync":
+                proof = history_evidence()
+            elif step == "modules":
+                proof = {"company_id": company["id"], "configuration_version": 8, "services": {}}
+            elif step == "payments":
+                proof = {"enabled": False}
+            return {"ok": True, "evidence": proof}
+
+        return run
+
+    job = Provisioner(control, {step: adapter(step) for step in STEPS})
+    socket = f"/tmp/c_{company['id'].replace('-', '')}/portal.sock"
+    job.enqueue(company, socket)
+    assert job.run(company["id"])
+    registry = RuntimeRegistry(control)
+    if legacy:
+        proof = {
+            "ok": True,
+            "evidence": {
+                "history_from": "2026-10-08",
+                "history_to": "2026-10-08",
+                "completed_jobs": list(REQUIRED_JOBS[:-1]),
+            },
+        }
+        with control.connect(True) as db:
+            db.execute(
+                "UPDATE runtime_provisioning SET checks=jsonb_set(checks,'{initial_sync}',%s)",
+                (Jsonb(proof),),
+            )
+        assert registry.resolve(company) is None
+        assert registry.resolve_working(company) is None
+    calls.clear()
+    job.enqueue(company, socket)
+    assert Provisioner(control, {step: adapter(step) for step in STEPS}).run(company["id"])
+    assert calls == (["initial_sync"] if legacy else [])
+    assert registry.resolve_working(company).configuration_version == 8
+    with control.connect() as db:
+        assert (
+            db.execute("SELECT configuration_version FROM runtime_provisioning").fetchone()[
+                "configuration_version"
+            ]
+            == 8
+        )

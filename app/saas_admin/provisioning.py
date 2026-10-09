@@ -86,6 +86,10 @@ class Provisioner:
                         compatible = isinstance(proof, dict) and (
                             proof.get("manifest_fingerprint") == migration_fingerprint()
                         )
+                    elif step == "initial_sync":
+                        from .initial_sync_plan import initial_sync_compatible
+
+                        compatible = initial_sync_compatible(cached)
                     elif step == "modules":
                         compatible = (
                             isinstance(proof, dict)

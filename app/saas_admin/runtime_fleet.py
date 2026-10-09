@@ -372,8 +372,26 @@ class FleetSupervisor:
             self.start(path, "run-portal", version)
             if config.get("document_settings", {}).get("worker_enabled"):
                 self.start(path, "run-documents-worker", version)
-        if checks.get("initial_sync", {}).get("ok"):
+        from .initial_sync_plan import initial_sync_compatible
+
+        initial_check = checks.get("initial_sync", {})
+        if initial_sync_compatible(initial_check):
             self.start(path, "run-scheduler", version)
+        else:
+            # Old history proof omits newly required resources. Quiesce only this
+            # company's owned scheduler while the operator completes the new plan.
+            key = (str(path), "run-scheduler")
+            if key in self.children:
+                self.stop(key)
+            if initial_check.get("ok") is True and state["state"] in {"ready", "failed"}:
+                # A completed old release is not in the operator's pending queue.
+                # Requeue at the same company version so new coverage is collected.
+                from .runtime_operator import RuntimeOperator
+
+                operator = RuntimeOperator(config, self.preparer.repo)
+                operator.provisioner().enqueue(
+                    company, str(operator.runtime.runtime_path("portal.sock"))
+                )
         missing = checks.get("modules", {}).get("evidence", {}).get("missing", [])
         transient = state["error_code"] == "runtime_process_pending" or (
             missing and set(missing) <= {"documents_worker_not_ready", "scheduler_not_ready"}

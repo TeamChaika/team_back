@@ -104,4 +104,11 @@ socket bindings: процессы и подключения проверяютс
 только platform owner точные настройки своих терминалов и профиль до приёмки;
 сотрудники и business-create закрыты. См. [ограничения настройки](tenant-runtime.md).
 
+Первоначальная история tenant: `app/saas_admin/initial_sync_plan.py` задаёт версию
+покрытия четырёх ресурсов документов и кассовых смен; `runtime_operator.py` запускает
+существующие CLI, `provisioning.py` повторяет устаревшее evidence, `runtime_fleet.py`
+возвращает старый завершённый план в очередь и удерживает только свой scheduler до
+его успеха. `runtime_registry.completed` проверяет этот контракт перед объявлением
+full/working/setup-ready. См. [первоначальную загрузку](tenant-runtime.md).
+
 - `app/saas_admin/runtime_module_settings.py`: fleet и operator получают собственные seller/bot/AI из зашифрованной центральной записи с проверкой `expected_version`. Пустая центральная настройка удаляет прежнее значение операторского файла; собственные секреты не берутся из ручных файлов как fallback.

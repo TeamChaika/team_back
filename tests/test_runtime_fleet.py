@@ -262,8 +262,10 @@ def test_supervisor_stops_own_process_group(monkeypatch, tmp_path):
 @pytest.mark.parametrize("proof", [None, "legacy", "outdated", "current"])
 def test_supervisor_quiesces_own_services_before_migration_upgrade(tmp_path, monkeypatch, proof):
     from contextlib import contextmanager
+    from datetime import date
     from types import SimpleNamespace
 
+    from app.saas_admin.initial_sync_plan import REQUIRED_JOBS, initial_sync_plan
     from app.saas_admin.runtime_fleet import FleetSupervisor
     from app.tenancy.migrations import migration_fingerprint
 
@@ -273,6 +275,10 @@ def test_supervisor_quiesces_own_services_before_migration_upgrade(tmp_path, mon
         "state": "pending",
         "error_code": None,
         "checks": {"database_roles": {"ok": True}, "initial_sync": {"ok": True}},
+    }
+    state["checks"]["initial_sync"]["evidence"] = {
+        **initial_sync_plan(date(2026, 10, 8), date(2026, 10, 8)),
+        "completed_jobs": list(REQUIRED_JOBS),
     }
     if proof is not None:
         evidence = {"migration_count": 11}
@@ -316,3 +322,76 @@ def test_supervisor_quiesces_own_services_before_migration_upgrade(tmp_path, mon
     else:
         assert calls == [("stop", "run-portal"), ("start", "work")]
         assert own not in supervisor.children
+
+
+@pytest.mark.parametrize("current", [False, True])
+def test_scheduler_requires_current_history_plan_and_requeues_old_ready_tenant(
+    tmp_path, monkeypatch, current
+):
+    from contextlib import contextmanager
+    from datetime import date
+    from types import SimpleNamespace
+
+    from app.saas_admin.initial_sync_plan import REQUIRED_JOBS, initial_sync_plan
+    from app.saas_admin.runtime_fleet import FleetSupervisor
+    from app.tenancy.migrations import migration_fingerprint
+
+    company = {"id": str(uuid4()), "status": "active", "version": 8}
+    check = {"ok": True, "evidence": {"history_from": "2026-10-08", "history_to": "2026-10-08"}}
+    if current:
+        check["evidence"].update(initial_sync_plan(date(2026, 10, 8), date(2026, 10, 8)))
+        check["evidence"]["completed_jobs"] = list(REQUIRED_JOBS)
+    state = {
+        "configuration_version": 8,
+        "state": "ready",
+        "error_code": None,
+        "checks": {
+            "initial_sync": check,
+            "database_roles": {"ok": True},
+            "migrations": {
+                "ok": True,
+                "evidence": {"manifest_fingerprint": migration_fingerprint()},
+            },
+        },
+    }
+
+    @contextmanager
+    def connect():
+        yield SimpleNamespace(execute=lambda *_: SimpleNamespace(fetchone=lambda: state))
+
+    path, foreign = tmp_path / "own.json", tmp_path / "foreign.json"
+    supervisor = FleetSupervisor(
+        SimpleNamespace(repo=SimpleNamespace(get=lambda _: company, connect=connect))
+    )
+    own_scheduler, foreign_scheduler = (str(path), "run-scheduler"), (str(foreign), "run-scheduler")
+    own_portal, own_collector = (str(path), "run-portal"), (str(path), "run-collector")
+    supervisor.children = {
+        key: object() for key in (own_scheduler, foreign_scheduler, own_portal, own_collector)
+    }
+    supervisor.versions = {key: 8 for key in supervisor.children}
+    starts, stopped, enqueued = [], [], []
+    monkeypatch.setattr(supervisor, "start", lambda p, action, v: starts.append(action))
+    monkeypatch.setattr(
+        supervisor, "stop", lambda key: stopped.append(key) or supervisor.children.pop(key)
+    )
+    monkeypatch.setattr(
+        "app.saas_admin.runtime_fleet.read_operator_json", lambda _: {"company_id": company["id"]}
+    )
+    monkeypatch.setattr(
+        "app.saas_admin.runtime_operator.RuntimeOperator",
+        lambda *_: SimpleNamespace(
+            runtime=SimpleNamespace(runtime_path=lambda name: path.parent / name),
+            provisioner=lambda: SimpleNamespace(
+                enqueue=lambda c, socket: enqueued.append((c["version"], socket))
+            ),
+        ),
+    )
+    supervisor.tick_company(path)
+    assert foreign_scheduler in supervisor.children
+    assert own_portal in supervisor.children and own_collector in supervisor.children
+    if current:
+        assert "run-scheduler" in starts and not stopped and not enqueued
+    else:
+        assert "run-scheduler" not in starts
+        assert stopped == [own_scheduler]
+        assert enqueued == [(8, str(path.parent / "portal.sock"))]

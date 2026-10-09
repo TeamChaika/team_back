@@ -465,10 +465,11 @@ class RuntimeOperator:
         return {"ok": True, "evidence": {"checked_connections": count}}
 
     def initial_sync(self, *_):
+        from .initial_sync_plan import DOCUMENT_RESOURCES, initial_sync_plan
+
         start = date.fromisoformat(self.config["history_from"])
         end = date.fromisoformat(self.config["history_to"])
-        if start > end:
-            raise ValueError("Invalid initial history interval")
+        plan = initial_sync_plan(start, end)
         self.launch("collector")
         # iiko expects local accounting time without a UTC offset, as in the scheduler.
         stock_timestamp = (
@@ -483,9 +484,23 @@ class RuntimeOperator:
             ("sync_dictionaries", []),
             ("sync_store_balances", ["--timestamp", stock_timestamp]),
             ("sync_sales_history", ["--date-from", str(start), "--date-to", str(end)]),
-            ("sync_documents", ["--date-from", str(start), "--date-to", str(end)]),
+            (
+                "sync_documents",
+                [
+                    "--date-from",
+                    str(start),
+                    "--date-to",
+                    str(end),
+                    "--resources",
+                    *DOCUMENT_RESOURCES,
+                ],
+            ),
             ("sync_event_history", ["--date-from", str(start), "--date-to", str(end)]),
         ]
+        jobs.extend(
+            ("sync_cash_shifts", ["--from", window["date_from"], "--to", window["date_to"]])
+            for window in plan["cash_shift_windows"]
+        )
         for module, args in jobs:
             try:
                 result = subprocess.run(
@@ -507,8 +522,7 @@ class RuntimeOperator:
         return {
             "ok": True,
             "evidence": {
-                "history_from": str(start),
-                "history_to": str(end),
+                **plan,
                 "balance_timestamp": stock_timestamp,
                 "completed_jobs": [item[0] for item in jobs],
             },
