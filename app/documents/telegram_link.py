@@ -1,6 +1,5 @@
 """Single-use Telegram ownership proof; never grants document permissions."""
 
-import hashlib
 import re
 import secrets
 import time
@@ -11,6 +10,7 @@ from psycopg import IntegrityError
 
 from app.documents.context import lock_resource, runtime_of
 from app.documents.policy import fail, identifier, profile
+from app.documents.telegram_identity import bot_namespace, credential_digest
 
 TOKEN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 USERNAME = re.compile(r"[A-Za-z0-9_]{5,32}\Z")
@@ -123,7 +123,12 @@ def issue(service, portal_id):
                 "INSERT INTO native_telegram_link "
                 "(token_hash,portal_id,user_id,revision,expires_at) "
                 "VALUES (%s,%s,%s,%s,clock_timestamp()+interval '10 minutes') RETURNING expires_at",
-                (hashlib.sha256(token.encode()).hexdigest(), portal_id, row["id"], row["revision"]),
+                (
+                    credential_digest(token, bot_namespace(service)),
+                    portal_id,
+                    row["id"],
+                    row["revision"],
+                ),
             ).fetchone()
     except IntegrityError:
         fail(409, "Рабочий профиль изменился. Обновите страницу.")
@@ -150,7 +155,7 @@ def unlink(service, portal_id):
 def consume(service, token, telegram_id):
     if not isinstance(token, str) or not TOKEN.fullmatch(token):
         fail(400, INVALID_LINK)
-    return consume_digest(service, hashlib.sha256(token.encode()).hexdigest(), telegram_id)
+    return consume_digest(service, credential_digest(token, bot_namespace(service)), telegram_id)
 
 
 def consume_digest(service, digest, telegram_id):
@@ -203,7 +208,7 @@ def _redact_recovery(value):
     return value
 
 
-def queued_update(update):
+def queued_update(update, namespace=""):
     """Discard raw deep-link credentials before writing Telegram's durable inbox."""
     update = _redact_recovery(dict(update))
     update.pop("_telegram_link_digest", None)
@@ -219,7 +224,7 @@ def queued_update(update):
                 "chat": message.get("chat", {}),
                 "from": message.get("from", {}),
             },
-            "_telegram_link_digest": hashlib.sha256(token.encode()).hexdigest()
+            "_telegram_link_digest": credential_digest(token, namespace)
             if TOKEN.fullmatch(token)
             else "invalid",
         }

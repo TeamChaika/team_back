@@ -380,7 +380,12 @@ class FullPortalProxy:
                 raise Problem(502, "invalid_metadata", "Ошибка данных кабинета") from None
             if not isinstance(metadata, dict):
                 raise Problem(502, "invalid_metadata", "Ошибка данных кабинета")
-            response = JSONResponse(accepted_metadata(metadata, readiness, working=working))
+            response = JSONResponse(
+                {
+                    **accepted_metadata(metadata, readiness, working=working),
+                    "can_manage_integrations": session.get("can_manage_integrations") is True,
+                }
+            )
         else:
             response = Response(result.content, status_code=result.status_code, headers=safe)
         if (

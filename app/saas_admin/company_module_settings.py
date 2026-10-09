@@ -14,6 +14,7 @@ from pydantic import (
     model_validator,
 )
 
+from .auth_validation import csrf_matches
 from .models import Model
 from .repository import Problem, stamp
 
@@ -82,18 +83,34 @@ class Assistant(Model):
 class ModuleSettingsWrite(Model):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, hide_input_in_errors=True)
     expected_version: StrictInt = Field(ge=1)
+    expected_revision: StrictInt | None = Field(default=None, ge=1)
     seller: Seller | None = None
     telegram: Telegram | None = None
     assistant: Assistant | None = None
 
     @model_validator(mode="after")
     def groups_valid(self):
-        if not (self.model_fields_set - {"expected_version"}):
+        if not (self.model_fields_set - {"expected_version", "expected_revision"}):
             raise ValueError("Укажите настройки для сохранения")
         if any(
             name in self.model_fields_set and getattr(self, name) is None
             for name in ("telegram", "assistant")
         ):
+            raise ValueError("Укажите настройки модуля")
+        return self
+
+
+class IntegrationsWrite(Model):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, hide_input_in_errors=True)
+    expected_version: StrictInt = Field(ge=1)
+    expected_revision: StrictInt = Field(ge=1)
+    telegram: Telegram | None = None
+    assistant: Assistant | None = None
+
+    @model_validator(mode="after")
+    def groups_valid(self):
+        changed = self.model_fields_set - {"expected_version", "expected_revision"}
+        if not changed or any(getattr(self, name) is None for name in changed):
             raise ValueError("Укажите настройки модуля")
         return self
 
@@ -121,6 +138,7 @@ class CompanyModuleSettings:
         telegram, assistant = values["telegram"], values["assistant"]
         return {
             "company_version": company["version"],
+            "integrations_revision": values.get("integrations_revision", 1),
             "seller": values["seller"],
             "telegram": {
                 "username": telegram["username"],
@@ -144,38 +162,150 @@ class CompanyModuleSettings:
             company = self.repo._get(db, company_id)
             return self._present(company, self._read(db, company["id"]))
 
+    @staticmethod
+    def _merge(values, body):
+        changed = sorted(body.model_fields_set - {"expected_version", "expected_revision"})
+        if "seller" in changed:
+            values["seller"] = body.seller.model_dump() if body.seller else None
+        for name, secret, clear in (
+            ("telegram", "token", "clear_token"),
+            ("assistant", "key", "clear_key"),
+        ):
+            item = getattr(body, name)
+            if item is None:
+                continue
+            incoming = getattr(item, secret)
+            raw = incoming.get_secret_value() if incoming else ""
+            existing = values[name][secret]
+            if name == "assistant" and item.provider != values[name]["provider"]:
+                existing = ""
+            values[name] = item.model_dump(mode="json", exclude={secret, clear})
+            values[name][secret] = "" if getattr(item, clear) else raw or existing
+        if {"telegram", "assistant"}.intersection(changed):
+            values["integrations_revision"] = values.get("integrations_revision", 1) + 1
+        return changed
+
+    def _save(self, db, company_id, values):
+        db.execute(
+            "INSERT INTO company_module_settings(company_id,ciphertext) VALUES(%s,%s) "
+            "ON CONFLICT(company_id) DO UPDATE SET "
+            "ciphertext=excluded.ciphertext,updated_at=now()",
+            (company_id, self.repo.vault.encrypt(json.dumps(values))),
+        )
+
+    def integrations_revision(self, company_id):
+        with self.repo.connect() as db:
+            return self._read(db, company_id).get("integrations_revision", 1)
+
+    def _tenant(self, db, slug, token, csrf=None):
+        row = self.repo._tenant_verified(db, token, slug)
+        if not row:
+            raise Problem(401, "unauthorized", "Требуется повторный вход")
+        if row["must_change"]:
+            raise Problem(403, "password_change_required", "Измените временный пароль")
+        if not row.get("_platform_owner") and row.get("role") != "company_admin":
+            raise Problem(403, "company_admin_required", "Требуется руководитель компании")
+        if csrf is not None and not csrf_matches(csrf, row["csrf"]):
+            raise Problem(403, "csrf_failed", "Обновите страницу")
+        company = self.repo._get(db, str(row["company_id"]))
+        if company["slug"] != slug or company["status"] != "active":
+            raise Problem(403, "tenant_boundary", "Компания недоступна")
+        return row, company
+
+    def _integrations_present(self, company, values, db):
+        result = self._present(company, values)
+        result.pop("seller")
+        result["missing"].pop("seller")
+        result["integrations_revision"] = values.get("integrations_revision", 1)
+        runtime = db.execute(
+            "SELECT checks FROM runtime_provisioning WHERE company_id=%s "
+            "AND configuration_version=%s",
+            (company["id"], company["version"]),
+        ).fetchone()
+        marker = runtime["checks"].get("integrations", {}) if runtime else {}
+        if marker.get("revision") == result["integrations_revision"]:
+            result["apply_status"] = (
+                marker["state"]
+                if marker.get("state") in {"applied", "failed"}
+                else "pending"
+            )
+        return result
+
+    def tenant_get(self, slug, token):
+        with self.repo.connect(True) as db:
+            _, company = self._tenant(db, slug, token)
+            return self._integrations_present(company, self._read(db, company["id"]), db)
+
+    def tenant_update(self, slug, token, csrf, body):
+        from uuid import uuid4
+
+        with self.repo.connect(True) as db:
+            target = db.execute("SELECT id FROM companies WHERE slug=%s", (slug,)).fetchone()
+            if target:
+                locked = db.execute(
+                    "SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0)) AS locked",
+                    ("provision:" + str(target["id"]),),
+                ).fetchone()
+                if not locked["locked"]:
+                    raise Problem(409, "runtime_busy", "Подготовка ещё идёт. Повторите позже")
+            row, company = self._tenant(db, slug, token, csrf)
+            # Auth refresh commits its rotated credentials; reacquire any released
+            # transaction lock before changing settings or readiness evidence.
+            locked = db.execute(
+                "SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0)) AS locked",
+                ("provision:" + str(company["id"]),),
+            ).fetchone()
+            if not locked["locked"]:
+                raise Problem(409, "runtime_busy", "Подготовка ещё идёт. Повторите позже")
+            values = self._read(db, company["id"])
+            if (
+                company["version"] != body.expected_version
+                or values.get("integrations_revision", 1) != body.expected_revision
+            ):
+                raise Problem(409, "version_conflict", "Настройки изменены. Обновите страницу")
+            changed = self._merge(values, body)
+            self._save(db, company["id"], values)
+            from .integration_rollout import invalidate_integrations
+
+            invalidate_integrations(db, company, values["integrations_revision"], changed)
+            if row.get("_platform_owner"):
+                self.repo._audit(db, company["id"], row, "integrations_updated", changed)
+            else:
+                db.execute(
+                    "INSERT INTO tenant_events(id,company_id,admin_id,action,created_at) "
+                    "VALUES(%s,%s,%s,%s,%s)",
+                    (
+                        str(uuid4()),
+                        company["id"],
+                        row["id"],
+                        "integrations_updated:" + ",".join(changed),
+                        stamp(),
+                    ),
+                )
+            return self._integrations_present(company, values, db)
+
     def update(self, company_id, body, actor):
         repo = self.repo
         with repo.connect(True) as db:
+            locked = db.execute(
+                "SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0)) AS locked",
+                ("provision:" + str(company_id),),
+            ).fetchone()
+            if not locked["locked"]:
+                raise Problem(409, "runtime_busy", "Подготовка ещё идёт. Повторите позже")
             repo._require_owner(db, actor)
             company = repo._get(db, company_id)
             if company["version"] != body.expected_version:
                 raise Problem(409, "version_conflict", "Запись изменена. Обновите карточку")
             values = self._read(db, company["id"])
-            changed = sorted(body.model_fields_set - {"expected_version"})
-            if "seller" in changed:
-                values["seller"] = body.seller.model_dump() if body.seller else None
-            for name, secret, clear in (
-                ("telegram", "token", "clear_token"),
-                ("assistant", "key", "clear_key"),
+            revision = values.get("integrations_revision", 1)
+            if {"telegram", "assistant"}.intersection(body.model_fields_set) and (
+                body.expected_revision != revision
+                and not (body.expected_revision is None and revision == 1)
             ):
-                item = getattr(body, name)
-                if item is None:
-                    continue
-                incoming = getattr(item, secret)
-                raw = incoming.get_secret_value() if incoming else ""
-                existing = values[name][secret]
-                # A provider change must never silently send an old provider's key elsewhere.
-                if name == "assistant" and item.provider != values[name]["provider"]:
-                    existing = ""
-                values[name] = item.model_dump(mode="json", exclude={secret, clear})
-                values[name][secret] = "" if getattr(item, clear) else raw or existing
-            db.execute(
-                "INSERT INTO company_module_settings(company_id,ciphertext) VALUES(%s,%s) "
-                "ON CONFLICT(company_id) DO UPDATE SET "
-                "ciphertext=excluded.ciphertext,updated_at=now()",
-                (company["id"], repo.vault.encrypt(json.dumps(values))),
-            )
+                raise Problem(409, "version_conflict", "Настройки изменены. Обновите карточку")
+            changed = self._merge(values, body)
+            self._save(db, company["id"], values)
             company["version"] += 1
             company["updated_at"] = stamp()
             repo._write_company(db, company)
@@ -188,7 +318,7 @@ class CompanyModuleSettings:
             )
             return self._present(company, values)
 
-    def runtime_settings(self, company_id, *, expected_version=None):
+    def runtime_settings(self, company_id, *, expected_version=None, expected_revision=None):
         """Private operator call only; never mount this result in an HTTP response."""
         with self.repo.connect() as db:
             company = self.repo._get(db, company_id)
@@ -197,6 +327,11 @@ class CompanyModuleSettings:
                     409, "version_conflict", "Настройки компании изменены. Повторите запуск"
                 )
             values = self._read(db, company["id"])
+        if (
+            expected_revision is not None
+            and values.get("integrations_revision", 1) != expected_revision
+        ):
+            raise Problem(409, "version_conflict", "Настройки изменены. Повторите запуск")
         telegram, assistant = values["telegram"], values["assistant"]
         ai = {
             "provider": assistant["provider"],
@@ -225,3 +360,23 @@ def mount_module_settings(app, repo, owner_dependency):
     @app.patch("/api/saas-admin/companies/{company_id}/module-settings")
     def patch(company_id: str, body: ModuleSettingsWrite, session=owner_dependency):
         return service.update(company_id, body, session["user"])
+
+
+def mount_tenant_integrations(app, repo):
+    from fastapi import Request
+
+    service = CompanyModuleSettings(repo)
+    path = "/api/saas-tenant/{slug}/integrations"
+
+    @app.get(path)
+    def integrations(slug: str, request: Request):
+        return service.tenant_get(slug, request.cookies.get("saas_tenant_session", ""))
+
+    @app.post(path)
+    def save_integrations(slug: str, body: IntegrationsWrite, request: Request):
+        return service.tenant_update(
+            slug,
+            request.cookies.get("saas_tenant_session", ""),
+            request.headers.get("x-csrf-token", ""),
+            body,
+        )

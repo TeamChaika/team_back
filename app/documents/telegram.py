@@ -11,6 +11,7 @@ from app.documents.context import runtime_of
 from app.documents.messages import document_messages
 from app.documents.policy import actor, require
 from app.documents.telegram_cleanup import TelegramError, eligible, record_callback, record_sent
+from app.documents.telegram_identity import bot_namespace
 
 
 class Telegram:
@@ -210,7 +211,11 @@ def handle_update(service, bot, update):
                 callback.get("message"),
             )
             runtime = runtime_of(service.database)
-            namespace = runtime.key if runtime.mode == "tenant" else "chaika"
+            namespace = (
+                f"{runtime.key}:bot:{bot_namespace(service)}"
+                if runtime.mode == "tenant"
+                else "chaika"
+            )
             key = uuid5(
                 NAMESPACE_URL,
                 f"{namespace}:{user_id}:{callback['id']}:{kind}:{doc_id}:{version}:{action}",

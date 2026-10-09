@@ -22,6 +22,7 @@ import httpx
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from .postgres_repository import PostgresRepository
+from .repository import Problem
 from .runtime_process_identity import (
     ProcessIdentity,
     central_directory,
@@ -175,7 +176,7 @@ class FleetPreparer:
                     if path.exists():
                         continue
                 prepared.append(self.prepare(self.repo.get(str(row["company_id"]))))
-            except (ValueError, OSError, KeyError, subprocess.SubprocessError):
+            except (Problem, ValueError, OSError, KeyError, subprocess.SubprocessError):
                 logging.getLogger(__name__).warning(
                     "Tenant preparation failed; binding retained for explicit retry"
                 )
@@ -191,6 +192,9 @@ class FleetSupervisor:
         self.restart_after = {}
         self.launch_errors = {}
         self.prepared_versions = {}
+        self.integrations_revisions = {}
+        self.child_started = {}
+        self.integration_retry_after = {}
 
     def start(self, path, action, version=None):
         key = (str(path), action)
@@ -200,7 +204,7 @@ class FleetSupervisor:
             result = self._start(path, action, version)
             self.launch_errors.pop(key, None)
             return result
-        except (ValueError, OSError, KeyError, subprocess.SubprocessError):
+        except (Problem, ValueError, OSError, KeyError, subprocess.SubprocessError):
             self.launch_errors[key] = "runtime_launch_failed"
             self.restart_after[key] = time.monotonic() + 30
             logging.getLogger(__name__).warning(
@@ -267,6 +271,7 @@ class FleetSupervisor:
                 options = operator.process_identity().spawn_options()
             finally:
                 operator.close()
+        started = time.time()
         self.children[key] = self.popen(
             command,
             env=environment,
@@ -276,6 +281,7 @@ class FleetSupervisor:
             start_new_session=True,
             **options,
         )
+        self.child_started[key] = started
         return True
 
     def stop(self, key):
@@ -335,7 +341,7 @@ class FleetSupervisor:
         for path in self.preparer.root.glob("c_*.json"):
             try:
                 self.tick_company(path)
-            except (ValueError, OSError, KeyError, subprocess.SubprocessError):
+            except (Problem, ValueError, OSError, KeyError, subprocess.SubprocessError):
                 logging.getLogger(__name__).warning(
                     "Tenant supervisor binding failed; other companies remain running"
                 )
@@ -350,10 +356,23 @@ class FleetSupervisor:
             self.prepared_versions.pop(str(path), None)
             return
         version = company["version"]
+        revision_getter = (
+            getattr(self.preparer.settings_service, "integrations_revision", None)
+            if hasattr(self.preparer, "settings_service")
+            else None
+        )
+        revision = revision_getter(company["id"]) if revision_getter else 1
+        previous_revision = self.integrations_revisions.get(str(path))
+        revision_changed = previous_revision != revision
         for key in list(self.children):
-            if key[0] == str(path) and self.versions.get(key) != version:
+            changed_child = (
+                previous_revision is not None
+                and revision_changed
+                and key[1] in {"run-portal", "run-documents-worker"}
+            )
+            if key[0] == str(path) and (self.versions.get(key) != version or changed_child):
                 self.stop(key)
-        if self.prepared_versions.get(str(path)) != version:
+        if self.prepared_versions.get(str(path)) != version or revision_changed:
             # Reconcile existing manifests even if an operator already claimed
             # the pending row, or a same-version release is starting up.
             prepared = self.preparer.prepare(company)
@@ -361,6 +380,15 @@ class FleetSupervisor:
                 raise ValueError("Prepared operator path does not match supervised company")
             config = read_operator_json(path)
             self.prepared_versions[str(path)] = version
+            if revision_getter:
+                from .runtime_operator import RuntimeOperator
+
+                operator = RuntimeOperator(config, self.preparer.repo)
+                try:
+                    operator.prepare_manifest()
+                finally:
+                    operator.close()
+            self.integrations_revisions[str(path)] = revision
         with self.preparer.repo.connect() as db:
             state = db.execute(
                 "SELECT checks,error_code,state,configuration_version "
@@ -384,6 +412,18 @@ class FleetSupervisor:
             for key in list(self.children):
                 if key[0] == str(path) and key[1] != "work":
                     self.stop(key)
+        if not migrated and state and state["state"] in {"ready", "failed"}:
+            # A new release can add a tenant migration without changing the
+            # company version. Completed rows must re-enter the durable queue.
+            from .runtime_operator import RuntimeOperator
+
+            operator = RuntimeOperator(config, self.preparer.repo)
+            try:
+                operator.provisioner().enqueue(
+                    company, str(operator.runtime.runtime_path("portal.sock"))
+                )
+            finally:
+                operator.close()
         self.start(path, "work", version)
         if not migrated:
             return
@@ -412,6 +452,25 @@ class FleetSupervisor:
                 operator.provisioner().enqueue(
                     company, str(operator.runtime.runtime_path("portal.sock"))
                 )
+        if checks.get("integrations", {}).get(
+            "state"
+        ) == "pending" and time.monotonic() >= self.integration_retry_after.get(str(path), 0):
+            from .integration_rollout import reconcile_integrations
+            from .runtime_operator import RuntimeOperator
+
+            operator = RuntimeOperator(config, self.preparer.repo)
+            try:
+                worker_key = (str(path), "run-documents-worker")
+                worker = self.children.get(worker_key)
+                worker_started = (
+                    self.child_started.get(worker_key)
+                    if worker is not None and worker.poll() is None
+                    else None
+                )
+                reconcile_integrations(operator, revision, worker_started)
+            finally:
+                operator.close()
+            self.integration_retry_after[str(path)] = time.monotonic() + 15
         missing = checks.get("modules", {}).get("evidence", {}).get("missing", [])
         transient = state["error_code"] == "runtime_process_pending" or (
             missing and set(missing) <= {"documents_worker_not_ready", "scheduler_not_ready"}

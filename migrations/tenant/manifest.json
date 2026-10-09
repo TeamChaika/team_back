@@ -48,6 +48,10 @@
     {
       "file": "20261010100000_tenant_primary_admin_projection.sql",
       "area": "analytics"
+    },
+    {
+      "file": "20261010110000_tenant_telegram_bot_namespace.sql",
+      "area": "documents"
     }
   ]
 }

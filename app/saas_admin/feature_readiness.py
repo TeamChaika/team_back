@@ -128,6 +128,10 @@ def feature_readiness(company: dict, checks: dict, *, working: bool) -> dict[str
             # Multiple probes of a route (e.g. prices/impact) must all pass.
             path = probe["path"]
             paths[path] = paths.get(path, True) and probe.get("ok") is True
+    integrations = checks.get("integrations", {})
+    if integrations.get("services", {}).get("assistant_configured") is True:
+        # Private health evaluates the same settings without impersonating a user.
+        paths["/api/assistant/status"] = True
     result = {}
     for feature in FEATURES:
         deps = DEPENDENCIES.get(feature)

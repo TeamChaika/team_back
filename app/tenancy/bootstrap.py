@@ -253,10 +253,18 @@ def build_portal(verifier=None, **kwargs):
     from fastapi.routing import APIRoute
 
     def runtime_health():
+        import os
+
+        from app.web.assistant import AssistantSettings
+
         return {
             "company_id": str(runtime.company_id),
             "configuration_version": runtime.configuration_version,
             "process_id": __import__("os").getpid(),
+            "integrations_revision": int(
+                os.environ.get("RESTCONTROL_TENANT_INTEGRATIONS_REVISION", "1")
+            ),
+            "assistant_configured": AssistantSettings().configured,
             "status": "ok",
         }
 

@@ -413,7 +413,8 @@ client-IP header pair; Caddy must overwrite both headers. See operator lifecycle
 
 Владелец платформы читает и сохраняет настройки через
 `GET/PATCH /api/saas-admin/companies/{id}/module-settings`. PATCH требует обычную
-owner-сессию, Origin, CSRF и `expected_version`; атомарно повышает версию компании,
+owner-сессию, Origin, CSRF и `expected_version`; для Telegram/ИИ также
+проверяет `expected_revision` из GET (кроме первой записи revision=1); атомарно повышает версию компании,
 поэтому подготовку runtime нужно повторить. GET возвращает реквизиты и метаданные,
 признаки `token_configured`, `key_configured`, `missing`, но не секреты. Пустой секрет
 сохраняет предыдущий; `clear_token`/`clear_key` удаляет его. Смена ИИ-провайдера без
@@ -425,3 +426,32 @@ owner-сессию, Origin, CSRF и `expected_version`; атомарно пов�
 разрешённые `document_settings`/`assistant_settings` для operator bootstrap; его
 результат не является HTTP-контрактом. Проверка сохранения не обращается к Telegram,
 ИИ или iiko и не подтверждает фактическую работоспособность этих подключений.
+
+
+### Самостоятельная настройка Telegram и ИИ руководителем
+
+`GET/POST /api/saas-tenant/{slug}/integrations` работают в центральном BFF, поэтому
+настройки доступны и до готовности соответствующего модуля. Доступ требует действующую
+сессию именно этой компании и центральную активную роль `company_admin` либо проверенный
+SSO handle глобального владельца; локальный portal `is_admin` права не предоставляет.
+Host/Origin привязаны к зарегистрированному домену и slug; POST дополнительно требует
+CSRF. Пользователь с обязательной сменой пароля настройки не получает.
+`can_manage_integrations` вычисляется сервером в tenant auth и `/api/me`.
+
+GET возвращает `company_version`, `integrations_revision`, Telegram/ИИ metadata и признаки
+наличия секретов, `missing` и `apply_status: pending|applied|failed`. Продавец не входит в контракт.
+POST принимает `expected_version`, `expected_revision` и группы `telegram`/`assistant`
+в том же формате, что owner API; неизвестные поля и `seller` отклоняются. Пустой ключ
+сохраняет прежний, явный clear удаляет, смена провайдера удаляет несовместимый старый ключ.
+Ошибки валидации и аудит не содержат секретов. Аудит руководителя записывается в
+`tenant_events`, владельца — в `events` без подмены identity.
+
+Самостоятельное сохранение увеличивает только `integrations_revision` внутри шифротекста,
+не меняет `company.version` и не сбрасывает все проверки кабинета. Транзакция берёт общий
+с provisioning advisory lock и отзывает только затронутые Telegram/ИИ evidence. При
+выполняющейся подготовке возвращается `409 runtime_busy`, при чужой правке —
+`409 version_conflict`. Fleet автоматически применяет новую ревизию и обновляет свои
+процессы; повторный запуск владельцем и искусственная owner-сессия не нужны.
+`applied` означает загрузку текущей ревизии процессами, не успешный запрос к платному
+ИИ-провайдеру. Реальные provider вызовы не являются тестом сохранения формы.
+Проверки: `tests/test_tenant_integrations.py` (синтетический Auth, реальный одноразовый PostgreSQL).

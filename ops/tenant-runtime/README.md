@@ -309,3 +309,32 @@ owner. Document warehouse/payment grants are configured separately through exist
 The central completed-password state is preserved; no Auth creation or reset occurs.
 Tenant migration evidence contains a fingerprint of ordered filenames, areas and SQL
 checksums. Normal retry rechecks old/missing fingerprints even at the same company version.
+
+### Самостоятельная смена Telegram / ИИ
+
+Tenant integrations используют отдельный `integrations_revision` внутри зашифрованной
+центральной записи. Сохранение не меняет `company.version`, историю и проверки
+аналитики, платежей, миграций или синхронизации. В одной транзакции с настройкой
+`integration_rollout.invalidate_integrations` отзывает только доказательство
+изменённого сервиса и сохраняет `checks.integrations` со статусом `pending`.
+
+Fleet каждые три секунды сверяет ревизию, пересобирает приватный environment и
+перезапускает только собственные portal/documents-worker; collector/scheduler и
+другие компании продолжают работать. Центральные ключи Auth/registry не передаются
+в дочерние процессы. Наличие собственного бота включает worker даже при выключенных
+документных модулях, поскольку привязка и восстановление аккаунта требуют polling.
+
+После перезапуска проверяется company/version/revision в private health. ИИ получает
+только доказательство `AssistantSettings.configured` фактически загруженного процесса;
+это **не проверка действительности ключа у провайдера** и не платный запрос к модели.
+Telegram проверяется через `getMe`, точное имя бота и чистый heartbeat живого собственного
+worker, записанный после его запуска. Здесь не создаются сессии владельца и не
+подменяется полноценная первоначальная приёмка: старое доказательство маршрутов и
+базовой готовности остаётся обязательным.
+
+`checks.integrations` переживает перезапуск fleet: сетевой сбой или ещё не запущенный
+child оставляет `pending` с автоматическим повтором. Неверная идентичность непустого
+бота даёт `failed`/`telegram_identity_unverified`; явное удаление применяется как
+`applied` с отключённым сервисом. `applied` означает загрузку конфигурации и указанные
+узкие проверки, а не отправку сообщения или успешный ответ ИИ. Для новой ревизии
+статус предыдущей ревизии не должен отображаться как актуальный.

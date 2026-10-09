@@ -32,7 +32,13 @@ def apply_company_settings(configuration, company, settings_service):
         values = configuration.get(group, {})
         if not isinstance(values, dict) or set(values) - fields:
             raise ValueError("Unknown tenant settings field")
-    central = settings_service.runtime_settings(company["id"], expected_version=company["version"])
+    revision_getter = getattr(settings_service, "integrations_revision", None)
+    revision = revision_getter(company["id"]) if revision_getter else 1
+    options = {"expected_version": company["version"]}
+    if revision_getter:
+        options["expected_revision"] = revision
+    central = settings_service.runtime_settings(company["id"], **options)
+    configuration["integrations_revision"] = revision
     if set(central) != {"document_settings", "assistant_settings"}:
         raise ValueError("Invalid central company settings")
     document = {
@@ -46,6 +52,9 @@ def apply_company_settings(configuration, company, settings_service):
         if k in {"requests_per_hour", "max_output_tokens"}
     }
     document.update(central["document_settings"])
+    # Telegram linking/recovery also needs the worker when document modules are off.
+    if document.get("bot_token"):
+        document["worker_enabled"] = True
     assistant.update(central["assistant_settings"])
     # Optional UUIDs must be absent rather than serialized as empty strings (or
     # "None") in the child environment. The old operator value was discarded

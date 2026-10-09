@@ -266,7 +266,7 @@ def test_concurrent_provisioning_single_committed_history(empty_database):
         results = list(executor.map(run, range(2)))
     assert sorted(map(len, results)) == [0, len(load_migrations())]
     assert count_rows(operator, runtime, "analytics", "_tenant_migrations") == 5
-    assert count_rows(operator, runtime, "documents", "_tenant_migrations") == 4
+    assert count_rows(operator, runtime, "documents", "_tenant_migrations") == 5
     assert count_rows(operator, runtime, "payments", "_tenant_migrations") == 3
 
 
@@ -345,14 +345,17 @@ def test_primary_admin_migration_upgrades_existing_journal_once(empty_database, 
     operator, _dsn, tenant = empty_database
     runtime = tenant()
     manifest = json.loads((MIGRATION_DIRECTORY / "manifest.json").read_text())
-    assert (
-        manifest["migrations"][-1]["file"] == "20261010100000_tenant_primary_admin_projection.sql"
+    migration_file = "20261010100000_tenant_primary_admin_projection.sql"
+    primary_index = next(
+        index
+        for index, entry in enumerate(manifest["migrations"])
+        if entry["file"] == migration_file
     )
-    old = dict(manifest, migrations=manifest["migrations"][:-1])
+    old = dict(manifest, migrations=manifest["migrations"][:primary_index])
     (tmp_path / "manifest.json").write_text(json.dumps(old))
     for entry in old["migrations"]:
         shutil.copyfile(MIGRATION_DIRECTORY / entry["file"], tmp_path / entry["file"])
     assert len(provision_tenant(operator, runtime, directory=tmp_path)) == len(old["migrations"])
     applied = provision_tenant(operator, runtime)
-    assert applied == (manifest["migrations"][-1]["file"],)
+    assert applied == tuple(entry["file"] for entry in manifest["migrations"][primary_index:])
     assert provision_tenant(operator, runtime) == ()

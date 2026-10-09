@@ -19,6 +19,7 @@ from app.documents.policy import identifier
 from app.documents.service import DocumentService
 from app.documents.telegram import Telegram, deliver_notification, handle_update
 from app.documents.telegram_cleanup import deliver_cleanup
+from app.documents.telegram_identity import bot_namespace
 from app.documents.telegram_link import queued_update
 from app.tenancy.worker_policy import configure as configure_worker_policy
 
@@ -71,6 +72,7 @@ def catalog_due(service, now):
 
 
 def recover_bot_jobs(service):
+    namespace = bot_namespace(service)
     with service.database.connection() as db:
         # Callback mutations use a stable request UUID, so replay after a crash
         # can complete the existing operation without a second approval.
@@ -79,6 +81,8 @@ def recover_bot_jobs(service):
             "UPDATE native_bot_updates SET state=CASE WHEN data ? 'callback_query' "
             "THEN 'pending' ELSE 'unknown' END,updated_at=now() "
             "WHERE state='processing' AND updated_at<now()-interval '5 minutes'"
+            + (" AND bot_id=%s" if namespace else ""),
+            (namespace,) if namespace else (),
         )
         db.execute(
             "UPDATE portal_documents_notification SET state='unknown',updated_at=now() "
@@ -87,8 +91,10 @@ def recover_bot_jobs(service):
 
 
 def poll(service, bot):
+    namespace = bot_namespace(service)
+    offset_name = "telegram-offset" + (":" + namespace if namespace else "")
     with service.database.connection(readonly=True) as db:
-        row = db.execute("SELECT data FROM native_jobs WHERE name='telegram-offset'").fetchone()
+        row = db.execute("SELECT data FROM native_jobs WHERE name=%s", (offset_name,)).fetchone()
         offset = row["data"].get("offset", 0) if row else 0
     updates = bot.call(
         "getUpdates",
@@ -103,24 +109,32 @@ def poll(service, bot):
         with service.database.connection() as db:
             for update in updates:
                 db.execute(
-                    "INSERT INTO native_bot_updates (id,data) VALUES (%s,%s) ON CONFLICT DO "
-                    "NOTHING",
-                    (update["update_id"], Jsonb(queued_update(update))),
+                    (
+                        "INSERT INTO native_bot_updates (bot_id,id,data) VALUES (%s,%s,%s) "
+                        if namespace
+                        else "INSERT INTO native_bot_updates (id,data) VALUES (%s,%s) "
+                    )
+                    + "ON CONFLICT DO NOTHING",
+                    ((namespace,) if namespace else ())
+                    + (update["update_id"], Jsonb(queued_update(update, namespace))),
                 )
             db.execute(
-                "INSERT INTO native_jobs (name,data) VALUES ('telegram-offset',%s) "
+                "INSERT INTO native_jobs (name,data) VALUES (%s,%s) "
                 "ON CONFLICT (name) DO UPDATE SET data=excluded.data,updated_at=now()",
-                (Jsonb({"offset": max(u["update_id"] for u in updates) + 1}),),
+                (offset_name, Jsonb({"offset": max(u["update_id"] for u in updates) + 1})),
             )
     with service.database.connection() as db:
         job = db.execute(
-            "SELECT * FROM native_bot_updates WHERE state='pending' ORDER BY id "
-            "FOR UPDATE SKIP LOCKED LIMIT 1"
+            "SELECT * FROM native_bot_updates WHERE state='pending' "
+            + ("AND bot_id=%s " if namespace else "")
+            + "ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1",
+            (namespace,) if namespace else (),
         ).fetchone()
         if job:
             db.execute(
-                "UPDATE native_bot_updates SET state='processing',updated_at=now() WHERE id=%s",
-                (job["id"],),
+                "UPDATE native_bot_updates SET state='processing',updated_at=now() WHERE id=%s"
+                + (" AND bot_id=%s" if namespace else ""),
+                (job["id"],) + ((namespace,) if namespace else ()),
             )
     if job:
         state = "done"
@@ -131,8 +145,9 @@ def poll(service, bot):
             log.warning("Document bot update needs review")
         with service.database.connection() as db:
             db.execute(
-                "UPDATE native_bot_updates SET state=%s,updated_at=now() WHERE id=%s",
-                (state, job["id"]),
+                "UPDATE native_bot_updates SET state=%s,updated_at=now() WHERE id=%s"
+                + (" AND bot_id=%s" if namespace else ""),
+                (state, job["id"]) + ((namespace,) if namespace else ()),
             )
 
 

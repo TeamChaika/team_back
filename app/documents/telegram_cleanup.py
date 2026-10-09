@@ -3,6 +3,7 @@
 import logging
 
 from app.documents.policy import table
+from app.documents.telegram_identity import bot_namespace
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ def approved(db, kind, doc):
 
 
 def record(service, kind, doc, chat_id, message_id):
+    namespace = bot_namespace(service)
     # Serialize with approval: either approval sees this row, or this row sees its tombstone.
     with service.database.connection() as db:
         parent, _ = table(kind)
@@ -49,12 +51,30 @@ def record(service, kind, doc, chat_id, message_id):
             return False
         db.execute(
             "INSERT INTO native_telegram_messages"
-            "(chat_id,message_id,kind,document_id,version,state) "
-            "VALUES (%s,%s,%s,%s,%s,CASE WHEN EXISTS (SELECT 1 FROM native_telegram_cleanup "
+            + (
+                "(bot_id,chat_id,message_id,kind,document_id,version,state) VALUES (%s,"
+                if namespace
+                else "(chat_id,message_id,kind,document_id,version,state) VALUES ("
+            )
+            + "%s,%s,%s,%s,%s,CASE WHEN EXISTS (SELECT 1 FROM native_telegram_cleanup "
             "WHERE kind=%s AND document_id=%s AND approved_version>=%s) "
             "THEN 'pending' ELSE 'active' END) "
-            "ON CONFLICT(chat_id,message_id) DO NOTHING",
-            (chat_id, message_id, kind, doc["id"], doc["version"], kind, doc["id"], doc["version"]),
+            + (
+                "ON CONFLICT(bot_id,chat_id,message_id) DO NOTHING"
+                if namespace
+                else "ON CONFLICT(chat_id,message_id) DO NOTHING"
+            ),
+            ((namespace,) if namespace else ())
+            + (
+                chat_id,
+                message_id,
+                kind,
+                doc["id"],
+                doc["version"],
+                kind,
+                doc["id"],
+                doc["version"],
+            ),
         )
     return True
 
@@ -140,13 +160,16 @@ def eligible(service, kind, doc):
 
 
 def deliver_cleanup(service, bot):
+    namespace = bot_namespace(service)
     # Leader ensures a single network caller; holding the row lock also excludes parallel callers.
     with service.database.connection() as db:
         db.execute("SET LOCAL idle_in_transaction_session_timeout='0'")
         row = db.execute(
             "SELECT * FROM native_telegram_messages WHERE state='pending' "
             "AND next_attempt_at<=now() "
-            "ORDER BY next_attempt_at,chat_id,message_id FOR UPDATE SKIP LOCKED LIMIT 1"
+            + ("AND bot_id=%s " if namespace else "")
+            + "ORDER BY next_attempt_at,chat_id,message_id FOR UPDATE SKIP LOCKED LIMIT 1",
+            (namespace,) if namespace else (),
         ).fetchone()
         if not row:
             return False
@@ -183,8 +206,9 @@ def deliver_cleanup(service, bot):
                 db.execute(
                     "UPDATE native_telegram_messages SET next_attempt_at=greatest("
                     "next_attempt_at,now()+%s*interval '1 second') "
-                    "WHERE chat_id=%s AND state='pending'",
-                    (delay, row["chat_id"]),
+                    "WHERE chat_id=%s AND state='pending'"
+                    + (" AND bot_id=%s" if namespace else ""),
+                    (delay, row["chat_id"]) + ((namespace,) if namespace else ()),
                 )
         except Exception:
             error = "transport"
@@ -193,7 +217,8 @@ def deliver_cleanup(service, bot):
         db.execute(
             "UPDATE native_telegram_messages SET state=%s,remove_buttons=%s,attempts=attempts+1,"
             "last_error=%s,next_attempt_at=now()+%s*interval '1 second',updated_at=now() "
-            "WHERE chat_id=%s AND message_id=%s",
-            (state, remove_buttons, error, delay, row["chat_id"], row["message_id"]),
+            "WHERE chat_id=%s AND message_id=%s" + (" AND bot_id=%s" if namespace else ""),
+            (state, remove_buttons, error, delay, row["chat_id"], row["message_id"])
+            + ((namespace,) if namespace else ()),
         )
     return True

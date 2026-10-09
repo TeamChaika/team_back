@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from app.documents.context import lock_resource, runtime_of
 from app.documents.policy import fail
+from app.documents.telegram_identity import bot_namespace, credential_digest
 from app.documents.telegram_link import TOKEN, _available, _username
 
 INVALID = "Ссылка недействительна или уже использована. Запросите новую в Telegram."
@@ -94,13 +95,20 @@ def issue(service, telegram_id):
             "INSERT INTO native_password_recovery"
             "(token_hash,portal_id,user_id,telegram_id,revision,expires_at) "
             "VALUES (%s,%s,%s,%s,%s,clock_timestamp()+interval '10 minutes')",
-            (digest(raw), row["supabase_id"], row["id"], telegram_id, row["revision"]),
+            (
+                credential_digest(raw, bot_namespace(service)),
+                row["supabase_id"],
+                row["id"],
+                telegram_id,
+                row["revision"],
+            ),
         )
     return origin + "/reset-password#token=" + raw
 
 
 def claim(service, raw):
-    hashed = digest(raw)
+    digest(raw)  # Validate the opaque token before constructing its bot-bound digest.
+    hashed = credential_digest(raw, bot_namespace(service))
     with service.database.connection() as db:
         result = db.execute(
             "UPDATE native_password_recovery SET claimed_at=clock_timestamp() "

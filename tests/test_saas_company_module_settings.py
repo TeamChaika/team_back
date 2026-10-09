@@ -67,6 +67,7 @@ def test_encryption_isolation_versions_and_secret_clear(imported):
         first["id"],
         ModuleSettingsWrite(
             expected_version=result["company_version"],
+            expected_revision=result["integrations_revision"],
             telegram=dict(username="newcompany_bot", token=""),
         ),
         actor,
@@ -76,6 +77,7 @@ def test_encryption_isolation_versions_and_secret_clear(imported):
         first["id"],
         ModuleSettingsWrite(
             expected_version=result["company_version"],
+            expected_revision=result["integrations_revision"],
             telegram=dict(username="", clear_token=True),
             seller=None,
             assistant=dict(provider="openrouter"),
@@ -178,4 +180,4 @@ def test_runtime_overlay_reads_encrypted_current_company_and_clears_old_files(im
     foreign = apply_company_settings(old_file, second, service)
     assert foreign["document_settings"]["bot_token"] == ""
     assert foreign["assistant_settings"]["api_key"] == ""
-    assert foreign["assistant_settings"]["timeweb_agent_id"] == ""
+    assert "timeweb_agent_id" not in foreign["assistant_settings"]

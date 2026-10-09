@@ -191,6 +191,9 @@ class RuntimeOperator:
             "RESTCONTROL_RUNTIME_MODE": "tenant",
             "RESTCONTROL_TENANT_COMPANY_ID": str(runtime.company_id),
             "RESTCONTROL_TENANT_CONFIGURATION_VERSION": str(runtime.configuration_version),
+            "RESTCONTROL_TENANT_INTEGRATIONS_REVISION": str(
+                self.config.get("integrations_revision", 1)
+            ),
             "RESTCONTROL_TENANT_TIMEZONE": runtime.timezone,
             "RESTCONTROL_TENANT_FRONTEND_ORIGIN": runtime.frontend_origin,
             "RESTCONTROL_TENANT_API_ORIGIN": runtime.api_origin,

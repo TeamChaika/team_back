@@ -266,6 +266,10 @@ class PostgresTenantAccess(PlatformSSO):
                 "display_name": row["display_name"],
             },
             "company": {k: company[k] for k in ("id", "name", "slug")},
+            "can_manage_integrations": bool(
+                not row["must_change"]
+                and (row.get("_platform_owner") or row.get("role") == "company_admin")
+            ),
             "must_change_password": bool(row["must_change"]),
             "csrf_token": csrf,
         }

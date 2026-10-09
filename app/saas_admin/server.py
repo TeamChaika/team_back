@@ -490,9 +490,11 @@ def create_app(
         ),
         owner_dependency,
     )
-    from .company_module_settings import mount_module_settings
+    from .company_module_settings import mount_module_settings, mount_tenant_integrations
 
     mount_module_settings(app, repo, owner_dependency)
+    if hasattr(repo, "_tenant_verified"):
+        mount_tenant_integrations(app, repo)
     mount_platform_sso(app, repo, owner_dependency, mode=mode)
     mount_tenant_routes(app, repo, mode=mode)
     mount_dashboard_routes(app, repo)

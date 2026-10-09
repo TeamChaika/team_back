@@ -191,3 +191,22 @@ Native и commercial workflow пишут глобальный actor snapshot и 
 Counterparty worker требует текущий `owner_authorizer` перед резервированием
 POST. Проверки: `test_tenant_owner_documents.py`, `test_tenant_owner_commercial.py`,
 `test_tenant_actor_schema.py` на одноразовом PostgreSQL.
+
+### Tenant Telegram bot replacement (2026-10-09)
+
+`telegram_identity.py` derives the stable numeric bot ID from the validated token.
+Tenant `worker.py` scopes the cursor and inbox by that ID; token rotation preserves
+the cursor, replacing the bot starts a separate inbox. `telegram_cleanup.py` records
+and deletes only the active bot's message IDs, including callback recovery. Link
+and password-recovery token digests are bound to the bot ID. Existing Telegram user
+bindings remain intact because Telegram user IDs are global; document permissions
+are unchanged. Old bot links cannot be consumed through the replacement bot.
+
+Apply tenant migration `20261010110000_tenant_telegram_bot_namespace.sql` through
+the operator before launching the updated tenant worker. It adds bot identity to
+the inbox and message-ledger primary keys. Historic unassigned rows remain retained
+with an empty identity and are not polled or deleted by tenant bots; never assign
+them to a new bot without independent proof of the original bot. Fleet migration
+fingerprint checking must quiesce and reprovision existing runtimes before restart.
+The non-tenant legacy SQL paths and their existing database schema remain unchanged.
+Synthetic PostgreSQL regressions: `tests/test_telegram_bot_namespace.py`.
