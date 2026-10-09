@@ -229,3 +229,63 @@ def test_public_readiness_cannot_be_supplied_by_operator_evidence(tmp_path):
 
     with pytest.raises(ValueError, match="All required real provisioning adapters"):
         Provisioner(object(), {"modules": lambda *_: {"ok": True, "evidence": "pretend"}})
+
+
+@pytest.mark.parametrize(
+    ("subscription", "company_timezone", "expected"),
+    [
+        (
+            {"plan": "Original plan", "start_date": "2026-01-01", "end_date": None},
+            None,
+            "Europe/Simferopol",
+        ),
+        ({"timezone": "Asia/Tokyo"}, None, "Asia/Tokyo"),
+        ({"timezone": "Asia/Tokyo"}, "Europe/London", "Europe/London"),
+    ],
+)
+def test_constructor_normalizes_legacy_subscription_timezone(
+    tmp_path, subscription, company_timezone, expected
+):
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    company_id = uuid4()
+    company = {
+        "id": str(company_id),
+        "version": 8,
+        "domain": "own.example.org",
+        "subscription": subscription,
+    }
+    if company_timezone:
+        company["timezone"] = company_timezone
+    original = deepcopy(company)
+    config = {
+        key: "host=127.0.0.1 dbname=test"
+        for key in ("operator_dsn", "registry_dsn", "runtime_dsn", "payments_dsn")
+    }
+    config.update(company_id=str(company_id), runtime_root=str(tmp_path))
+    operator = RuntimeOperator(config, SimpleNamespace(get=lambda _: company))
+    assert operator.runtime.timezone == expected
+    assert operator.runtime.configuration_version == 8
+    assert company == original
+    assert not operator.manifest.exists()
+
+
+@pytest.mark.parametrize("timezone", ["", None, "not/a/zone"])
+def test_constructor_rejects_explicit_invalid_subscription_timezone(tmp_path, timezone):
+    from types import SimpleNamespace
+
+    company_id = uuid4()
+    company = {
+        "id": str(company_id),
+        "version": 8,
+        "domain": "own.example.org",
+        "subscription": {"timezone": timezone},
+    }
+    config = {
+        key: "host=127.0.0.1 dbname=test"
+        for key in ("operator_dsn", "registry_dsn", "runtime_dsn", "payments_dsn")
+    }
+    config.update(company_id=str(company_id), runtime_root=str(tmp_path))
+    with pytest.raises(ValueError):
+        RuntimeOperator(config, SimpleNamespace(get=lambda _: company))

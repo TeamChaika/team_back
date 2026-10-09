@@ -32,6 +32,7 @@ from app.tenant_payments.store import validate_payment_connection
 
 from .connection_check import check_connection
 from .connections import configured
+from .models import Subscription
 from .postgres_repository import PostgresRepository
 from .provisioning import Provisioner
 from .runtime_process_identity import ProcessIdentity, read_central_secret, read_operator_json
@@ -90,7 +91,10 @@ class RuntimeOperator:
             mode="tenant",
             company_id=company_id,
             **{f"{k}_schema": v for k, v in schema_names(company_id).items()},
-            timezone=self.company.get("timezone") or self.company["subscription"]["timezone"],
+            # Imported legacy subscriptions predate timezone. Resolve their
+            # canonical validated model default without rewriting the registry.
+            timezone=self.company.get("timezone")
+            or Subscription.model_validate(self.company["subscription"]).timezone,
             frontend_origin="https://" + self.company["domain"],
             api_origin="https://api." + self.company["domain"],
             runtime_directory=Path(configuration["runtime_root"]) / f"c_{company_id.hex}",

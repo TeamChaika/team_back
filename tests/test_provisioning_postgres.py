@@ -298,7 +298,7 @@ def test_legacy_module_and_payment_evidence_is_rechecked_without_resync(control)
         db.execute(
             "UPDATE runtime_provisioning SET checks=jsonb_set(jsonb_set(checks,"
             "'{modules,evidence}','{\"probes\":[]}'::jsonb),'{payments,evidence}',"
-            "'{\"terminals\":[{\"terminal_id\":\"old\"}]}'::jsonb)"
+            '\'{"terminals":[{"terminal_id":"old"}]}\'::jsonb)'
         )
     calls.clear()
     assert job.run(company["id"])
@@ -306,3 +306,44 @@ def test_legacy_module_and_payment_evidence_is_rechecked_without_resync(control)
     calls.clear()
     assert job.run(company["id"])
     assert calls == []
+
+
+def test_operator_constructs_from_actual_legacy_registry_row_without_rewrite(control, tmp_path):
+    from psycopg.types.json import Jsonb
+
+    from app.saas_admin.postgres_repository import PostgresRepository
+    from app.saas_admin.runtime_operator import RuntimeOperator
+
+    company_id = uuid4()
+    # Exact legacy production shape: subscription has no policy/timezone fields.
+    legacy = {
+        "id": str(company_id),
+        "version": 8,
+        "domain": "own.example.org",
+        "name": "Legacy",
+        "slug": "legacy",
+        "status": "active",
+        "archived_at": None,
+        "chain_url": None,
+        "rms": [],
+        "subscription": {"plan": "Legacy plan", "start_date": "2026-01-01", "end_date": None},
+    }
+    with control.connect(True) as db:
+        db.execute("CREATE TABLE companies(id uuid,archived_at timestamptz,body jsonb)")
+        db.execute(
+            "CREATE TABLE connections(company_id uuid,connection_id text,url text,check_json jsonb)"
+        )
+        db.execute("INSERT INTO companies VALUES(%s,NULL,%s)", (company_id, Jsonb(legacy)))
+    repo = PostgresRepository.__new__(PostgresRepository)
+    repo.connect = control.connect
+    config = {
+        key: "host=127.0.0.1 dbname=test"
+        for key in ("operator_dsn", "registry_dsn", "runtime_dsn", "payments_dsn")
+    }
+    config.update(company_id=str(company_id), runtime_root=str(tmp_path))
+    operator = RuntimeOperator(config, repo)
+    assert operator.runtime.timezone == "Europe/Simferopol"
+    assert operator.runtime.configuration_version == 8
+    assert not operator.manifest.exists()
+    with control.connect() as db:
+        assert db.execute("SELECT body FROM companies").fetchone()["body"] == legacy
