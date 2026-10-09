@@ -10,6 +10,7 @@ from app.commercial_invoices.calculation import VAT_RATES
 from app.commercial_invoices.drafts import build_snapshot, counterparty_catalog, product_catalog
 from app.commercial_invoices.policy import actor, require, stores_for
 from app.documents.policy import fail, full_name, identifier, invalid
+from app.documents.product_search import search_products
 
 KINDS = {"purchase", "sale"}
 EDITABLE = {"draft", "rejected"}
@@ -130,6 +131,11 @@ class CommercialInvoiceService:
             if action in {"products", "counterparties"}:
                 if not stores_for(db, user["id"], kind, "view"):
                     fail(403, "Сначала получите доступ к складу.")
+                if action == "products":
+                    result = search_products(
+                        product_catalog(db), params.get("q", params.get("query", ""))
+                    )
+                    return {"items": result["rows"], "total": result["total"]}
                 query = params.get("q", params.get("query", "")).strip().casefold()
                 if len(query) > 200:
                     invalid()

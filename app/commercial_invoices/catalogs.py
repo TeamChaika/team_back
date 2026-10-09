@@ -47,7 +47,11 @@ def parse_products(raw_products, raw_units):
         name = product.get("name")
         if not isinstance(name, str) or not name.strip() or not isinstance(unit, str) or not unit:
             raise ValueError("Incomplete commercial product or unit")
-        result.append({"id": product_id, "name": name, "unit_id": unit_id, "unit": unit})
+        item = {"id": product_id, "name": name, "unit_id": unit_id, "unit": unit}
+        article = product.get("num")
+        if isinstance(article, str) and article.strip():
+            item["article"] = article.strip()
+        result.append(item)
     if not result:
         raise ValueError("Empty commercial product dictionary")
     return result
