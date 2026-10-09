@@ -289,3 +289,84 @@ def test_constructor_rejects_explicit_invalid_subscription_timezone(tmp_path, ti
     config.update(company_id=str(company_id), runtime_root=str(tmp_path))
     with pytest.raises(ValueError):
         RuntimeOperator(config, SimpleNamespace(get=lambda _: company))
+
+
+def initial_sync_operator(monkeypatch):
+    from types import SimpleNamespace
+
+    operator = object.__new__(RuntimeOperator)
+    operator.config = {"history_from": "2026-08-10", "history_to": "2026-10-08"}
+    operator.runtime = SimpleNamespace(timezone="Asia/Tokyo")
+    monkeypatch.setattr(operator, "launch", lambda role: None)
+    monkeypatch.setattr(operator, "child_environment", lambda: {"SENTINEL": "private-secret"})
+    monkeypatch.setattr(
+        operator, "process_identity", lambda: SimpleNamespace(spawn_options=lambda: {})
+    )
+    return operator
+
+
+def test_initial_sync_stock_command_accepted_by_real_cli_in_company_time(monkeypatch):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    import app.saas_admin.runtime_operator as module
+    import app.sync_store_balances as balances
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 9, 23, 4, 5, 999, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr(module, "datetime", Clock)
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    result = initial_sync_operator(monkeypatch).initial_sync()
+    stock = next(command for command in commands if command[2] == "app.sync_store_balances")
+    monkeypatch.setattr(module.sys, "argv", [stock[2], *stock[3:]])
+    monkeypatch.setattr(balances, "Settings", lambda: object())
+    captured = []
+
+    def synchronize(settings, query, api_url):
+        captured.append(query.timestamp)
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(balances, "synchronize_store_balances", synchronize)
+    balances.main()
+    assert captured == [datetime(2026, 10, 10, 8, 4, 5)]
+    assert result["ok"] is True
+    assert len(result["evidence"]["completed_jobs"]) == 8
+    for command in commands[-3:]:
+        assert command[3:] == ["--date-from", "2026-08-10", "--date-to", "2026-10-08"]
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_initial_sync_failure_records_only_job_identity_and_stops(monkeypatch, timeout):
+    from types import SimpleNamespace
+
+    import app.saas_admin.runtime_operator as module
+    from app.saas_admin.provisioning import PendingCheck
+
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        if timeout:
+            raise module.subprocess.TimeoutExpired(command, 1, stderr=b"private-secret")
+        return SimpleNamespace(returncode=2)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    with pytest.raises(PendingCheck) as failure:
+        initial_sync_operator(monkeypatch).initial_sync()
+    assert len(commands) == 1
+    assert failure.value.code == (
+        "initial_sync_job_timeout" if timeout else "initial_sync_job_failed"
+    )
+    assert failure.value.details == (
+        {"module": "sync_references"} if timeout else {"module": "sync_references", "exit_code": 2}
+    )
+    assert "private-secret" not in str(failure.value.details)

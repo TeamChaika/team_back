@@ -14,10 +14,11 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import httpx
 import psycopg
@@ -34,7 +35,7 @@ from .connection_check import check_connection
 from .connections import configured
 from .models import Subscription
 from .postgres_repository import PostgresRepository
-from .provisioning import Provisioner
+from .provisioning import PendingCheck, Provisioner
 from .runtime_process_identity import ProcessIdentity, read_central_secret, read_operator_json
 
 
@@ -469,34 +470,46 @@ class RuntimeOperator:
         if start > end:
             raise ValueError("Invalid initial history interval")
         self.launch("collector")
+        # iiko expects local accounting time without a UTC offset, as in the scheduler.
+        stock_timestamp = (
+            datetime.now(ZoneInfo(self.runtime.timezone))
+            .replace(tzinfo=None, microsecond=0)
+            .isoformat()
+        )
         jobs = [
             ("sync_references", []),
             ("sync_inventory", []),
             ("sync_employees", []),
             ("sync_dictionaries", []),
-            ("sync_store_balances", []),
+            ("sync_store_balances", ["--timestamp", stock_timestamp]),
             ("sync_sales_history", ["--date-from", str(start), "--date-to", str(end)]),
             ("sync_documents", ["--date-from", str(start), "--date-to", str(end)]),
             ("sync_event_history", ["--date-from", str(start), "--date-to", str(end)]),
         ]
         for module, args in jobs:
-            result = subprocess.run(
-                [sys.executable, "-m", "app." + module, *args],
-                env=self.child_environment(),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=6 * 3600,
-                check=False,
-                **self.process_identity().spawn_options(),
-            )
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "app." + module, *args],
+                    env=self.child_environment(),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=6 * 3600,
+                    check=False,
+                    **self.process_identity().spawn_options(),
+                )
+            except subprocess.TimeoutExpired:
+                raise PendingCheck("initial_sync_job_timeout", {"module": module}) from None
             if result.returncode:
-                raise ValueError("Initial synchronization failed")
+                raise PendingCheck(
+                    "initial_sync_job_failed", {"module": module, "exit_code": result.returncode}
+                )
         return {
             "ok": True,
             "evidence": {
                 "history_from": str(start),
                 "history_to": str(end),
+                "balance_timestamp": stock_timestamp,
                 "completed_jobs": [item[0] for item in jobs],
             },
         }
