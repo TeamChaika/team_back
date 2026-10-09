@@ -19,11 +19,26 @@ from psycopg.types.json import Jsonb
 from .config import validate_private_key
 
 TABLES = (
-    "companies", "platform_memberships", "memberships", "connections", "events",
-    "tenant_events", "auth_provisioning", "attempts", "check_attempts",
-    "check_targets", "imports", "sessions", "tenant_sessions",
-    "platform_tenant_events", "platform_sso_codes", "platform_tenant_sessions",
-    "company_account_requests", "runtime_provisioning", "company_module_settings",
+    "companies",
+    "platform_memberships",
+    "memberships",
+    "connections",
+    "events",
+    "tenant_events",
+    "auth_provisioning",
+    "attempts",
+    "check_attempts",
+    "check_targets",
+    "imports",
+    "sessions",
+    "tenant_sessions",
+    "platform_tenant_events",
+    "platform_sso_codes",
+    "platform_tenant_sessions",
+    "company_account_requests",
+    "runtime_provisioning",
+    "company_module_settings",
+    "company_payment_domains",
 )
 SESSION_TABLES = {"sessions", "tenant_sessions", "platform_sso_codes", "platform_tenant_sessions"}
 
@@ -70,7 +85,14 @@ def _validate_ciphertexts(data, key):
         from .company_module_settings import ModuleSettingsWrite, Seller
 
         value = json.loads(cipher.decrypt(row["ciphertext"].encode()))
-        if not isinstance(value, dict) or set(value) != {"seller", "telegram", "assistant"}:
+        if (
+            not isinstance(value, dict)
+            or set(value) - {"seller", "telegram", "assistant", "integrations_revision"}
+            or not {"seller", "telegram", "assistant"} <= set(value)
+        ):
+            raise ValueError("Invalid encrypted module settings")
+        revision = value.pop("integrations_revision", 1)
+        if type(revision) is not int or revision < 1:
             raise ValueError("Invalid encrypted module settings")
         fields = {
             "telegram": {"username", "token"},
@@ -105,23 +127,33 @@ def snapshot_postgres(dsn, source, destination):
             db.execute("SET LOCAL statement_timeout='60000ms'")
             schema = _schema(db)
             for name in TABLES:
-                data[name] = [] if name in SESSION_TABLES else [
-                    row[0] for row in db.execute(
-                        sql.SQL("SELECT to_jsonb(t) FROM restcontrol.{} t "
-                                "ORDER BY to_jsonb(t)::text")
-                        .format(sql.Identifier(name))
-                    )
-                ]
+                data[name] = (
+                    []
+                    if name in SESSION_TABLES
+                    else [
+                        row[0]
+                        for row in db.execute(
+                            sql.SQL(
+                                "SELECT to_jsonb(t) FROM restcontrol.{} t "
+                                "ORDER BY to_jsonb(t)::text"
+                            ).format(sql.Identifier(name))
+                        )
+                    ]
+                )
         _validate_ciphertexts(data, key)
         if key_path.read_bytes() != key:
             raise ValueError("Credential key changed during backup; retry")
         payload = _encoded(data)
         metadata = {
-            "format": "restcontrol-postgres-v1", "created_at": datetime.now(UTC).isoformat(),
-            "schema": schema, "schema_sha256": _hash(_encoded(schema)),
-            "data_sha256": _hash(payload), "key_sha256": _hash(key),
+            "format": "restcontrol-postgres-v1",
+            "created_at": datetime.now(UTC).isoformat(),
+            "schema": schema,
+            "schema_sha256": _hash(_encoded(schema)),
+            "data_sha256": _hash(payload),
+            "key_sha256": _hash(key),
             "counts": {name: len(rows) for name, rows in data.items()},
-            "sessions_included": False, "auth_passwords_included": False,
+            "sessions_included": False,
+            "auth_passwords_included": False,
         }
         _write(target / "registry.json", payload)
         _write(target / "credentials.key", key)
@@ -188,20 +220,26 @@ def restore_postgres(source, operator_dsn, destination):
             db.execute("SET LOCAL row_security=off")
             # Lock every destination before checking emptiness to exclude writes.
             for name in TABLES:
-                db.execute(sql.SQL("LOCK TABLE restcontrol.{} IN ACCESS EXCLUSIVE MODE")
-                           .format(sql.Identifier(name)))
+                db.execute(
+                    sql.SQL("LOCK TABLE restcontrol.{} IN ACCESS EXCLUSIVE MODE").format(
+                        sql.Identifier(name)
+                    )
+                )
             if _schema(db) != manifest["schema"]:
                 raise ValueError("Destination schema does not match the snapshot")
             for name in TABLES:
-                if db.execute(sql.SQL("SELECT 1 FROM restcontrol.{} LIMIT 1")
-                              .format(sql.Identifier(name))).fetchone():
+                if db.execute(
+                    sql.SQL("SELECT 1 FROM restcontrol.{} LIMIT 1").format(sql.Identifier(name))
+                ).fetchone():
                     raise ValueError("Restore destination must be empty")
             for name in TABLES:
                 if data[name]:
                     db.execute(
-                        sql.SQL("INSERT INTO restcontrol.{} SELECT * FROM "
-                                "jsonb_populate_recordset(NULL::restcontrol.{},%s)")
-                        .format(sql.Identifier(name), sql.Identifier(name)), (Jsonb(data[name]),),
+                        sql.SQL(
+                            "INSERT INTO restcontrol.{} SELECT * FROM "
+                            "jsonb_populate_recordset(NULL::restcontrol.{},%s)"
+                        ).format(sql.Identifier(name), sql.Identifier(name)),
+                        (Jsonb(data[name]),),
                     )
             # A database snapshot cannot attest that a saved Unix socket, process
             # or external configuration still belongs to this restored runtime.

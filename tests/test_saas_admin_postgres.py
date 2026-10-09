@@ -45,6 +45,7 @@ def pg_server():
                 db.execute(Path("supabase/migrations/20261008200905_restcontrol_company_accounts.sql").read_text())
                 db.execute(Path("supabase/migrations/20261008235000_restcontrol_runtime_provisioning.sql").read_text())
                 db.execute(Path("supabase/migrations/20261009093000_restcontrol_company_module_settings.sql").read_text())
+                db.execute(Path("supabase/migrations/20261010120000_restcontrol_payment_domains.sql").read_text())
             yield url
         finally:
             server.cleanup()

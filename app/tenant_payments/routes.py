@@ -19,6 +19,11 @@ from app.tenant_payments.models import DepositFilters, NewDeposit, TerminalInput
 from app.web.deposits import XLSX, VenueGrant, VenueRevoke
 
 
+class ShortGuestAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID
+
+
 class GuestAction(BaseModel):
     model_config = ConfigDict(extra="forbid")
     token: str = Field(min_length=20, max_length=128)
@@ -239,7 +244,11 @@ def create_router(
         return await run_in_threadpool(store.guest, deposit_id, token)
 
     def guest_origin(request):
-        if request.headers.get("origin") != store.runtime.frontend_origin:
+        origin = request.headers.get("origin")
+        if not origin or origin not in {
+            store.runtime.frontend_origin,
+            store.runtime.payment_origin,
+        }:
             raise HTTPException(403, "Недопустимый источник запроса.")
 
     @router.post("/api/guest-deposits/{deposit_id}/prepare")
@@ -251,6 +260,23 @@ def create_router(
     async def reconcile(deposit_id: UUID, request: Request, payload: GuestAction):
         guest_origin(request)
         return await service.refresh_guest(deposit_id, payload.token)
+
+    @router.get("/api/guest-links/{code}")
+    async def short_guest(code: str):
+        deposit_id, token = await run_in_threadpool(store.resolve_guest_link, code)
+        return await run_in_threadpool(store.guest, deposit_id, token)
+
+    @router.post("/api/guest-links/{code}/prepare")
+    async def short_prepare(code: str, request: Request, payload: ShortGuestAction):
+        guest_origin(request)
+        deposit_id, token = await run_in_threadpool(store.resolve_guest_link, code)
+        return await service.prepare(deposit_id, token, payload.request_id)
+
+    @router.post("/api/guest-links/{code}/reconcile")
+    async def short_reconcile(code: str, request: Request, payload: ShortGuestAction):
+        guest_origin(request)
+        deposit_id, token = await run_in_threadpool(store.resolve_guest_link, code)
+        return await service.refresh_guest(deposit_id, token)
 
     @router.post("/api/payment-callbacks/{attempt_id}")
     async def callback(

@@ -21,6 +21,7 @@ from app.tenant_payments.models import TerminalInput
 from app.tenant_payments.service import TenantPayments
 from app.tenant_payments.store import PaymentStore, payment_role
 from tests.test_company_accounts_postgres import accounts as accounts
+from tests.test_initial_sync_plan import current_proof
 from tests.test_tenant_migrations_postgres import empty_database  # noqa: F401
 from tests.test_tenant_payments_postgres import Provider, TestVault, setup
 
@@ -56,7 +57,14 @@ def acceptance(accounts, tmp_path, monkeypatch):
                     runtime.company_id,
                     1,
                     str(runtime.runtime_path("portal.sock")),
-                    Jsonb({key: {"ok": True, "evidence": "synthetic"} for key in SETUP_CHECKS}),
+                    Jsonb(
+                        {
+                            key: current_proof()
+                            if key == "initial_sync"
+                            else {"ok": True, "evidence": "synthetic"}
+                            for key in SETUP_CHECKS
+                        }
+                    ),
                 ),
             )
         path = tmp_path / (runtime.key + ".acceptance")
@@ -131,11 +139,15 @@ def intent(core, **changes):
 def test_acceptance_without_full_readiness_and_repeat_never_posts(acceptance):
     built, repo, _, _, _ = acceptance
     core, provider, _ = built[0]
+    core.store.runtime = replace(core.store.runtime, payment_origin="https://pay.customer.example")
     assert RuntimeRegistry(repo).resolve(repo.get(str(core.store.runtime.company_id))) is None
     saved = intent(core)
     original_create = provider.create
 
     async def check_committed(**kwargs):
+        assert kwargs["redirect_url"].startswith("https://pay.customer.example/d/")
+        code = kwargs["redirect_url"].rsplit("/", 1)[1]
+        assert str(core.store.resolve_guest_link(code)[0]) == str(saved["deposit_id"])
         with core.store.connection() as db:
             row = core.store.execute(
                 db, "SELECT * FROM {payments}.acceptance_intents WHERE id=%s", (saved["id"],)

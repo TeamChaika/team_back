@@ -265,6 +265,7 @@ def build_portal(verifier=None, **kwargs):
                 os.environ.get("RESTCONTROL_TENANT_INTEGRATIONS_REVISION", "1")
             ),
             "assistant_configured": AssistantSettings().configured,
+            "payment_origin": runtime.payment_origin,
             "status": "ok",
         }
 

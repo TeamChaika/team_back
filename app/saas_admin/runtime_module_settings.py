@@ -39,6 +39,12 @@ def apply_company_settings(configuration, company, settings_service):
         options["expected_revision"] = revision
     central = settings_service.runtime_settings(company["id"], **options)
     configuration["integrations_revision"] = revision
+    origin_getter = (
+        getattr(settings_service.repo, "payment_origin", None)
+        if hasattr(settings_service, "repo")
+        else None
+    )
+    configuration["payment_origin"] = origin_getter(company["id"]) if origin_getter else ""
     if set(central) != {"document_settings", "assistant_settings"}:
         raise ValueError("Invalid central company settings")
     document = {

@@ -207,7 +207,29 @@ def create_portal(
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
         started = perf_counter()
+        payment_guest = bool(
+            runtime.mode == "tenant"
+            and runtime.payment_origin
+            and request.headers.get("origin") == runtime.payment_origin
+        )
+        if payment_guest:
+            from app.tenant_payments.guest_boundary import guest_method_allowed
+
+            if not guest_method_allowed(request.url.path, request.method):
+                return JSONResponse(status_code=403, content={"detail": "Этот раздел недоступен."})
+            # Guest capability requests never carry staff authentication downstream.
+            request.scope["headers"] = [
+                (key, value)
+                for key, value in request.scope["headers"]
+                if key.lower() not in {b"cookie", b"authorization", b"x-csrf-token"}
+            ]
         response = await call_next(request)
+        if payment_guest:
+            for header in ("access-control-allow-credentials", "set-cookie"):
+                if header in response.headers:
+                    del response.headers[header]
+            response.headers["Access-Control-Allow-Origin"] = runtime.payment_origin
+            response.headers.append("Vary", "Origin")
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = (
             "no-referrer" if runtime.mode == "tenant" else "same-origin"

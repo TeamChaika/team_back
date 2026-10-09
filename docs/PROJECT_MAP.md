@@ -114,3 +114,13 @@ full/working/setup-ready. См. [первоначальную загрузку](
 - `app/saas_admin/runtime_module_settings.py`: fleet и operator получают собственные seller/bot/AI из зашифрованной центральной записи с проверкой `expected_version`. Пустая центральная настройка удаляет прежнее значение операторского файла; собственные секреты не берутся из ручных файлов как fallback.
 - HTTP-проверка `runtime_acceptance.py` использует последний импортированный день и записывает `probe_period`; это не заменяет полную историю `initial_sync`. Пустой необязательный UUID агента ИИ исключается из окружения. Fleet задаёт отсутствующие флаги отправки коммерческих документов и создания контрагентов, сохраняя явный операторский запрет; подписка, собственный продавец и права сотрудника/складов проверяются отдельно.
 - Supervisor обновляет существующий manifest до запуска процессов при своём старте и смене версии компании, независимо от состояния очереди `pending/running`. При неизменной версии повторные tick не переписывают manifest. Это исключает гонку подготовки настроек с началом уже работающей задачи; credentials и явные операторские запреты сохраняются.
+
+- Гостевые короткие ссылки: `app/tenant_payments/{store,routes,guest_boundary}.py`, `TenantRuntime.payment_origin`; `/d/<32 символа>` → `/api/guest-links/{code}`. Отдельный проверенный origin, SHA-256 lookup в собственной payments-схеме (миграция `20261010120000`), прежние UUID/token ссылки сохранены. Гостевой origin не открывает авторизованные маршруты; provider redirect строится тем же серверным методом.
+
+- Гостевые домены оплаты: `app/saas_admin/payment_domains.py`, отдельный
+  `company_payment_domains` реестр; tenant заявка и owner активация после DNS/TLS/App.
+  `server.py` ограничивает guest Origin/Host context и capability API; `full_portal_proxy.py`
+  нормализует внутренний Host, `runtime_module_settings.py`/`runtime_operator.py` передают
+  проверенный payment_origin. Только integrations_revision, без общего сброса компании.
+  Центральная миграция `20261010120000_restcontrol_payment_domains.sql`; подробности
+  и порядок активации — [контракт](saas-admin.md#отдельный-гостевой-домен-оплаты).

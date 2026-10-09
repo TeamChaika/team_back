@@ -508,7 +508,8 @@ def test_initial_history_plan_upgrade_reruns_old_proof_only_at_same_company_vers
 
 
 @pytest.mark.parametrize("fail_first", [False, True])
-def test_additive_migration_refresh_preserves_partial_acceptance(control, fail_first):
+@pytest.mark.parametrize("append_count", [1, 2])
+def test_additive_migration_refresh_preserves_partial_acceptance(control, fail_first, append_count):
     import hashlib
     import json
 
@@ -518,7 +519,7 @@ def test_additive_migration_refresh_preserves_partial_acceptance(control, fail_f
 
     company = {"id": str(uuid4()), "version": 7, "status": "active"}
     entries = [(item.name, item.area, item.checksum) for item in load_migrations()]
-    previous = hashlib.sha256(json.dumps(entries[:-1]).encode()).hexdigest()
+    previous = hashlib.sha256(json.dumps(entries[:-append_count]).encode()).hexdigest()
     modules = {
         "ok": False,
         "code": "module_configuration_required",

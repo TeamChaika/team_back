@@ -160,6 +160,7 @@ def create_app(
         company = None
         api_host = False
         callback = False
+        guest_surface = False
         expected_origin = "https://" + host if secure else origin
         if host != allowed_host:
             try:
@@ -173,11 +174,28 @@ def create_app(
             api_host = host.startswith("api.")
             company_domain = host[4:] if api_host else host
             matched = await run_in_threadpool(repo.company_for_domain, company_domain)
+            payment_lookup = getattr(repo, "company_for_payment_domain", None)
+            if matched is None and payment_lookup:
+                matched = await run_in_threadpool(payment_lookup, company_domain)
+                guest_surface = matched is not None
             if matched is None:
                 return error_response(403, "invalid_host", "Домен компании не подключён")
             company = {key: str(matched[key]) for key in ("id", "name", "slug")}
             if api_host:
                 expected_origin = "https://" + company_domain
+                origins = request.headers.getlist("origin")
+                if (
+                    not guest_surface
+                    and origins != [expected_origin]
+                    and len(origins) == 1
+                    and payment_lookup
+                ):
+                    candidate = origins[0]
+                    if candidate.startswith("https://"):
+                        guest_company = await run_in_threadpool(payment_lookup, candidate[8:])
+                        if guest_company and str(guest_company["id"]) == company["id"]:
+                            guest_surface = True
+                            expected_origin = candidate
                 callback = bool(
                     full_proxy and public_route(request.url.path, request.method) == "callback"
                 )
@@ -187,9 +205,27 @@ def create_app(
                 # middleware also adds CORS to validation/auth/boundary error responses.
                 if not callback:
                     request.state.saas_cors_origin = expected_origin
-                if request.headers.get("sec-fetch-site") == "cross-site":
+                if not guest_surface and request.headers.get("sec-fetch-site") == "cross-site":
                     return error_response(403, "invalid_origin", "Межсайтовый запрос запрещён")
             path = request.url.path
+            if guest_surface:
+                request.state.saas_guest_surface = True
+                method = (
+                    request.headers.get("access-control-request-method", "")
+                    if request.method == "OPTIONS"
+                    else request.method
+                )
+                guest_route = public_route(path, method)
+                if not (path == "/api/saas-context" and method == "GET") and guest_route not in {
+                    "guest_read",
+                    "guest_create",
+                    "guest_reconcile",
+                }:
+                    return error_response(403, "guest_boundary", "Доступна только гостевая оплата")
+                request.state.saas_guest_api_origin = "https://api." + matched.get(
+                    "domain", company_domain
+                )
+                request.state.saas_guest_payment_origin = expected_origin
             tenant_prefix = "/api/saas-tenant/" + company["slug"] + "/"
             full_api_path = bool(
                 full_proxy
@@ -205,6 +241,7 @@ def create_app(
             if path.startswith("/tenant/") and path.rstrip("/") != "/tenant/" + company["slug"]:
                 return error_response(403, "tenant_boundary", "Этот раздел недоступен")
         request.state.saas_company = company
+        request.state.saas_guest_surface = guest_surface
         if api_host:
             allowed_methods = (
                 route_methods(request.url.path) if full_proxy and full_api_path else {"GET", "POST"}
@@ -232,7 +269,7 @@ def create_app(
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             if not callback and request.headers.getlist("origin") != [expected_origin]:
                 return error_response(403, "invalid_origin", "Недопустимый источник запроса")
-            if request.headers.get("sec-fetch-site") == "cross-site":
+            if not guest_surface and request.headers.get("sec-fetch-site") == "cross-site":
                 return error_response(403, "invalid_origin", "Межсайтовый запрос запрещён")
             if request.headers.get("content-length", "").isdigit():
                 if int(request.headers["content-length"]) > 128_000:
@@ -256,7 +293,8 @@ def create_app(
         cors_origin = getattr(request.state, "saas_cors_origin", None)
         if cors_origin:
             response.headers["Access-Control-Allow-Origin"] = cors_origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
+            if not getattr(request.state, "saas_guest_surface", False):
+                response.headers["Access-Control-Allow-Credentials"] = "true"
             response.headers.append("Vary", "Origin")
         if secure:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
@@ -295,12 +333,23 @@ def create_app(
     @app.get("/api/saas-context")
     def context(request: Request):
         company = request.state.saas_company
-        full_company = repo.get(company["id"]) if company and runtime_registry else None
+        full_company = (
+            repo.get(company["id"])
+            if company and (runtime_registry or getattr(request.state, "saas_guest_surface", False))
+            else None
+        )
         if full_company:
             timezone = full_company.get("timezone") or full_company.get("subscription", {}).get(
                 "timezone"
             )
             company = {**company, **({"timezone": timezone} if timezone else {})}
+        if getattr(request.state, "saas_guest_surface", False):
+            return {
+                "surface": "payment",
+                "company": company,
+                "api_origin": request.state.saas_guest_api_origin,
+                "payment_origin": request.state.saas_guest_payment_origin,
+            }
         return {
             "surface": "tenant" if company else "platform",
             "company": company,
@@ -495,6 +544,9 @@ def create_app(
     mount_module_settings(app, repo, owner_dependency)
     if hasattr(repo, "_tenant_verified"):
         mount_tenant_integrations(app, repo)
+        from .payment_domains import mount_payment_domains
+
+        mount_payment_domains(app, repo, owner_dependency, allowed_host)
     mount_platform_sso(app, repo, owner_dependency, mode=mode)
     mount_tenant_routes(app, repo, mode=mode)
     mount_dashboard_routes(app, repo)

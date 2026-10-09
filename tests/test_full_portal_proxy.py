@@ -687,3 +687,39 @@ def test_private_account_creation_requires_own_write_evidence():
     with TestClient(create_verifier_app(Repo(), [grant], company_accounts=accounts)) as client:
         assert client.post(path, headers=headers, json={}).status_code == 503
     assert len(calls) == 1
+
+
+def test_guest_shortlink_domain_has_public_only_proxy_and_no_cookie(gateway):
+    client, repo, registry, calls = gateway
+    company = repo.companies["client1.example.org"]
+    repo.company_for_payment_domain = lambda host: (
+        {**company, "domain": "client1.example.org"} if host == "pay.customer.net" else None
+    )
+    code = "A" * 32
+    headers = {
+        "Origin": "https://pay.customer.net",
+        "Sec-Fetch-Site": "cross-site",
+        "Cookie": "saas_tenant_session=private",
+    }
+    response = client.get("https://api.pay.customer.net/api/guest-links/" + code, headers=headers)
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://pay.customer.net"
+    assert "access-control-allow-credentials" not in response.headers
+    assert calls[-1].headers["host"] == "api.client1.example.org"
+    assert calls[-1].headers["cookie"] == "saas_tenant_session="
+    preflight = client.options(
+        "https://api.client1.example.org/api/guest-links/" + code + "/reconcile",
+        headers={
+            **headers,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert preflight.status_code == 204
+    denied = client.get("https://api.pay.customer.net/api/me", headers=headers)
+    assert denied.status_code == 403
+    denied = client.options(
+        "https://api.client1.example.org/api/saas-tenant/client1/auth/login",
+        headers={**headers, "Access-Control-Request-Method": "POST"},
+    )
+    assert denied.status_code == 403

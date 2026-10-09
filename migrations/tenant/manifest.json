@@ -52,6 +52,10 @@
     {
       "file": "20261010110000_tenant_telegram_bot_namespace.sql",
       "area": "documents"
+    },
+    {
+      "file": "20261010120000_tenant_guest_links.sql",
+      "area": "payments"
     }
   ]
 }

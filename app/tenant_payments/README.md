@@ -52,8 +52,28 @@ version, key, amount and currency, including after default-terminal changes.
 
 ## Guest and provider lifecycle
 
-- Link: `<company frontend>/deposit/<deposit UUID>?token=<random capability>`.
-  Capability is encrypted at rest plus a comparison hash; it is not an Auth JWT.
+- With a verified separate `TenantRuntime.payment_origin`, links use
+  `<payment origin>/d/<32 character capability>`. The 192-bit code is derived by
+  HMAC-SHA256 from the existing random 256-bit capability with a tenant-bound
+  purpose string. Only its SHA-256 lookup hash is stored in `guest_links`, pinned
+  to the current deposit capability hash. Authenticated create/detail/list and
+  provider redirect generation persist the mapping in their transaction; public
+  GET never writes it. Revoking the original token also revokes its short link.
+- Without a verified payment origin, the existing
+  `<company frontend>/deposit/<deposit UUID>?token=<random capability>` remains
+  available. Previously shared UUID/token links keep working after activation.
+  The capability is encrypted at rest plus a comparison hash; it is not an Auth JWT.
+- GET `/api/guest-links/{code}` returns the same guest view; POST
+  `/api/guest-links/{code}/{prepare|reconcile}` accepts `{request_id}` and requires
+  the exact approved guest or original frontend Origin. The server resolves the
+  legacy capability internally, never returning it. Central per-company rate
+  limits apply to both forms. Malformed/unknown codes fail closed.
+- Staff responses include `guest_origin` for exact frontend URL validation.
+  Provider success redirects use the same server-built short URL. The new
+  additive migration is `20261010120000_tenant_guest_links.sql`.
+- The payment origin may reach only guest read/prepare/reconcile routes in the
+  private portal; cookies and authorization headers are stripped. Dashboard
+  credentialed CORS stays restricted to the original frontend origin.
 - GET `/api/guest-deposits/{id}?token=...` reads public money/booking/status and
   optional `payment: {state,payment_url,qr_image,diagnostic,valid_until}`. It omits
   staff guest phone/name/notes.

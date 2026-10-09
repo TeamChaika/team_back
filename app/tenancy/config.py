@@ -78,6 +78,7 @@ class TenantRuntime:
     timezone: str = "Europe/Moscow"
     frontend_origin: str = ""
     api_origin: str = ""
+    payment_origin: str = ""
     runtime_directory: Path = Path(".")
     configuration_version: int = 1
     database_role: str = ""
@@ -112,6 +113,10 @@ class TenantRuntime:
             raise RuntimeConfigurationError("Valid explicit timezone is required") from exc
         _origin(self.frontend_origin)
         _origin(self.api_origin)
+        if self.payment_origin:
+            _origin(self.payment_origin)
+            if self.payment_origin in {self.frontend_origin, self.api_origin}:
+                raise RuntimeConfigurationError("Payment origin must be separate")
         if self.frontend_origin == self.api_origin:
             raise RuntimeConfigurationError("Frontend and API origins must be distinct")
         if type(self.configuration_version) is not int or self.configuration_version < 1:
@@ -172,6 +177,7 @@ class TenantRuntime:
             timezone=required("TIMEZONE"),
             frontend_origin=required("FRONTEND_ORIGIN"),
             api_origin=required("API_ORIGIN"),
+            payment_origin=env.get("RESTCONTROL_TENANT_PAYMENT_ORIGIN", ""),
             runtime_directory=Path(required("RUNTIME_DIRECTORY")),
             configuration_version=int(required("CONFIGURATION_VERSION")),
             database_role=required("DATABASE_ROLE"),

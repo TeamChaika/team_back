@@ -1,8 +1,10 @@
 """Transactional deposits and attempts in one company's private payment schema."""
 
+import base64
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
@@ -465,7 +467,49 @@ class PaymentStore:
             raise HTTPException(404, "Депозит не найден.")
         return row
 
-    def public_deposit(self, row, *, staff=False):
+    def guest_url(self, row, *, db=None):
+        token = self.vault.decrypt(row["encrypted_guest_token"])
+        origin = self.runtime.payment_origin
+        if not origin:
+            return f"{self.runtime.frontend_origin}/deposit/{row['id']}?" + urlencode(
+                {"token": token}
+            )
+        # The 256-bit existing capability is the secret key. Domain separation binds
+        # the derived 192-bit link to this tenant without revealing the original token.
+        code = base64.urlsafe_b64encode(
+            hmac.digest(
+                token.encode(), f"guest-link-v1:{self.runtime.company_id}".encode(), "sha256"
+            )[:24]
+        ).decode()
+        if db is None:
+            raise ValueError("Short guest links require a transaction")
+        self.execute(
+            db,
+            "INSERT INTO {payments}.guest_links(code_hash,deposit_id,guest_token_hash) "
+            "VALUES(%s,%s,%s) ON CONFLICT(code_hash) DO NOTHING",
+            (digest(code), row["id"], row["guest_token_hash"]),
+        )
+        return f"{origin}/d/{code}"
+
+    def resolve_guest_link(self, code):
+        if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32}", code):
+            raise HTTPException(404, "Ссылка не найдена.")
+        with self.connection() as db:
+            row = self.execute(
+                db,
+                "SELECT d.id,d.guest_token_hash,d.encrypted_guest_token "
+                "FROM {payments}.guest_links l JOIN {payments}.deposits d "
+                "ON d.id=l.deposit_id AND d.guest_token_hash=l.guest_token_hash "
+                "WHERE l.code_hash=%s",
+                (digest(code),),
+            ).fetchone()
+            if not row:
+                raise HTTPException(404, "Ссылка не найдена.")
+            token = self.vault.decrypt(row["encrypted_guest_token"])
+            self.guest_authorize(row, token)
+            return row["id"], token
+
+    def public_deposit(self, row, *, staff=False, db=None):
         result = {
             key: row[key]
             for key in (
@@ -485,10 +529,8 @@ class PaymentStore:
         result["amount"] = row["amount_minor"] // 100
         if staff:
             result.update({key: row[key] for key in ("customer_name", "phone", "notes")})
-            token = self.vault.decrypt(row["encrypted_guest_token"])
-            result["guest_url"] = (
-                f"{self.runtime.frontend_origin}/deposit/{row['id']}?" + urlencode({"token": token})
-            )
+            result["guest_origin"] = self.runtime.payment_origin or self.runtime.frontend_origin
+            result["guest_url"] = self.guest_url(row, db=db)
         return serial(result)
 
     def create(self, principal, payload):
@@ -520,7 +562,7 @@ class PaymentStore:
                     or previous["fingerprint"] != fingerprint
                 ):
                     raise HTTPException(409, "Ключ повтора принадлежит другому запросу.")
-                return self.public_deposit(self._deposit(db, previous["id"]), staff=True)
+                return self.public_deposit(self._deposit(db, previous["id"]), staff=True, db=db)
             if not venue["active"] or not venue["default_terminal_id"]:
                 raise HTTPException(422, "Заведение не готово к созданию депозитов.")
             terminal = self.execute(
@@ -562,14 +604,14 @@ class PaymentStore:
                 ),
             )
             self.audit(db, principal, "deposit.create", deposit_id, {"venue_id": str(venue["id"])})
-            return self.public_deposit(self._deposit(db, deposit_id), staff=True)
+            return self.public_deposit(self._deposit(db, deposit_id), staff=True, db=db)
 
     def get(self, principal, deposit_id):
         self.require(principal)
         with self.connection() as db:
             row = self._deposit(db, deposit_id)
             self.require_venue(db, principal, row["venue_id"])
-            return self.public_deposit(row, staff=True)
+            return self.public_deposit(row, staff=True, db=db)
 
     def guest(self, deposit_id, token):
         with self.connection() as db:
@@ -677,7 +719,7 @@ class PaymentStore:
                 (*values, limit, offset),
             ).fetchall()
             return {
-                "items": [self.public_deposit(row, staff=True) for row in rows],
+                "items": [self.public_deposit(row, staff=True, db=db) for row in rows],
                 "total": total,
                 "page": 1 if export else filters.page,
                 "page_size": limit,
@@ -725,7 +767,7 @@ class PaymentStore:
                 ),
             )
             self.audit(db, principal, "deposit.edit", deposit_id)
-            return self.public_deposit(self._deposit(db, deposit_id), staff=True)
+            return self.public_deposit(self._deposit(db, deposit_id), staff=True, db=db)
 
     def reserve(self, deposit_id, token, request_id):
         """Commit the intent before returning a credential for the external POST."""
@@ -804,8 +846,7 @@ class PaymentStore:
                 "amount_minor": deposit["amount_minor"],
                 "currency": deposit["currency"],
                 "callback": callback,
-                "redirect_url": f"{self.runtime.frontend_origin}/deposit/{deposit_id}?"
-                + urlencode({"token": token}),
+                "redirect_url": self.guest_url(deposit, db=db),
             }
 
     def record_creation(self, attempt_id, created=None, *, rejected=False):

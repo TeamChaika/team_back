@@ -24,7 +24,7 @@ assert set(STEPS) == REQUIRED_CHECKS
 
 
 def additive_migration_refresh(checks):
-    """Only the reviewed append-only bot maintenance may retain module evidence."""
+    """Only reviewed append-only maintenance may retain independent module evidence."""
     import hashlib
     import json
 
@@ -37,6 +37,7 @@ def additive_migration_refresh(checks):
     entries = [(item.name, item.area, item.checksum) for item in load_migrations()]
     approved = {
         "20261010110000_tenant_telegram_bot_namespace.sql",
+        "20261010120000_tenant_guest_links.sql",
     }
     for count in range(1, len(entries)):
         if hashlib.sha256(json.dumps(entries[:count]).encode()).hexdigest() == fingerprint:

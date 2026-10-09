@@ -3,7 +3,6 @@
 import hmac
 import secrets
 from pathlib import Path
-from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -257,7 +256,6 @@ class OwnerPaymentAcceptance:
                 intent_id,
                 {"attempt_id": str(attempt_id)},
             )
-            guest = self.store.vault.decrypt(deposit["encrypted_guest_token"])
             context = {
                 "api_key": self.store.vault.decrypt(terminal["encrypted_key"]),
                 "mode": row["mode"],
@@ -265,8 +263,7 @@ class OwnerPaymentAcceptance:
                 "amount_minor": row["amount_minor"],
                 "currency": row["currency"],
                 "callback": callback,
-                "redirect_url": f"{self.store.runtime.frontend_origin}/deposit/{row['deposit_id']}?"
-                + urlencode({"token": guest}),
+                "redirect_url": self.store.guest_url(deposit, db=db),
             }
         return row, context
 

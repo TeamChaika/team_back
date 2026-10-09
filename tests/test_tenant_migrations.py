@@ -41,6 +41,7 @@ def test_baselines_are_identifier_templates_without_customer_rows():
         "payments",
         "analytics",
         "documents",
+        "payments",
     ]
     runtime = runtime_for()
     for migration in migrations:
@@ -83,6 +84,7 @@ def test_baselines_are_identifier_templates_without_customer_rows():
             "acceptance_intents",
             "provision_company_primary_admin",
             "native_bot_updates",
+            "guest_links",
         ),
         strict=True,
     ):

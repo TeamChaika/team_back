@@ -48,3 +48,14 @@ def test_module_settings_backup_rejects_incomplete_persisted_group(group):
     values[group] = {}
     with pytest.raises(ValueError, match="Invalid encrypted module settings"):
         _validate_ciphertexts(snapshot(values, Fernet(key)), key)
+
+
+def test_module_settings_backup_preserves_separate_integrations_revision():
+    key = Fernet.generate_key()
+    values = {**defaults(), "integrations_revision": 3}
+    _validate_ciphertexts(snapshot(values, Fernet(key)), key)
+    for revision in (True, 0, "3"):
+        with pytest.raises(ValueError, match="Invalid encrypted module settings"):
+            _validate_ciphertexts(
+                snapshot({**values, "integrations_revision": revision}, Fernet(key)), key
+            )

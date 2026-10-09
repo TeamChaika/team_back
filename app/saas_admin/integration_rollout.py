@@ -96,6 +96,10 @@ def probe_integrations(operator, revision, changed, worker_started):
     ):
         return None
     services = {}
+    if "payment_domain" in changed:
+        services["payment_domain_configured"] = (
+            health.get("payment_origin", "") == operator.runtime.payment_origin
+        )
     if "assistant" in changed:
         services["assistant_configured"] = health.get("assistant_configured") is True
     if "telegram" in changed:
@@ -176,8 +180,16 @@ def reconcile_integrations(operator, revision, worker_started):
             and bool(operator.config.get("document_settings", {}).get("bot_token"))
             and services.get("telegram_identity") is False
         )
-        required = {"telegram": "telegram_identity", "assistant": "assistant_configured"}
-        complete = all(required[group] in services for group in marker.get("changed", []))
+        required = {
+            "telegram": "telegram_identity",
+            "assistant": "assistant_configured",
+            "payment_domain": "payment_domain_configured",
+        }
+        complete = all(
+            required.get(group) in services
+            and (group != "payment_domain" or services[required[group]] is True)
+            for group in marker.get("changed", [])
+        )
         marker.update(
             state="failed" if failed else "applied" if complete else "pending",
             services={**marker.get("services", {}), **services},

@@ -424,6 +424,28 @@ class PostgresRepository(PostgresAuth, PostgresTenantAccess):
             ).fetchone()
             return {k: row["body"][k] for k in ("id", "name", "slug")} if row else None
 
+    def company_for_payment_domain(self, hostname):
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT c.body FROM company_payment_domains p "
+                "JOIN companies c ON c.id=p.company_id "
+                "WHERE p.domain=%s AND p.status='active' AND p.verified_at IS NOT NULL "
+                "AND c.archived_at IS NULL AND c.status='active'",
+                (hostname,),
+            ).fetchone()
+            return {k: row["body"][k] for k in ("id", "name", "slug", "domain")} if row else None
+
+    def payment_origin(self, company_id):
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT p.domain FROM company_payment_domains p "
+                "JOIN companies c ON c.id=p.company_id "
+                "WHERE p.company_id=%s AND p.status='active' AND p.verified_at IS NOT NULL "
+                "AND c.archived_at IS NULL AND c.status='active'",
+                (company_id,),
+            ).fetchone()
+            return "https://" + row["domain"] if row else ""
+
     @staticmethod
     def _revoke_company_sessions(db, company_id):
         db.execute(
@@ -454,6 +476,9 @@ class PostgresRepository(PostgresAuth, PostgresTenantAccess):
                 raise ValueError("Runtime role has unexpected access to another product schema")
             if not db.execute("SELECT 1 FROM platform_memberships WHERE active").fetchone():
                 raise ValueError("No active platform membership")
+            db.execute(
+                "SELECT company_id,domain,status,revision FROM company_payment_domains LIMIT 0"
+            )
             for row in db.execute("SELECT ciphertext FROM connections"):
                 value = json.loads(self.vault.decrypt(row["ciphertext"]))
                 if not isinstance(value.get("login"), str) or not isinstance(

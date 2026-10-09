@@ -26,6 +26,12 @@ def public_route(path, method):
         return "recovery"
     if method == "POST" and re.fullmatch(r"/api/payment-callbacks/" + _PUBLIC_ID, path):
         return "callback"
+    if method == "GET" and re.fullmatch(r"/api/guest-links/[A-Za-z0-9_-]{32}", path):
+        return "guest_read"
+    if method == "POST" and re.fullmatch(
+        r"/api/guest-links/[A-Za-z0-9_-]{32}/(prepare|reconcile)", path
+    ):
+        return "guest_create" if path.endswith("/prepare") else "guest_reconcile"
     if method == "GET" and re.fullmatch(r"/api/guest-deposits/" + _PUBLIC_ID, path):
         return "guest_read"
     if method == "POST" and re.fullmatch(
@@ -333,7 +339,10 @@ class FullPortalProxy:
             is not None
         )
         headers = {
-            "host": request.headers["host"],
+            "host": (
+                getattr(request.state, "saas_guest_api_origin", "").removeprefix("https://")
+                or request.headers["host"]
+            ),
             "origin": request.headers.get("origin", ""),
             "cookie": "saas_tenant_session=" + token,
             "x-csrf-token": request.headers.get("x-csrf-token", ""),

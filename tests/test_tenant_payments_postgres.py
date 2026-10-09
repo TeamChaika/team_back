@@ -191,6 +191,7 @@ class Provider:
     async def create(self, **kwargs):
         self.calls += 1
         self.callback = kwargs["notification_url"]
+        self.redirect = kwargs["redirect_url"]
         if self.error:
             raise CreationUnknown("Unknown synthetic POST")
         return CreatedOperation(self.operation_id, "https://provider.example/pay")
@@ -648,3 +649,51 @@ def test_invalid_terminal_context_never_creates_provider_operation(companies):
                 "UPDATE {payments}.terminal_checks SET merchant_id='other' WHERE id=%s",
                 (check["id"],),
             )
+
+
+def test_short_guest_capability_existing_link_revocation_and_tenant_isolation(companies):
+    _, (store, other) = companies
+    actor = owner(store)
+    venue, _ = setup(store, actor)
+    legacy = store.create(actor, payload(venue))
+    legacy_token = token(legacy)
+    store.runtime = replace(store.runtime, payment_origin="https://pay.customer.example")
+    short = store.get(actor, UUID(legacy["id"]))
+    code = short["guest_url"].rsplit("/", 1)[1]
+    assert short["guest_origin"] == store.runtime.payment_origin and len(code) == 32
+    assert store.resolve_guest_link(code) == (UUID(legacy["id"]), legacy_token)
+    assert store.guest(UUID(legacy["id"]), legacy_token)["id"] == legacy["id"]
+    with pytest.raises(HTTPException):
+        other.resolve_guest_link(code)
+    provider = Provider()
+    service = TenantPayments(store, lambda _: provider, feature_authorizer=lambda _: True)
+    app = FastAPI()
+    app.include_router(create_router(service, lambda: actor, lambda _: None))
+    client = TestClient(app)
+    assert client.get(f"/api/guest-links/{code}").status_code == 200
+    assert (
+        client.post(
+            f"/api/guest-links/{code}/prepare",
+            json={"request_id": str(uuid4())},
+            headers={"Origin": "https://untrusted.example"},
+        ).status_code
+        == 403
+    )
+    assert provider.calls == 0
+    response = client.post(
+        f"/api/guest-links/{code}/prepare",
+        json={"request_id": str(uuid4())},
+        headers={"Origin": store.runtime.payment_origin},
+    )
+    assert response.status_code == 200
+    assert provider.calls == 1
+    assert provider.redirect == short["guest_url"]
+    with store.connection() as db:
+        store.execute(
+            db,
+            "UPDATE {payments}.deposits SET guest_token_hash=%s WHERE id=%s",
+            ("revoked", UUID(legacy["id"])),
+        )
+    with pytest.raises(HTTPException):
+        store.resolve_guest_link(code)
+    assert client.get(f"/api/guest-links/{code}").status_code == 404
