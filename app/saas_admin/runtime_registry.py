@@ -1,5 +1,6 @@
 """Private process registry. Routing is enabled only by durable acceptance evidence."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -25,6 +26,17 @@ SETUP_CHECKS = frozenset(
     {"migrations", "database_roles", "identity", "connections", "initial_sync"}
 )
 
+WORKING_CHECKS = REQUIRED_CHECKS - {"modules", "payments"}
+
+
+def completed(checks, required):
+    return all(
+        isinstance(checks.get(step), dict)
+        and checks[step].get("ok") is True
+        and bool(checks[step].get("evidence"))
+        for step in required
+    )
+
 
 @dataclass(frozen=True)
 class ReadyRuntime:
@@ -49,6 +61,8 @@ class RuntimeRegistry:
         self.repository = repository
 
     def resolve(self, company):
+        if company.get("archived_at") or company.get("status") != "active":
+            return None
         with self.repository.connect() as db:
             row = db.execute(
                 "SELECT configuration_version, socket_path, checks, state "
@@ -65,6 +79,77 @@ class RuntimeRegistry:
         ):
             return None
         return ReadyRuntime(str(company["id"]), row["configuration_version"], row["socket_path"])
+
+    def _working_row(self, company):
+        if company.get("archived_at") or company.get("status") != "active":
+            return None
+        with self.repository.connect() as db:
+            row = db.execute(
+                "SELECT configuration_version,socket_path,checks FROM runtime_provisioning "
+                "WHERE company_id=%s",
+                (company["id"],),
+            ).fetchone()
+        if not row or row["configuration_version"] != company["version"]:
+            return None
+        return row
+
+    def resolve_working(self, company):
+        """Current verified foundation; this does not establish any module's readiness."""
+        row = self._working_row(company)
+        if row is None or not completed(row["checks"], WORKING_CHECKS):
+            return None
+        return ReadyRuntime(str(company["id"]), row["configuration_version"], row["socket_path"])
+
+    def feature_readiness(self, company):
+        from .feature_readiness import feature_readiness
+
+        row = self._working_row(company)
+        checks = row["checks"] if row else {}
+        return feature_readiness(company, checks, working=completed(checks, WORKING_CHECKS))
+
+    def working_status(self, company):
+        from .feature_readiness import feature_readiness
+
+        row = self._working_row(company)
+        checks = row["checks"] if row else {}
+        working = completed(checks, WORKING_CHECKS)
+        return {
+            "working_dashboard_available": working,
+            "feature_readiness": feature_readiness(company, checks, working=working),
+        }
+
+    @contextmanager
+    def payment_configuration_change(self, company):
+        """Serialize a terminal mutation with provisioning, revoke before forwarding.
+
+        The session lock survives the revocation commit and is held until the
+        private portal has finished its mutation. Failed requests remain revoked.
+        """
+        from .repository import Problem
+
+        with self.repository.connect(True) as db:
+            key = "provision:" + str(company["id"])
+            locked = db.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS locked", (key,)
+            ).fetchone()["locked"]
+            if not locked:
+                raise Problem(
+                    503, "provisioning_busy", "Проверка компании выполняется; повторите позже"
+                )
+            try:
+                revoked = db.execute(
+                    "UPDATE runtime_provisioning SET checks=checks-'payments',state='failed',"
+                    "step='payments',error_code='payment_configuration_changed',updated_at=now() "
+                    "WHERE company_id=%s AND configuration_version=%s RETURNING company_id",
+                    (company["id"], company["version"]),
+                ).fetchone()
+                if not revoked:
+                    raise Problem(409, "company_version_changed", "Настройки компании изменились")
+                db.commit()
+                yield
+            finally:
+                db.rollback()
+                db.execute("SELECT pg_advisory_unlock(hashtextextended(%s,0))", (key,))
 
     def resolve_existing(self, company):
         """Previously accepted process for account recovery and persisted payment reads.

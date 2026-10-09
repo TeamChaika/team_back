@@ -307,6 +307,11 @@ def create_app(
             "platform_origin": origin,
             **(
                 {
+                    **(
+                        runtime_registry.working_status(full_company)
+                        if company and hasattr(runtime_registry, "working_status")
+                        else {"working_dashboard_available": False, "feature_readiness": {}}
+                    ),
                     "setup_available": bool(
                         company
                         and getattr(runtime_registry, "resolve_setup", lambda _: None)(full_company)

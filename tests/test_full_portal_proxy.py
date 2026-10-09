@@ -1,11 +1,13 @@
 """Gateway/verifier contracts. Synthetic upstream; no real iiko/payment calls."""
 
+from contextlib import contextmanager
 from uuid import UUID
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app.saas_admin.entitlements import FEATURES
 from app.saas_admin.repository import Problem
 from app.saas_admin.runtime_registry import ReadyRuntime
 from app.saas_admin.server import create_app
@@ -57,6 +59,21 @@ class Repo:
 class Registry:
     ready = True
 
+    def feature_readiness(self, company):
+        # Explicit synthetic capability evidence for transport-boundary tests.
+        return getattr(
+            self,
+            "features",
+            {feature: {"read": self.ready, "write": self.ready} for feature in FEATURES},
+        )
+
+    @contextmanager
+    def payment_configuration_change(self, company):
+        self.invalidated = company["id"]
+        if hasattr(self, "features"):
+            self.features["payments.create"] = {"read": True, "write": False}
+        yield
+
     def resolve(self, company):
         if self.ready:
             return ReadyRuntime(
@@ -79,7 +96,7 @@ def gateway(tmp_path):
             calls.append(request)
             return httpx.Response(
                 getattr(registry, "upstream_status", 200),
-                json={"company": runtime.company_id},
+                json=getattr(registry, "metadata", {"company": runtime.company_id}),
                 headers=getattr(registry, "upstream_headers", {}),
             )
 
@@ -314,7 +331,9 @@ def test_private_worker_feature_check_is_fresh_and_never_accepts_reconcile_claim
     company = str(UUID(int=1))
     repo.companies["client1.example.org"]["modules"]["documents"] = True
     repo.companies["client1.example.org"]["subscription"]["plan_id"] = "full"
-    app = create_verifier_app(repo, [VerifierGrant(company, "documents-worker", "s" * 40)])
+    app = create_verifier_app(
+        repo, [VerifierGrant(company, "documents-worker", "s" * 40)], runtime_registry=Registry()
+    )
     with TestClient(app) as client:
         url = f"/verify/{company}/feature"
         headers = {"authorization": "Bearer " + "s" * 40}
@@ -551,3 +570,120 @@ def test_setup_owner_exact_routes_csrf_and_upgrade(gateway):
     repo.tenant_actor_session = original
     registry.ready = True
     assert request(client, 1, "/api/overview").status_code == 200
+
+
+def test_partial_runtime_exact_capabilities_and_private_worker_denial(gateway):
+    client, repo, registry, calls = gateway
+    company = repo.companies["client1.example.org"]
+    company["modules"].update(documents=True, deposits=True)
+    company["subscription"]["plan_id"] = "full"
+    runtime = registry.resolve(company)
+    registry.resolve = lambda company: None  # Strict full readiness remains false.
+    registry.resolve_working = lambda company: runtime
+    registry.features = {
+        "analytics.overview": {"read": True, "write": False},
+        "documents.waybills": {"read": True, "write": True},
+        "documents.dispatch": {"read": True, "write": False},
+    }
+    assert request(client, 1).status_code == 200
+    assert (
+        request(
+            client, 1, "/api/documents/waybill", "POST", headers={"x-csrf-token": "csrf"}
+        ).status_code
+        == 200
+    )
+    assert (
+        request(
+            client, 1, "/api/documents/waybill/1/send", "POST", headers={"x-csrf-token": "csrf"}
+        ).status_code
+        == 403
+    )
+    assert request(client, 1, "/api/assistant/status").status_code == 403
+    assert (
+        request(client, 1, f"/api/guest-deposits/{UUID(int=5)}/prepare", "POST").status_code == 403
+    )
+    assert (
+        request(client, 1, f"/api/guest-deposits/{UUID(int=5)}/reconcile", "POST").status_code
+        == 200
+    )
+    assert request(client, 1, "/api/saas-context").json()["full_dashboard_ready"] is False
+    registry.features = {}
+    assert request(client, 1).status_code == 403
+    # Exact owner configuration survives an unavailable module; no general writes.
+    assert request(client, 1, "/api/management/venues").status_code == 200
+    assert (
+        request(
+            client, 1, "/api/management/accounts", "POST", headers={"x-csrf-token": "csrf"}
+        ).status_code
+        == 403
+    )
+    grant = VerifierGrant(company["id"], "documents-worker", "s" * 40)
+    with TestClient(create_verifier_app(repo, [grant], runtime_registry=registry)) as verifier:
+        assert (
+            verifier.post(
+                f"/verify/{company['id']}/feature",
+                headers={"authorization": "Bearer " + grant.secret},
+                json={"feature": "documents.dispatch"},
+            ).status_code
+            == 403
+        )
+    with TestClient(create_verifier_app(repo, [grant])) as verifier:
+        assert (
+            verifier.post(
+                f"/verify/{company['id']}/feature",
+                headers={"authorization": "Bearer " + grant.secret},
+                json={"feature": "documents.dispatch"},
+            ).status_code
+            == 503
+        )
+
+
+def test_metadata_projection_and_payment_revocation_before_upstream(gateway):
+    client, repo, registry, calls = gateway
+    company = repo.companies["client1.example.org"]
+    company["modules"]["deposits"] = True
+    company["subscription"]["plan_id"] = "full"
+    registry.features = {feature: {"read": True, "write": True} for feature in FEATURES}
+    registry.features["assistant.chat"] = {"read": False, "write": False}
+    registry.metadata = {
+        "sections": ["overview", "sales", "finance", "unknown"],
+        "user": {"id": "own", "role": "member", "sections": ["sales"], "warehouses": ["own-store"]},
+        "can_manage": False,
+    }
+    metadata = request(client, 1, "/api/me").json()
+    assert metadata["sections"] == ["overview", "sales"]
+    assert metadata["user"] == registry.metadata["user"]
+    assert metadata["can_manage"] is False
+    path = f"/api/payment-settings/venues/{UUID(int=5)}/terminals/{UUID(int=6)}"
+    assert request(client, 1, path, "POST", headers={"x-csrf-token": "csrf"}).status_code == 200
+    assert registry.invalidated == company["id"]
+    assert (
+        request(client, 1, f"/api/guest-deposits/{UUID(int=5)}/prepare", "POST").status_code == 403
+    )
+    assert (
+        request(client, 1, f"/api/guest-deposits/{UUID(int=5)}/reconcile", "POST").status_code
+        == 200
+    )
+
+
+def test_private_account_creation_requires_own_write_evidence():
+    from types import SimpleNamespace
+
+    company = str(UUID(int=1))
+    grant = VerifierGrant(company, "portal", "p" * 40)
+    calls = []
+    accounts = SimpleNamespace(create=lambda *args: calls.append(args) or {"id": "created"})
+    registry = Registry()
+    registry.features = {"management.users": {"read": True, "write": False}}
+    headers = {"authorization": "Bearer " + grant.secret}
+    path = f"/verify/{company}/account-create"
+    with TestClient(
+        create_verifier_app(Repo(), [grant], company_accounts=accounts, runtime_registry=registry)
+    ) as client:
+        assert client.post(path, headers=headers, json={}).status_code == 403
+        registry.features["management.users"]["write"] = True
+        assert client.post(path, headers=headers, json={}).status_code == 200
+    assert len(calls) == 1
+    with TestClient(create_verifier_app(Repo(), [grant], company_accounts=accounts)) as client:
+        assert client.post(path, headers=headers, json={}).status_code == 503
+    assert len(calls) == 1

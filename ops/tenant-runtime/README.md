@@ -136,7 +136,29 @@ Lifecycle: apply control migration; configure own DSNs/capabilities/settings; re
 start verifier and central gateway; enqueue/run initial stages; supervise the tenant
 portal, document worker and scheduler as configured; provide current owner acceptance
 session; retry missing-configuration stages; publish verified own DNS/TLS and retry.
-All acceptance stages must pass durably before full dashboard readiness is exposed.
+All nine acceptance stages must pass durably before full dashboard readiness is exposed.
+A PendingCheck for optional modules/payments preserves its failed evidence and continues
+independent DNS/TLS and runtime-health checks. Unexpected errors or failed prerequisites
+still stop processing and discard the failed stage's old partial evidence.
+
+`working_dashboard_available` requires current-version migrations, database_roles,
+identity, connections, initial_sync, dns_tls and runtime_health. It does not mark the
+company ready or establish an accepted historical binding. `feature_readiness` maps
+all 28 known feature IDs to `{state, read, write, reasons}` using current company/version
+module probes and explicit service evidence. Missing own Telegram, AI, commercial seller
+or payment settlement proof only closes the corresponding features. Finance has no
+tenant schema/catalog capability and remains unavailable. Unknown evidence fails closed.
+Gateway and private verifier enforce writes separately; portal actor/warehouse ACLs remain.
+The owner retains the exact setup routes even when working modules are incomplete.
+
+Terminal/default-terminal changes take the same company provisioning advisory lock,
+revoke payment proof durably before forwarding, and hold the lock through the private
+portal response. Busy provisioning returns 503; a changed company version returns 409.
+On upgrade, explicitly enqueue/retry previously accepted companies: the provisioner
+rechecks legacy module evidence without company/version/services and payment proofs
+without terminal_version_id while retaining compatible schema/sync evidence.
+Failed terminal writes keep the revocation. Retry real acceptance before creating a new
+payment; reconciliation of existing persisted operations remains available.
 Capability/role files, vaults and operator manifests must remain outside static roots.
 
 History availability is separate from deployment readiness: context and authenticated

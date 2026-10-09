@@ -8,7 +8,7 @@ SaaS-маршруты и runtime уточнены **2026-10-09**; полный t
 | Задача | Тематическая карта | Первый файл |
 | --- | --- | --- |
 | Изоляция полного tenant runtime | [Контракт запуска и проверки](tenant-runtime.md) | `app/tenancy/{config,sql,connection,io,locks}.py`, `app/core/config.py`, `app/web/repository.py`; UUID-схемы, restricted DB role, неизменяемый process runtime, свой collector и файлы; локально, не доказательство полного SaaS |
-| Полный portal: private gateway / запуск / durable readiness | [Контракт](saas-admin.md) и [запуск](tenant-runtime.md) | `app/saas_admin/{runtime_registry,full_portal_proxy,provisioning,runtime_operator,runtime_acceptance,runtime_fleet,fleet_discovery,edge_peer,provisioning_acceptance,deployment}.py`, `app/tenancy/bootstrap.py`; явное включение, company-bound UDS, restricted verifier, центральный CompanyAccounts, сохранённые проверки, очередь work/work-once и [operator CLI](../ops/tenant-runtime/README.md); default остаётся limited, локальные тесты не подтверждают полную готовность |
+| Полный portal: private gateway / запуск / durable readiness | [Контракт](saas-admin.md) и [запуск](tenant-runtime.md) | `app/saas_admin/{runtime_registry,feature_readiness,runtime_visibility,full_portal_proxy,provisioning,runtime_operator,runtime_acceptance,runtime_fleet,fleet_discovery,edge_peer,provisioning_acceptance,deployment}.py`, `app/tenancy/bootstrap.py`; явное включение, company-bound UDS, restricted verifier, центральный CompanyAccounts, сохранённые проверки, очередь work/work-once и [operator CLI](../ops/tenant-runtime/README.md); default остаётся limited, локальные тесты не подтверждают полную готовность |
 | Клиентский dashboard: свои Overview/Sales из Chain | [Контракт первого среза](tenant-dashboard.md) | `app/saas_admin/tenant_dashboard.py`, `dashboard_service.py`, `dashboard_transport.py`, `dashboard_reports.py`; свой membership/module gate, кэш 300с в процессе, чистые функции `app/web/overview.py`; без chaika SQL/глобальных credentials |
 | Отдельный кабинет владельца SaaS, local/production реестр компаний | [Контракт и запуск](saas-admin.md) | `app/saas_admin/server.py`, `config.py`, `postgres_backup.py`, `__main__.py`, `postgres_repository.py`, `supabase_auth.py`, `connections.py`, `connection_check.py`; существующий Supabase PostgreSQL/Auth, приватная схема restcontrol, локальный Fernet key, точный HTTPS origin, Secure cookies, приватный backup/restore, loopback или Unix socket; без импортов app.portal |
 | Настройки продавца, Telegram и ИИ компании | [Контракт](saas-admin.md#настройки-модулей-компании) | `app/saas_admin/company_module_settings.py`; owner-only GET/PATCH, encrypted центральное хранение, write-only ключи, версия компании и повторная подготовка runtime |
@@ -79,8 +79,12 @@ Secure SameSite=Strict cookie, CSRF. Нет wildcard или fallback к Чайк
 config, отдельные Unix accounts, central-group sockets, fail-closed policy); центральный
 вход и supervised fleet задаются в `ops/tenant-runtime/README.md`. Значение
 `full_dashboard_available` сохраняет историю ранее принятого кабинета при
-изменении конфигурации, а `full_dashboard_ready` разрешает новые операции только
-после проверки текущей версии. Backup/restore сбрасывает обе готовности и старые
+изменении конфигурации. `full_dashboard_ready` означает все девять проверок;
+`working_dashboard_available` требует семь проверок текущей версии (без общего
+modules/payments), а `feature_readiness` открывает чтение/запись отдельных функций
+только по собственным HTTP/worker/provider evidence. Gateway и private verifier
+проверяют эту карту; `/me` только сужает прежние ACL. Finance не входит в каталог
+функций tenant и не объявляется готовым. Backup/restore сбрасывает готовности и старые
 socket bindings: процессы и подключения проверяются заново.
 
 Глобальный SaaS owner: `app/saas_admin/platform_sso.py`, `platform_sso_routes.py` →

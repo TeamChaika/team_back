@@ -30,7 +30,7 @@ class VerifierGrant:
             raise ValueError("Invalid company verifier capability")
 
 
-def create_verifier_app(repository, grants, *, company_accounts=None):
+def create_verifier_app(repository, grants, *, company_accounts=None, runtime_registry=None):
     """Serve exclusively on an operator-owned UDS, never public routing."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -66,6 +66,13 @@ def create_verifier_app(repository, grants, *, company_accounts=None):
                 )
                 if not decision.allowed:
                     raise Problem(403, "feature_disabled", "Возможность недоступна по подписке")
+                if runtime_registry is None:
+                    raise Problem(
+                        503, "feature_readiness_unavailable", "Готовность модуля не подтверждена"
+                    )
+                readiness = runtime_registry.feature_readiness(company)
+                if readiness.get(feature, {}).get("write") is not True:
+                    raise Problem(403, "feature_not_ready", "Этот модуль ещё не настроен")
                 return {"allowed": True, "company_version": company["version"]}
             if operation in {"account-create", "password", "recovery"} and grant.role == "portal":
                 if company_accounts is None:
@@ -77,6 +84,20 @@ def create_verifier_app(repository, grants, *, company_accounts=None):
                         company_id, body.get("token", ""), body.get("new_password")
                     )
                 if operation == "account-create":
+                    if runtime_registry is None:
+                        raise Problem(
+                            503,
+                            "feature_readiness_unavailable",
+                            "Готовность модуля не подтверждена",
+                        )
+                    company = repository.get(company_id)
+                    if (
+                        runtime_registry.feature_readiness(company)
+                        .get("management.users", {})
+                        .get("write")
+                        is not True
+                    ):
+                        raise Problem(403, "feature_not_ready", "Этот модуль ещё не настроен")
                     return company_accounts.create(
                         company_id, body.get("token", ""), body.get("csrf", ""), body.get("account")
                     )

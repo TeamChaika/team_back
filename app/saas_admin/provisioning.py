@@ -75,8 +75,31 @@ class Provisioner:
                     raise ValueError("Provisioning must be enqueued first")
                 version, checks = row["configuration_version"], dict(row["checks"])
                 db.commit()
+                pending = []
                 for step in STEPS:
-                    if checks.get(step, {}).get("ok") is True and checks[step].get("evidence"):
+                    cached = checks.get(step, {})
+                    proof = cached.get("evidence")
+                    compatible = True
+                    if step == "modules":
+                        compatible = (
+                            isinstance(proof, dict)
+                            and str(proof.get("company_id")) == str(company_id)
+                            and proof.get("configuration_version") == version
+                            and isinstance(proof.get("services"), dict)
+                        )
+                    elif step == "payments":
+                        compatible = isinstance(proof, dict) and (
+                            proof.get("enabled") is False
+                            or (
+                                isinstance(proof.get("terminals"), list)
+                                and bool(proof["terminals"])
+                                and all(
+                                    isinstance(item, dict) and item.get("terminal_version_id")
+                                    for item in proof.get("terminals", [])
+                                )
+                            )
+                        )
+                    if cached.get("ok") is True and proof and compatible:
                         continue
                     db.execute(
                         "UPDATE restcontrol.runtime_provisioning SET "
@@ -106,6 +129,13 @@ class Provisioner:
                             return False
                     except Exception as error:
                         db.rollback()
+                        if not isinstance(error, PendingCheck):
+                            checks.pop(step, None)
+                            db.execute(
+                                "UPDATE restcontrol.runtime_provisioning SET checks=%s "
+                                "WHERE company_id=%s AND configuration_version=%s",
+                                (Jsonb(checks), company_id, version),
+                            )
                         if isinstance(error, PendingCheck):
                             checks[step] = {
                                 "ok": False,
@@ -129,7 +159,22 @@ class Provisioner:
                             ),
                         )
                         db.commit()
+                        if isinstance(error, PendingCheck) and step in {"modules", "payments"}:
+                            # Provider/module configuration is independent of public DNS
+                            # and process health. Preserve failed evidence and inspect all
+                            # remaining independent stages without inventing full readiness.
+                            pending.append((step, error.code))
+                            continue
                         return False
+                if pending:
+                    db.execute(
+                        "UPDATE restcontrol.runtime_provisioning SET state='failed',"
+                        "step=%s,error_code=%s,updated_at=now() WHERE company_id=%s "
+                        "AND configuration_version=%s",
+                        (*pending[0], company_id, version),
+                    )
+                    db.commit()
+                    return False
                 db.execute(
                     "UPDATE restcontrol.runtime_provisioning SET "
                     "state='ready',active_socket_path=socket_path,active_version=configuration_version,"

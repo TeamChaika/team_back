@@ -201,3 +201,108 @@ def test_setup_requires_current_durable_checks_and_own_live_health(control, monk
     with control.connect(True) as db:
         db.execute("UPDATE runtime_provisioning SET checks=%s", (Jsonb(checks),))
     assert registry.resolve_setup(company) is None
+
+
+def test_independent_checks_continue_and_working_is_not_full_ready(control):
+    from app.saas_admin.provisioning import PendingCheck
+
+    company = {"id": str(uuid4()), "version": 1, "status": "active"}
+    calls = []
+
+    def adapter(step):
+        def check(*_):
+            calls.append(step)
+            if step in {"modules", "payments"}:
+                raise PendingCheck(
+                    "configuration_missing",
+                    {"company_id": company["id"], "configuration_version": 1},
+                )
+            return {"ok": True, "evidence": "synthetic foundation proof"}
+
+        return check
+
+    job = Provisioner(control, {step: adapter(step) for step in STEPS})
+    registry = RuntimeRegistry(control)
+    job.enqueue(company, f"/tmp/c_{company['id'].replace('-', '')}/portal.sock")
+    assert job.run(company["id"]) is False
+    assert calls == list(STEPS)
+    assert registry.resolve(company) is None
+    assert registry.resolve_existing(company) is None
+    assert registry.resolve_working(company).configuration_version == 1
+    assert registry.working_status(company)["working_dashboard_available"] is True
+    assert registry.resolve_working({**company, "version": 2}) is None
+    assert registry.resolve_working({**company, "status": "suspended"}) is None
+    with control.connect() as db:
+        row = db.execute("SELECT * FROM runtime_provisioning").fetchone()
+    assert row["state"] == "failed" and row["step"] == "modules"
+    assert row["checks"]["modules"]["ok"] is False
+    # Unexpected recheck failure must discard earlier partial positive probes.
+    job.adapters["modules"] = lambda *_: (_ for _ in ()).throw(RuntimeError("private"))
+    assert job.run(company["id"]) is False
+    with control.connect() as db:
+        assert (
+            "modules"
+            not in db.execute("SELECT checks FROM runtime_provisioning").fetchone()["checks"]
+        )
+
+
+def test_payment_mutation_lock_revokes_proof_and_blocks_provisioner(control):
+    from app.saas_admin.repository import Problem
+
+    company = {"id": str(uuid4()), "version": 1, "status": "active"}
+    adapters = {step: lambda *_: {"ok": True, "evidence": "synthetic"} for step in STEPS}
+    job, registry = Provisioner(control, adapters), RuntimeRegistry(control)
+    job.enqueue(company, f"/tmp/c_{company['id'].replace('-', '')}/portal.sock")
+    assert job.run(company["id"]) is True
+    with registry.payment_configuration_change(company):
+        assert registry.resolve(company) is None
+        assert job.run(company["id"]) is False
+        with pytest.raises(Problem) as busy:
+            with registry.payment_configuration_change(company):
+                pass
+        assert busy.value.status == 503
+    with control.connect() as db:
+        row = db.execute("SELECT * FROM runtime_provisioning").fetchone()
+    assert "payments" not in row["checks"] and row["state"] == "failed"
+    assert registry.resolve_working(company) is not None
+    assert job.run(company["id"]) is True
+    with pytest.raises(Problem) as stale:
+        with registry.payment_configuration_change({**company, "version": 2}):
+            pass
+    assert stale.value.status == 409
+    assert registry.resolve(company) is not None
+
+
+def test_legacy_module_and_payment_evidence_is_rechecked_without_resync(control):
+    company = {"id": str(uuid4()), "version": 1, "status": "active"}
+    calls = []
+
+    def check(step):
+        def run(*_):
+            calls.append(step)
+            evidence = (
+                {"company_id": company["id"], "configuration_version": 1, "services": {}}
+                if step == "modules"
+                else {"enabled": False}
+                if step == "payments"
+                else "synthetic"
+            )
+            return {"ok": True, "evidence": evidence}
+
+        return run
+
+    job = Provisioner(control, {step: check(step) for step in STEPS})
+    job.enqueue(company, f"/tmp/c_{company['id'].replace('-', '')}/portal.sock")
+    assert job.run(company["id"])
+    with control.connect(True) as db:
+        db.execute(
+            "UPDATE runtime_provisioning SET checks=jsonb_set(jsonb_set(checks,"
+            "'{modules,evidence}','{\"probes\":[]}'::jsonb),'{payments,evidence}',"
+            "'{\"terminals\":[{\"terminal_id\":\"old\"}]}'::jsonb)"
+        )
+    calls.clear()
+    assert job.run(company["id"])
+    assert calls == ["modules", "payments"]
+    calls.clear()
+    assert job.run(company["id"])
+    assert calls == []

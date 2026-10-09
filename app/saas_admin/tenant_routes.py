@@ -130,6 +130,11 @@ def mount_tenant_routes(app, repo, mode="local"):
             company = repo.get(str(value["company"]["id"]))
             value = {
                 **value,
+                **(
+                    registry.working_status(company)
+                    if hasattr(registry, "working_status")
+                    else {"working_dashboard_available": False, "feature_readiness": {}}
+                ),
                 "setup_available": bool(
                     getattr(registry, "resolve_setup", lambda _: None)(company)
                 ),

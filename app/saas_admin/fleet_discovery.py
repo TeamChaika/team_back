@@ -82,6 +82,7 @@ def build_fleet_verifier(configuration, repository=None):
     from app.tenancy.bootstrap import create_verifier_app
 
     from .postgres_repository import PostgresRepository
+    from .runtime_registry import RuntimeRegistry
     from .supabase_auth import SupabaseAuthClient
 
     template = configuration["operator_template"]
@@ -96,4 +97,6 @@ def build_fleet_verifier(configuration, repository=None):
     discovery = FleetDiscovery(configuration, repo)
     accounts = CompanyAccounts(repo, {})
     accounts.targets = discovery
-    return create_verifier_app(repo, discovery.grants, company_accounts=accounts), repo, accounts
+    return create_verifier_app(
+        repo, discovery.grants, company_accounts=accounts, runtime_registry=RuntimeRegistry(repo)
+    ), repo, accounts

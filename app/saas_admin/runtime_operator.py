@@ -595,6 +595,7 @@ class RuntimeOperator:
                 verified.append(
                     {
                         "terminal_id": str(terminal["id"]),
+                        "terminal_version_id": str(check["terminal_version_id"]),
                         "check_id": str(check["id"]),
                         "settled_attempt_id": str(proof["id"]),
                         "configuration_version": self.runtime.configuration_version,
@@ -694,7 +695,14 @@ class RuntimeOperator:
             )
             self._owns_auth = True
         self.company_accounts = CompanyAccounts(self.repo, targets)
-        return create_verifier_app(self.repo, grants, company_accounts=self.company_accounts)
+        from .runtime_registry import RuntimeRegistry
+
+        return create_verifier_app(
+            self.repo,
+            grants,
+            company_accounts=self.company_accounts,
+            runtime_registry=RuntimeRegistry(self.repo),
+        )
 
     def serve_verifier(self):
         from .runtime_process_identity import serve_verifier_socket

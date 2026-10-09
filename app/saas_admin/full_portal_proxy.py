@@ -3,11 +3,12 @@
 import re
 import time
 from collections import OrderedDict
+from contextlib import AsyncExitStack
 from http.cookies import SimpleCookie
 from threading import Lock
 
 import httpx
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from .auth_validation import csrf_matches
@@ -236,15 +237,22 @@ class FullPortalProxy:
                 if request.client
                 else None,
             )
-        resolver = (
-            getattr(self.registry, "resolve_existing", self.registry.resolve)
-            if history
+        working_resolver = getattr(self.registry, "resolve_working", self.registry.resolve)
+        runtime = await run_in_threadpool(working_resolver, full_company)
+        working = runtime is not None
+        history_fallback = (
+            history
             or public in {"callback", "guest_read", "guest_reconcile", "recovery"}
             or (request.method, request.url.path)
             in {("GET", "/api/me"), ("POST", "/api/profile/password"), ("POST", "/api/auth/logout")}
+        )
+        resolver = (
+            getattr(self.registry, "resolve_existing", self.registry.resolve)
+            if history_fallback
             else self.registry.resolve
         )
-        runtime = await run_in_threadpool(resolver, full_company)
+        if runtime is None and history_fallback:
+            runtime = await run_in_threadpool(resolver, full_company)
         setup = False
         if runtime is None and not public:
             setup_resolver = getattr(self.registry, "resolve_setup", None)
@@ -299,6 +307,31 @@ class FullPortalProxy:
             )
             if not decision.allowed:
                 raise Problem(403, "feature_disabled", "Возможность недоступна по подписке")
+        readiness = await run_in_threadpool(
+            getattr(self.registry, "feature_readiness", lambda _: {}), full_company
+        )
+        owner_configuration = (
+            not public
+            and actor.kind == "platform_owner"
+            and setup_route(request.url.path, request.method)
+        )
+        if working and not account_route and not setup and not owner_configuration:
+            for feature in features:
+                entry = readiness.get(feature, {})
+                if entry.get("read" if history else "write") is not True:
+                    raise Problem(403, "feature_not_ready", "Этот модуль ещё не настроен")
+        terminal_change = (
+            request.method == "POST"
+            and re.fullmatch(
+                r"/api/(?:payment-settings|management)/venues/"
+                + _PUBLIC_ID
+                + r"(?:/terminals/"
+                + _PUBLIC_ID
+                + r")?",
+                request.url.path,
+            )
+            is not None
+        )
         headers = {
             "host": request.headers["host"],
             "origin": request.headers.get("origin", ""),
@@ -307,19 +340,29 @@ class FullPortalProxy:
         }
         if request.headers.get("content-type"):
             headers["content-type"] = request.headers["content-type"]
-        async with httpx.AsyncClient(
-            transport=self.transport_factory(runtime),
-            timeout=60,
-            follow_redirects=False,
-            trust_env=False,
-        ) as client:
-            result = await client.request(
-                request.method,
-                "http://runtime" + request.url.path,
-                params=request.query_params,
-                headers=headers,
-                content=await request.body(),
-            )
+        async with AsyncExitStack() as stack:
+            if terminal_change:
+                change = getattr(self.registry, "payment_configuration_change", None)
+                if change is None:
+                    raise Problem(
+                        503, "payment_readiness_unavailable", "Проверка терминала недоступна"
+                    )
+                guard = change(full_company)
+                await run_in_threadpool(guard.__enter__)
+                stack.push_async_callback(run_in_threadpool, guard.__exit__, None, None, None)
+            async with httpx.AsyncClient(
+                transport=self.transport_factory(runtime),
+                timeout=60,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                result = await client.request(
+                    request.method,
+                    "http://runtime" + request.url.path,
+                    params=request.query_params,
+                    headers=headers,
+                    content=await request.body(),
+                )
         # Upstream is private, but redirects and arbitrary cookie/domain headers never escape.
         if 300 <= result.status_code < 400:
             raise Problem(502, "unexpected_redirect", "Ошибка внутреннего маршрута")
@@ -328,7 +371,18 @@ class FullPortalProxy:
             for k, v in result.headers.items()
             if k.lower() in {"content-type", "content-disposition"}
         }
-        response = Response(result.content, status_code=result.status_code, headers=safe)
+        if request.method == "GET" and request.url.path == "/api/me" and result.status_code == 200:
+            from .runtime_visibility import accepted_metadata
+
+            try:
+                metadata = result.json()
+            except ValueError:
+                raise Problem(502, "invalid_metadata", "Ошибка данных кабинета") from None
+            if not isinstance(metadata, dict):
+                raise Problem(502, "invalid_metadata", "Ошибка данных кабинета")
+            response = JSONResponse(accepted_metadata(metadata, readiness, working=working))
+        else:
+            response = Response(result.content, status_code=result.status_code, headers=safe)
         if (
             request.method == "POST"
             and request.url.path == "/api/profile/password"

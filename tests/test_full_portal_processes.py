@@ -27,6 +27,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from test_tenant_migrations_postgres import empty_database as empty_database
 
+from app.saas_admin.entitlements import FEATURES
 from app.saas_admin.pg_auth import PostgresAuth
 from app.saas_admin.pg_tenant_access import PostgresTenantAccess
 from app.saas_admin.platform_sso import pkce_challenge
@@ -328,7 +329,8 @@ def test_two_real_portals_owner_member_and_revocation(empty_database):
                 # Persist setup prerequisites; external iiko/DNS/payment acceptance is NOT claimed.
                 operator.execute(
                     "CREATE TABLE restcontrol.runtime_provisioning(company_id uuid PRIMARY KEY,"
-                    "configuration_version int,socket_path text,checks jsonb,state text)"
+                    "configuration_version int,socket_path text,checks jsonb,state text,"
+                    "step text,error_code text,updated_at timestamptz)"
                 )
                 for runtime in runtimes:
                     operator.execute(
@@ -349,6 +351,16 @@ def test_two_real_portals_owner_member_and_revocation(empty_database):
                 # Explicit test-only route registry: external readiness is NOT asserted.
                 class RunningProcesses:
                     setup_only = False
+
+                    def feature_readiness(self, company):
+                        # Explicit fixture permission only, not external acceptance evidence.
+                        return {
+                            feature: {"read": not self.setup_only, "write": not self.setup_only}
+                            for feature in FEATURES
+                        }
+
+                    def payment_configuration_change(self, company):
+                        return setup_registry.payment_configuration_change(company)
 
                     def resolve_setup(self, company):
                         return setup_registry.resolve_setup(company)
@@ -425,6 +437,8 @@ def test_two_real_portals_owner_member_and_revocation(empty_database):
                                 "documents_worker_not_ready",
                                 "scheduler_not_ready",
                                 "/api/assistant/status",
+                                "assistant_configured_not_ready",
+                                "telegram_identity_not_ready",
                             }, module_evidence
                         passed = {
                             probe["path"] for probe in module_evidence["probes"] if probe["ok"]

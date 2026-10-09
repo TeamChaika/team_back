@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import psycopg
@@ -111,6 +112,15 @@ def accounts(empty_database, tmp_path):
             "status": "active",
             "version": 1,
             "archived_at": None,
+            "chain_url": None,
+            "rms": [],
+            "modules": {"analytics": True},
+            "subscription": {
+                "policy": "plans_v1",
+                "plan_id": "full",
+                "status": "active",
+                "start_date": "2020-01-01",
+            },
         }
         with repo.connect(True) as db:
             repo._write_company(db, body)
@@ -299,6 +309,10 @@ def test_verifier_capabilities_csrf_and_current_local_admin_are_enforced(account
             VerifierGrant(company, "documents-worker", worker),
         ],
         company_accounts=service,
+        # Explicit synthetic readiness; this test checks Auth/ACL effects, not acceptance.
+        runtime_registry=SimpleNamespace(
+            feature_readiness=lambda company: {"management.users": {"read": True, "write": True}}
+        ),
     )
     token, session = tokens[0]
     request_body = {"token": token, "csrf": session["csrf_token"], "account": body()}
@@ -372,7 +386,14 @@ def test_current_management_and_profile_routes_use_restricted_verifier(accounts,
     service, repo, _, _, dsn, runtimes, tokens, _ = accounts
     runtime = runtimes[0]
     grant = VerifierGrant(str(runtime.company_id), "portal", "g" * 40)
-    private_app = create_verifier_app(repo, [grant], company_accounts=service)
+    private_app = create_verifier_app(
+        repo,
+        [grant],
+        company_accounts=service,
+        runtime_registry=SimpleNamespace(
+            feature_readiness=lambda company: {"management.users": {"read": True, "write": True}}
+        ),
+    )
     pool = ConnectionPool(
         make_conninfo(dsn, user=runtime.database_role), kwargs={"row_factory": dict_row}, open=False
     )
