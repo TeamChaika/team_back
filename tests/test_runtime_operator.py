@@ -7,14 +7,15 @@ import pytest
 from app.saas_admin.runtime_operator import RuntimeOperator, private_json
 
 
-def test_render_uses_saved_own_credentials_and_scoped_roles(tmp_path, monkeypatch):
+@pytest.mark.parametrize("domain", ["customer.example.org", "brie-bali.chaika.team"])
+def test_render_uses_saved_own_credentials_and_scoped_roles(tmp_path, monkeypatch, domain):
     company_id = uuid4()
     rms_id = uuid4()
     company = {
         "id": str(company_id),
         "version": 3,
         "name": "Company",
-        "domain": "customer.example.org",
+        "domain": domain,
         "status": "active",
         "subscription": {"timezone": "Asia/Tokyo"},
         "chain_url": "https://own-chain.example/resto",
@@ -94,6 +95,8 @@ def test_render_uses_saved_own_credentials_and_scoped_roles(tmp_path, monkeypatc
     assert standalone._owns_auth is True
     standalone.close()
     env = operator.prepare_manifest()
+    assert env["RESTCONTROL_TENANT_FRONTEND_ORIGIN"] == "https://" + domain
+    assert env["RESTCONTROL_TENANT_API_ORIGIN"] == "https://api." + domain
     assert private_json(operator.manifest) == env
     assert operator.manifest.stat().st_mode & 0o077 == 0
     assert env["RESTCONTROL_TENANT_TIMEZONE"] == "Asia/Tokyo"

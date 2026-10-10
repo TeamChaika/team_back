@@ -7,6 +7,27 @@ from app.saas_admin.runtime_fleet import FleetPreparer
 from app.saas_admin.runtime_operator import private_json
 
 
+def test_binding_failure_logs_company_and_type_without_secret_text(tmp_path, monkeypatch, caplog):
+    from types import SimpleNamespace
+
+    from app.saas_admin.runtime_fleet import FleetSupervisor
+    from app.tenancy.config import RuntimeConfigurationError
+
+    company_id = uuid4()
+    path = tmp_path / ("c_" + company_id.hex + ".json")
+    path.touch()
+    supervisor = FleetSupervisor(SimpleNamespace(root=tmp_path, prepare_pending=lambda **_: None))
+
+    def fail(_):
+        raise RuntimeConfigurationError("secret-password-must-not-appear")
+
+    monkeypatch.setattr(supervisor, "tick_company", fail)
+    supervisor.tick()
+    assert str(company_id) in caplog.text
+    assert "RuntimeConfigurationError" in caplog.text
+    assert "secret-password-must-not-appear" not in caplog.text
+
+
 @pytest.fixture(autouse=True)
 def central_settings(monkeypatch):
     from types import SimpleNamespace

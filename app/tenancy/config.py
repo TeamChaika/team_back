@@ -15,6 +15,18 @@ Area = Literal["analytics", "documents", "payments"]
 _AREAS = ("analytics", "documents", "payments")
 _IDENTIFIER = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 _NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}\Z")
+# These are central/legacy services, never tenant origins. Other explicitly
+# registered company subdomains are valid; the gateway still verifies ownership.
+_RESERVED_ORIGIN_HOSTS = frozenset(
+    {
+        "chaika.team",
+        "rc.chaika.team",
+        "dashboard.chaika.team",
+        "api.chaika.team",
+        "pay.chaika.team",
+        "iiko.chaika.team",
+    }
+)
 
 
 class RuntimeConfigurationError(ValueError):
@@ -53,11 +65,14 @@ def _origin(value: str) -> str:
         or value != value.strip()
         or any(char.isspace() for char in value)
         or "\\" in value
-        or parsed.hostname == "chaika.team"
-        or parsed.hostname.endswith(".chaika.team")
+        or parsed.hostname in _RESERVED_ORIGIN_HOSTS
+        or any(
+            parsed.hostname.endswith("." + reserved)
+            for reserved in _RESERVED_ORIGIN_HOSTS - {"chaika.team"}
+        )
         or port == 0
     ):
-        raise RuntimeConfigurationError("Tenant requires an exact non-Chaika HTTPS origin")
+        raise RuntimeConfigurationError("Tenant requires an exact non-reserved HTTPS origin")
     # Canonical ASCII host spelling prevents visually equivalent origin variants.
     if parsed.hostname.encode("idna").decode() != parsed.hostname:
         raise RuntimeConfigurationError("Origin must use ASCII hostname")

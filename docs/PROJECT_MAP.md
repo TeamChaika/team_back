@@ -100,6 +100,14 @@ modules/payments), а `feature_readiness` открывает чтение/зап
 функций tenant и не объявляется готовым. Backup/restore сбрасывает готовности и старые
 socket bindings: процессы и подключения проверяются заново.
 
+Tenant origin допускает явно заданный домен компании, включая собственные поддомены
+`chaika.team` (например, `brie-bali.chaika.team` и его API alias). В `tenancy/config.py`
+зарезервированы основной домен и сервисы `rc`, `dashboard`, `api`, `pay`, `iiko`
+с их дочерними именами; точный Host/Origin по-прежнему проверяется реестром gateway.
+Защита от наследования общих iiko/service credentials не меняется. Fleet пишет
+в предупреждениях UUID компании и класс ошибки, без текста исключения/секретов;
+диагностика не заменяет проверку готовности и не выдаёт доступы.
+
 Глобальный SaaS owner: `app/saas_admin/platform_sso.py`, `platform_sso_routes.py` →
 `app/tenancy/actor.py`, `app/web/auth.py::tenant_actor_from_request`,
 `Repository.actor_scope`; миграция `20261008185718_restcontrol_platform_sso.sql`.

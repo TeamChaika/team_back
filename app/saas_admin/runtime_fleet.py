@@ -176,9 +176,12 @@ class FleetPreparer:
                     if path.exists():
                         continue
                 prepared.append(self.prepare(self.repo.get(str(row["company_id"]))))
-            except (Problem, ValueError, OSError, KeyError, subprocess.SubprocessError):
+            except (Problem, ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
                 logging.getLogger(__name__).warning(
-                    "Tenant preparation failed; binding retained for explicit retry"
+                    "Tenant preparation failed; binding retained for explicit retry "
+                    "[company=%s, error_type=%s]",
+                    str(UUID(str(row["company_id"]))),
+                    type(error).__name__,
                 )
         return prepared
 
@@ -341,9 +344,18 @@ class FleetSupervisor:
         for path in self.preparer.root.glob("c_*.json"):
             try:
                 self.tick_company(path)
-            except (Problem, ValueError, OSError, KeyError, subprocess.SubprocessError):
+            except (Problem, ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
+                try:
+                    company_id = str(UUID(path.stem[2:]))
+                except ValueError:
+                    company_id = "unknown"
+                # Exception text/locals may contain credentials; log only the
+                # validated company identity and exception class for diagnosis.
                 logging.getLogger(__name__).warning(
-                    "Tenant supervisor binding failed; other companies remain running"
+                    "Tenant supervisor binding failed; other companies remain running "
+                    "[company=%s, error_type=%s]",
+                    company_id,
+                    type(error).__name__,
                 )
 
     def tick_company(self, path):

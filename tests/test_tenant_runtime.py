@@ -111,8 +111,13 @@ def test_invalid_runtime_rejected(changes):
 @pytest.mark.parametrize(
     "origin",
     [
+        "https://chaika.team",
+        "https://rc.chaika.team",
+        "https://api.rc.chaika.team",
         "https://dashboard.chaika.team",
         "https://api.chaika.team",
+        "https://pay.chaika.team",
+        "https://iiko.chaika.team",
         "http://customer.example",
         "https://customer.example/",
         "https://customer.example?q=1",
@@ -128,6 +133,19 @@ def test_invalid_runtime_rejected(changes):
 def test_exact_origin_no_chaika_fallback(origin):
     with pytest.raises(ValueError):
         replace(runtime(), frontend_origin=origin)
+
+
+def test_explicit_company_subdomain_and_alias_are_valid_tenant_origins():
+    tenant = replace(
+        runtime(),
+        frontend_origin="https://brie-bali.chaika.team",
+        api_origin="https://api.brie-bali.chaika.team",
+        payment_origin="https://payments.brie-bali.chaika.team",
+    )
+    assert tenant.frontend_origin == "https://brie-bali.chaika.team"
+    for field in ("frontend_origin", "api_origin", "payment_origin"):
+        with pytest.raises(RuntimeConfigurationError):
+            replace(tenant, **{field: "https://api.rc.chaika.team"})
 
 
 def test_runtime_paths_locks_and_sql_cannot_cross_company():
