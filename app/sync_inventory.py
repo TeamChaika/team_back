@@ -25,6 +25,7 @@ from app.services.iiko_outgoing import read_outgoing_invoices
 from app.services.iiko_products import read_products
 from app.services.iiko_transfers import read_transfers
 from app.services.iiko_writeoffs import read_writeoffs
+from app.source_capabilities import require_primary_source
 from app.sync_references import (
     Source,
     SyncError,
@@ -489,10 +490,7 @@ def synchronize_inventory(
         reference_lock(db),
     ):
         register_sources(db, [source])
-        if not db.execute(
-            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources WHERE id='primary' AND server_type='CHAIN'"
-        ).fetchone():
-            raise SyncError("reference_sync_required")
+        require_primary_source(db, "primary", sources=configured_sources(settings))
         db.execute(
             f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' WHERE status='running'"

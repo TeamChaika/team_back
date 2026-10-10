@@ -193,6 +193,19 @@ def append_snapshot(db: psycopg.Connection, run_id: UUID, snapshot: dict) -> Non
     )
 
 
+def reference_mode(server_types: dict[str, str]) -> str:
+    """Classify observed types, never URLs; standalone has exactly one real source."""
+    primary = server_types.get("primary")
+    if primary == "STANDALONE_RMS":
+        if set(server_types) != {"primary"}:
+            raise SyncError("standalone_additional_sources_forbidden")
+    elif primary != "CHAIN" or any(
+        value != "REPLICATED_RMS" for key, value in server_types.items() if key != "primary"
+    ):
+        raise SyncError("unexpected_server_type")
+    return primary
+
+
 def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> dict:
     """Atomically publish a complete collection; missing rows are never called deleted."""
     primary = snapshots[("primary", "departments")]
@@ -205,7 +218,15 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
         )
         for source in sources
     }
-    rms_ids = [s.id for s in sources if s.id != "primary"]
+    mode = reference_mode(
+        {
+            source.id: snapshots[source.id, "server_type"]["payload"]["server_type"]
+            for source in sources
+        }
+    )
+    rms_ids = (
+        ["primary"] if mode == "STANDALONE_RMS" else [s.id for s in sources if s.id != "primary"]
+    )
     groups = {
         key: CorporateGroupsResponse.model_validate(
             snapshots[(key, "groups")]["payload"], by_name=True
@@ -213,6 +234,8 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
         for key in rms_ids
     }
     mapping = map_departments(hierarchies["primary"], rms_ids, hierarchies, groups)
+    if mode == "STANDALONE_RMS" and any(b.state != "matched" for b in mapping.bindings):
+        raise SyncError("standalone_department_mapping_required")
     counts = {
         "sources": len(sources),
         "corporate_nodes": len(primary["payload"]["items"]),
@@ -221,9 +244,12 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
         "matched_rms": sum(b.state == "matched" for b in mapping.bindings),
         "unmapped_chain_departments": len(mapping.unmapped_chain_departments),
         "raw_snapshots": len(snapshots),
+        "replication_applicable": mode == "CHAIN",
         "replication_status_counts": snapshots[("primary", "replication")]["payload"][
             "status_counts"
-        ],
+        ]
+        if mode == "CHAIN"
+        else None,
     }
     with db.transaction():
         db.execute(f"UPDATE {ANALYTICS_SCHEMA}.sources SET configured = false")
@@ -286,7 +312,11 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
                     binding.connection_id,
                     binding.department_id if binding.state == "matched" else None,
                     binding.state,
-                    Jsonb(binding.model_dump(mode="json")),
+                    Jsonb(
+                        {**binding.model_dump(mode="json"), "server_type": mode}
+                        if mode == "STANDALONE_RMS"
+                        else binding.model_dump(mode="json")
+                    ),
                     datetime.now(UTC),
                     primary["id"],
                     binding.rms_snapshot_id,
@@ -354,12 +384,17 @@ def synchronize(settings: Settings, api_url: str, output: Path) -> dict:
                 for source in sources:
                     load(source, "server_type", "GET", f"/connections/{source.id}/server-type")
                     server_type = snapshots[(source.id, "server_type")]["payload"]["server_type"]
-                    if server_type != ("CHAIN" if source.id == "primary" else "REPLICATED_RMS"):
+                    if source.id == "primary":
+                        reference_mode({"primary": server_type})
+                        if server_type == "STANDALONE_RMS" and len(sources) != 1:
+                            raise SyncError("standalone_additional_sources_forbidden")
+                    elif server_type != "REPLICATED_RMS":
                         raise SyncError("unexpected_server_type")
                     load(source, "departments", "GET", f"/connections/{source.id}/departments")
-                    if source.id != "primary":
+                    if source.id != "primary" or server_type == "STANDALONE_RMS":
                         load(source, "groups", "GET", f"/connections/{source.id}/corporate-groups")
-                load(sources[0], "replication", "GET", "/replication/statuses")
+                if snapshots["primary", "server_type"]["payload"]["server_type"] == "CHAIN":
+                    load(sources[0], "replication", "GET", "/replication/statuses")
                 load(sources[0], "stores", "POST", "/stores/load")
             except BaseException as error:
                 failure = error

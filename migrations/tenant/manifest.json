@@ -56,6 +56,10 @@
     {
       "file": "20261010120000_tenant_guest_links.sql",
       "area": "payments"
+    },
+    {
+      "file": "20261010160000_tenant_standalone_primary.sql",
+      "area": "analytics"
     }
   ]
 }

@@ -16,6 +16,7 @@ from app.core.config import BACKEND_DIR, Settings
 from app.schemas.iiko_reports import AccountingReportQuery
 from app.schemas.iiko_store_balances import StoreBalancesQuery, StoreBalancesResponse
 from app.services.iiko_store_balances import read_store_balances
+from app.source_capabilities import require_primary_source
 from app.sync_references import (
     Source,
     SyncError,
@@ -164,11 +165,7 @@ def synchronize_store_balances(
         reference_lock(db),
     ):
         register_sources(db, [source])
-        if not db.execute(
-            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources WHERE id=%s AND server_type='CHAIN'",
-            (source.id,),
-        ).fetchone():
-            raise SyncError("reference_sync_required")
+        require_primary_source(db, source.id, sources=configured_sources(settings))
         db.execute(
             f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' "

@@ -91,7 +91,7 @@ def test_empty_database_two_tenant_duplicate_ids_and_role_isolation(empty_databa
             operator.execute(
                 "SELECT count(*) FROM pg_tables WHERE schemaname=%s", (runtime.payments_schema,)
             ).fetchone()[0]
-            == 11
+            == 12
         )
     for runtime in (first, second):
         with psycopg.connect(
@@ -265,9 +265,10 @@ def test_concurrent_provisioning_single_committed_history(empty_database):
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(run, range(2)))
     assert sorted(map(len, results)) == [0, len(load_migrations())]
-    assert count_rows(operator, runtime, "analytics", "_tenant_migrations") == 5
-    assert count_rows(operator, runtime, "documents", "_tenant_migrations") == 5
-    assert count_rows(operator, runtime, "payments", "_tenant_migrations") == 3
+    for area in ("analytics", "documents", "payments"):
+        assert count_rows(operator, runtime, area, "_tenant_migrations") == sum(
+            migration.area == area for migration in load_migrations()
+        )
 
 
 def test_refuses_schema_adoption_and_privileged_role(empty_database):

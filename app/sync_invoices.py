@@ -19,6 +19,7 @@ from psycopg.types.json import Jsonb
 from app.core.config import BACKEND_DIR, Settings
 from app.invoice_lines import numbered_invoice_items
 from app.outgoing_storage import publish_outgoing_invoices
+from app.source_capabilities import require_primary_source
 from app.sync_inventory import capture_inventory, publish_writeoffs, upsert_rows
 from app.sync_references import (
     Source,
@@ -333,10 +334,7 @@ def synchronize_histories(
         collector_client(base_url=api_url, timeout=180, trust_env=False) as client,
     ):
         register_sources(db, [source])
-        if not db.execute(
-            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources WHERE id='primary' AND server_type='CHAIN'"
-        ).fetchone():
-            raise SyncError("reference_sync_required")
+        require_primary_source(db, "primary", sources=configured_sources(settings))
         response = client.get("/api/v1/iiko/connections")
         response.raise_for_status()
         primary = [r for r in response.json()["items"] if r["connection_id"] == "primary"]

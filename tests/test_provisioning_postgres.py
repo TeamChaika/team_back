@@ -509,7 +509,9 @@ def test_initial_history_plan_upgrade_reruns_old_proof_only_at_same_company_vers
 
 @pytest.mark.parametrize("fail_first", [False, True])
 @pytest.mark.parametrize("append_count", [1, 2])
-def test_additive_migration_refresh_preserves_partial_acceptance(control, fail_first, append_count):
+def test_additive_migration_refresh_preserves_partial_acceptance(
+    control, fail_first, append_count, monkeypatch
+):
     import hashlib
     import json
 
@@ -517,8 +519,20 @@ def test_additive_migration_refresh_preserves_partial_acceptance(control, fail_f
 
     from app.tenancy.migrations import load_migrations
 
+    # Exercise the approved historical maintenance release, not unrelated later
+    # migrations that deliberately require the ordinary provisioning checks.
+    manifest = load_migrations()
+    end = (
+        next(
+            i
+            for i, item in enumerate(manifest)
+            if item.name == "20261010120000_tenant_guest_links.sql"
+        )
+        + 1
+    )
+    monkeypatch.setattr("app.tenancy.migrations.load_migrations", lambda: manifest[:end])
     company = {"id": str(uuid4()), "version": 7, "status": "active"}
-    entries = [(item.name, item.area, item.checksum) for item in load_migrations()]
+    entries = [(item.name, item.area, item.checksum) for item in manifest[:end]]
     previous = hashlib.sha256(json.dumps(entries[:-append_count]).encode()).hexdigest()
     modules = {
         "ok": False,

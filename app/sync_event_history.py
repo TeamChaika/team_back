@@ -15,7 +15,7 @@ import psycopg
 
 from app.core.config import BACKEND_DIR, Settings
 from app.schemas.iiko_events import EventsSyncQuery
-from app.sync_events import synchronize_events
+from app.sync_events import event_sources, synchronize_events
 from app.sync_references import (
     Source,
     SyncError,
@@ -184,9 +184,7 @@ def synchronize_history(
     directory: Path = DIRECTORY,
 ):
     days = dates_between(start, end)
-    sources = [source for source in configured_sources(settings) if source.id != "primary"]
-    if not sources:
-        raise SyncError("events_rms_required")
+    sources = configured_sources(settings)
     directory.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(directory / "events-history.lock", os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(descriptor, "w") as lock:
@@ -207,17 +205,7 @@ def synchronize_history(
             # Also verify sources before skipping any previously committed dates.
             with db.transaction():
                 register_sources(db, sources)
-                matched = {
-                    row[0]
-                    for row in db.execute(
-                        f"SELECT s.id FROM {ANALYTICS_SCHEMA}.sources s JOIN "
-                        f"{ANALYTICS_SCHEMA}.rms_bindings b "
-                        "ON b.source_id=s.id WHERE s.server_type='REPLICATED_RMS' "
-                        "AND b.state='matched'"
-                    ).fetchall()
-                }
-                if any(source.id not in matched for source in sources):
-                    raise SyncError("events_rms_mapping_required")
+                sources = event_sources(db, sources)
                 coverage = {
                     source.id: completed_coverage(
                         db.execute(

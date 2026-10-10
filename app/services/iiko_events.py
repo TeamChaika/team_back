@@ -215,7 +215,15 @@ async def capture_events(
 ) -> EventsCapture:
     connection = connections.get_connection(source_id)
     if source_id == "primary":
-        raise IikoError("events_rms_required", "Для событий выберите RMS.", status_code=422)
+        if connections.connection_ids() != ["primary"]:
+            raise IikoError(
+                "standalone_additional_sources_forbidden",
+                "Самостоятельный ресторан должен использовать одно подключение.",
+                status_code=422,
+            )
+        observed = await connections.get_server_type(source_id)
+        if observed.server_type != "STANDALONE_RMS":
+            raise IikoError("events_rms_required", "Для событий выберите RMS.", status_code=422)
     folder = (
         directory or runtime_directory("local", BACKEND_DIR / ".local") / "events"
     ) / source_id

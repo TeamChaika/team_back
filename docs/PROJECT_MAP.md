@@ -36,6 +36,7 @@ SaaS-маршруты и runtime уточнены **2026-10-09**; полный t
 | Складские права и Telegram документов | [Документы](CODEMAPS/documents.md) | [app/documents/policy.py](../app/documents/policy.py) |
 | Очередь документов и сверка `unknown` | [Документы](CODEMAPS/documents.md) | [app/documents/dispatch.py](../app/documents/dispatch.py) |
 | Приватный API iiko и загрузчики | [Сбор и данные](CODEMAPS/sync-data.md) | [app/main.py](../app/main.py) |
+| Самостоятельный сервер Syrve/iiko без Chain | [Контракт источников](CODEMAPS/sync-data.md) | `sync_references.reference_mode`, `source_capabilities.require_primary_source`, `sync_events.event_sources`; настоящий `STANDALONE_RMS` как единственный primary, подтверждённая self-binding по UUID, tenant migration `20261010160000`; без дублирования подключения и ослабления initial_sync |
 | История OLAP и PostgreSQL | [Сбор и данные](CODEMAPS/sync-data.md) | [app/sync_sales_history.py](../app/sync_sales_history.py) |
 | Плановые задания и ручной refresh | [Сбор и данные](CODEMAPS/sync-data.md) | [app/scheduler.py](../app/scheduler.py) |
 | Учётные записи сотрудников полного tenant portal | [Identity contract](tenant-identity.md) | `app/saas_admin/company_accounts.py`, `app/tenancy/bootstrap.py`, `app/web/{administration,profile}.py`; central-only Auth, durable request marker, отдельная identity-role, employee membership и opaque self-password; локальные PostgreSQL/HTTP проверки |

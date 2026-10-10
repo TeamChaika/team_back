@@ -8,8 +8,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
+from xml.etree.ElementTree import ParseError
 
 import httpx
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import fromstring
 from pydantic import TypeAdapter
 
 from app.core.config import BACKEND_DIR, Settings
@@ -31,10 +34,18 @@ _server_type_adapter = TypeAdapter(IikoServerType)
 
 def read_server_type(path: Path) -> IikoServerType:
     try:
+        if path.stat().st_size > 16384:
+            raise ValueError("Server type response is too large")
         text = path.read_text(encoding="utf-8").strip()
-        value = json.loads(text) if text.startswith('"') else text
+        if text.startswith("<"):
+            root = fromstring(text, forbid_dtd=True)
+            if root.tag != "serverType" or root.attrib or len(root):
+                raise ValueError("Unexpected server type XML")
+            value = (root.text or "").strip()
+        else:
+            value = json.loads(text) if text.startswith('"') else text
         return _server_type_adapter.validate_python(value)
-    except (ValueError, RecursionError):
+    except (ValueError, RecursionError, ParseError, DefusedXmlException):
         raise IikoError(
             "iiko_server_type_invalid_response", "iiko вернул неизвестный формат или тип сервера."
         ) from None

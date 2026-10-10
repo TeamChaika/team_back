@@ -19,6 +19,7 @@ from app.core.config import BACKEND_DIR, Settings
 from app.schemas.iiko_cash_shifts import CashShift, CashShiftsQuery, CashShiftsResponse
 from app.schemas.sync_jobs import CashShiftSyncQuery
 from app.services.iiko_cash_shifts import read_cash_shifts
+from app.source_capabilities import require_primary_source
 from app.sync_references import (
     Source,
     SyncError,
@@ -210,11 +211,7 @@ def synchronize_cash_shifts(
         reference_lock(db),
     ):
         register_sources(db, [source])
-        if not db.execute(
-            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources WHERE id=%s AND server_type='CHAIN'",
-            (source.id,),
-        ).fetchone():
-            raise SyncError("reference_sync_required")
+        require_primary_source(db, source.id, sources=configured_sources(settings))
         db.execute(
             f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' WHERE job='cash_shifts' AND status='running'"

@@ -11,6 +11,7 @@ from app.core.config import BACKEND_DIR, Settings
 from app.event_storage import capture_snapshot, publish_events
 from app.schemas.iiko_events import EventsSyncQuery
 from app.services.iiko_events import read_event_types
+from app.source_capabilities import require_primary_source
 from app.sync_references import (
     SyncError,
     check_local_api,
@@ -23,14 +24,47 @@ from app.tenancy.io import collector_client, collector_url, runtime_directory
 from app.tenancy.sql import ANALYTICS_SCHEMA
 
 
+def event_sources(db, sources, *, requested_source_id=None):
+    """Select only real RMS sources with a published own-department binding."""
+    primary_type = (
+        require_primary_source(db, sources=sources)
+        if any(source.id == "primary" for source in sources)
+        else None
+    )
+    matched = {
+        row[0]
+        for row in db.execute(
+            f"SELECT s.id FROM {ANALYTICS_SCHEMA}.sources s "
+            f"JOIN {ANALYTICS_SCHEMA}.rms_bindings b ON b.source_id=s.id "
+            "WHERE b.state='matched' AND b.chain_source_id='primary' AND ("
+            "(s.id<>'primary' AND s.server_type='REPLICATED_RMS') OR "
+            "(s.id='primary' AND s.server_type='STANDALONE_RMS' AND s.configured "
+            "AND s.verified_at IS NOT NULL AND "
+            "b.details->>'server_type'='STANDALONE_RMS'))"
+        ).fetchall()
+    }
+    if primary_type == "STANDALONE_RMS":
+        selected = sources
+    else:
+        selected = [source for source in sources if source.id != "primary"]
+    if requested_source_id is not None:
+        selected = [source for source in selected if source.id == requested_source_id]
+    if not selected:
+        raise SyncError("events_rms_required")
+    if any(source.id not in matched for source in selected):
+        raise SyncError("events_rms_mapping_required")
+    return selected
+
+
 def synchronize_events(
     settings: Settings, query: EventsSyncQuery, api_url: str = collector_url()
 ) -> dict:
     api_url = check_local_api(api_url)
     if not settings.database_url.get_secret_value():
         raise SyncError("database_not_configured")
-    source = next((s for s in configured_sources(settings) if s.id == query.source_id), None)
-    if source is None or source.id == "primary":
+    sources = configured_sources(settings)
+    source = next((s for s in sources if s.id == query.source_id), None)
+    if source is None:
         raise SyncError("events_rms_required")
     key = settings.sync_api_key.get_secret_value()
     if not key:
@@ -46,12 +80,7 @@ def synchronize_events(
         reference_lock(db),
     ):
         register_sources(db, [source])
-        if not db.execute(
-            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources s JOIN {ANALYTICS_SCHEMA}.rms_bindings "
-            f"b ON b.source_id=s.id "
-            "WHERE s.id=%s AND s.server_type='REPLICATED_RMS' AND b.state='matched'",
-            (source.id,),
-        ).fetchone():
+        if source not in event_sources(db, sources, requested_source_id=query.source_id):
             raise SyncError("events_rms_mapping_required")
         db.execute(
             f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"

@@ -8,7 +8,6 @@ from fastapi import APIRouter, Depends, Query, Response
 
 from app.api.dependencies import IikoConnectionsDependency, SettingsDependency
 from app.api.routes.sync_jobs import authorize
-from app.integrations.iiko.errors import IikoError
 from app.schemas.iiko_events import (
     EventsCapture,
     EventsDayQuery,
@@ -41,8 +40,6 @@ async def get_events(
     response: Response,
 ):
     response.headers["Cache-Control"] = "no-store"
-    if source_id == "primary":
-        raise IikoError("events_rms_required", "Для событий выберите RMS.", status_code=422)
     connection = connections.get_connection(source_id)
     try:
         return await capture_events(connections, source_id, query.date)

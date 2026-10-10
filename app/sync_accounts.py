@@ -12,6 +12,7 @@ from app.core.config import Settings
 from app.integrations.iiko.dictionaries import DICTIONARIES
 from app.schemas.iiko_dictionaries import Account, DictionarySnapshot
 from app.services.iiko_dictionaries import summarize_dictionary
+from app.source_capabilities import require_primary_source
 from app.sync_dictionaries import capture_dictionary
 from app.sync_inventory import upsert_rows
 from app.sync_references import (
@@ -159,11 +160,7 @@ def synchronize_accounts(settings: Settings, api_url: str = collector_url()) -> 
         reference_lock(db),
     ):
         register_sources(db, [source])
-        if not db.execute(
-            f"SELECT 1 FROM {ANALYTICS_SCHEMA}.sources WHERE id=%s AND server_type='CHAIN'",
-            (source.id,),
-        ).fetchone():
-            raise SyncError("reference_sync_required")
+        require_primary_source(db, source.id, sources=configured_sources(settings))
         db.execute(
             f"UPDATE {ANALYTICS_SCHEMA}.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' WHERE job='accounts' AND status='running'"

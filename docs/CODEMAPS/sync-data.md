@@ -31,4 +31,24 @@ Tenant OLAP bootstrap (09.10.2026): `approved_templates` сначала ищет
 перед транзакцией `publish`. Расхождения reconciliation остаются в `checks` и
 `warning_days`, как в обычной истории, и не превращаются в точное совпадение.
 
+Standalone tenant (10.10.2026): `sync_references.reference_mode` принимает настоящий
+`STANDALONE_RMS` только как единственный `primary`; режим `CHAIN` с отдельными
+`REPLICATED_RMS` сохраняется. Тип читается из enum ответа `replication/serverType`
+(plain text, JSON string или строгий XML `serverType`), а не из URL. Standalone
+однократно загружает собственные departments/groups/stores и сопоставляет UUID
+групп с собственным подразделением; replication не запрашивается, её неприменимость
+отмечается явно без искусственных RAW. Миграция
+`20261010160000_tenant_standalone_primary.sql` разрешает только подтверждённую
+`primary → primary` связь с одинаковым departments snapshot и сохранённым типом.
+
+`source_capabilities.require_primary_source` проверяет standalone configured,
+verified_at, matched self-binding и отсутствие других настроенных источников
+в БД и текущем manifest. Эту проверку используют девять primary-загрузчиков
+и selector событий `sync_events.event_sources`. События standalone хранятся
+под настоящим `primary`; capture отдельно проверяет живой serverType и освобождает
+сессию. Resume истории использует обычные даты покрытия и не делает повторную
+выгрузку завершённого дня. Полная initial_sync, ACL и feature readiness не ослабляются.
+Тесты: `test_standalone_primary.py`, `test_inventory_sync.py`, tenant migration suite;
+реальная загрузка iiko подтверждается отдельно от синтетических HTTP/PG проверок.
+
 [CI](../../.github/workflows/ci.yml) запускает Ruff, изолированный PostgreSQL через [prepare_test_database.py](../../tools/prepare_test_database.py), pytest и smoke контейнера. [Dockerfile](../../Dockerfile) собирает публичный портал. Операционные точки входа и ограничения размещения — [operations.md](operations.md). Тесты синхронизации: [test_reference_sync.py](../../tests/test_reference_sync.py), [test_sales_import.py](../../tests/test_sales_import.py), [test_scheduler.py](../../tests/test_scheduler.py), [test_sync_jobs.py](../../tests/test_sync_jobs.py).
