@@ -378,8 +378,12 @@ platform membership and company version transactionally and takes the same advis
 lock as the worker. `create_app(provisioning_root=…, public_dns_targets=…)` requires
 trusted operator paths and public DNS answers; absent configuration stays explicit.
 Responses expose stage completion and safe failure code, never sockets or evidence.
-DNS records derive names from the registered company domain, with targets supplied
-by the operator; there are no invented defaults. `SaasProvisioning.tsx` shows stage
+DNS instructions expose one registered company-domain record from operator
+`public_dns_targets.edge`; no API subdomain is required. Legacy complete
+frontend/API manifests map their explicit API gateway target to edge, never the
+old static frontend address. Each status read recalculates these instructions,
+including existing plans; stored state/checks remain unchanged. There are no
+invented defaults. `SaasProvisioning.tsx` shows stage
 progress, retry and polling in the company card. Terminal readiness remains explicit.
 
 The executable `serve --runtime-config /private/operator.json` now performs the

@@ -30,7 +30,10 @@ def test_readiness_requires_current_full_evidence_and_hides_private_data():
     }
     result = service.present(company, row)
     assert result["ready"] is True
-    assert result["dns_records"][1]["name"] == "api.tenant.example.org"
+    assert result["dns_records"] == [
+        {"name": "tenant.example.org", "type": "A", "value": "8.8.8.8"},
+    ]
+    assert result["dns_configured"] is True
     assert "sensitive" not in str(result) and "/private" not in str(result)
     row["checks"]["payments"] = {"ok": True}
     assert service.present(company, row)["ready"] is False
@@ -130,3 +133,47 @@ def test_durable_requests_deduplicate_resume_and_reject_stale_version(control): 
             db.execute(
                 "SELECT pg_advisory_unlock(hashtextextended(%s,0))", ("provision:" + company["id"],)
             )
+
+
+@pytest.mark.parametrize("state", ["pending", "running", "failed", "ready"])
+def test_saved_plan_keeps_state_but_shows_current_single_edge_target(state):
+    from copy import deepcopy
+
+    company = {"id": str(uuid4()), "version": 3, "domain": "tenant.example.org"}
+    row = {
+        "configuration_version": 3,
+        "state": state,
+        "step": "dns_tls",
+        "checks": {step: {"ok": True, "evidence": "old check"} for step in STEPS},
+        "dns_records": [{"name": "api.tenant.example.org", "value": "old"}],
+    }
+    before = deepcopy(row)
+    service = ProvisioningRequests(
+        object(),
+        "/private/run",
+        {
+            "edge": {"type": "A", "value": "8.8.4.4"},
+        },
+    )
+    response = service.present(company, row)
+    assert response["state"] == state
+    assert response["dns_records"] == [
+        {"name": "tenant.example.org", "type": "A", "value": "8.8.4.4"},
+    ]
+    assert response["dns_configured"] is True
+    assert row == before
+    assert service.present({**company, "domain": None}, row)["dns_configured"] is False
+
+
+@pytest.mark.parametrize(
+    "targets",
+    [
+        {"frontend": {"type": "A", "value": "8.8.4.4"}},
+        {"api": {"type": "A", "value": "8.8.8.8"}},
+        {"edge": {"type": "A", "value": "127.0.0.1"}},
+        {"edge": {"type": "A", "value": "8.8.8.8"}, "frontend": {"type": "A", "value": "8.8.4.4"}},
+    ],
+)
+def test_incomplete_or_ambiguous_gateway_targets_fail_closed(targets):
+    with pytest.raises(ValueError):
+        public_targets(targets)

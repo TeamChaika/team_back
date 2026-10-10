@@ -70,6 +70,9 @@ Secure SameSite=Strict cookie остаётся host-only. Приватный chi
 в `tenant_payments/service.py` используют frontend origin. Payment domain получает
 только гостевые capability-маршруты; неизвестный домен fail-closed.
 См. [контракт](saas-admin.md#общий-frontend-и-api-на-домене-клиента-10102026).
+`provisioning_routes.py` показывает одну DNS-запись основного домена из operator
+`public_dns_targets.edge`; старый полный frontend/API manifest использует API
+адрес gateway. GET пересчитывает инструкции без изменения сохранённых статусов.
 DNS/TLS, выпуск edge/child и реальный браузерный вход подтверждаются отдельно.
 
 Прежний ограниченный runtime включает `app/web/{__init__,overview,coverage}.py` только как чистые helpers

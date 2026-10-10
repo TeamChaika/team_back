@@ -39,8 +39,8 @@ def create_deployment_app(
         raise ValueError("Private runtime root must be absolute")
     # Never infer a provider target from the API host, a company domain, or DNS.
     targets = public_targets(configuration.get("public_dns_targets"))
-    if set(targets) != {"frontend", "api"}:
-        raise ValueError("Explicit frontend and API public DNS targets are required")
+    if set(targets) != {"edge"}:
+        raise ValueError("Explicit public gateway DNS target is required")
 
     from .edge_peer import EdgePeer
 
@@ -97,8 +97,8 @@ def create_fleet_deployment_app(configuration, data_dir, dist_dir, origin, mode)
     if Path(template["registry_data_directory"]).resolve() != Path(data_dir).resolve():
         raise ValueError("Fleet registry directory must match --data-dir")
     targets = public_targets(template.get("public_dns_targets"))
-    if set(targets) != {"frontend", "api"}:
-        raise ValueError("Explicit frontend and API DNS targets required")
+    if set(targets) != {"edge"}:
+        raise ValueError("Explicit public gateway DNS target required")
     _, repo, accounts = build_fleet_verifier(configuration)
     try:
         repo.validate_ready()

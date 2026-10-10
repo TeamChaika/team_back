@@ -112,8 +112,14 @@ python -m app.saas_admin.runtime_operator --config /private/operator.json run-sc
 `--runtime-config` is explicit opt-in; without it the gateway stays limited. The
 factory validates registry directory identity, initializes CompanyAccounts using
 trusted identity targets, and installs runtime registry/provisioning endpoints.
-Operator JSON must have both exact `public_dns_targets.frontend` and `.api`, each
-`{type: A|AAAA|CNAME, value: ...}`. No DNS records or certificates are created by CLI.
+Operator JSON uses `public_dns_targets.edge` with
+`{type: A|AAAA|CNAME, value: ...}` pointing at the public gateway. Company cards
+show one record for the registered main domain, never a required API subdomain.
+Existing manifests with the complete `frontend`/`api` pair remain supported:
+`api` supplies the gateway target and the old static `frontend` target is ignored
+for the displayed DNS instructions. Partial/mixed configurations fail closed.
+Instructions are recalculated on each status read without changing saved job
+states or readiness evidence. No DNS records or certificates are created by CLI.
 
 Private optional settings use an explicit whitelist:
 - `document_settings`: worker_enabled, commercial_enabled, commercial_submit_enabled,

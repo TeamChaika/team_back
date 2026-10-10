@@ -22,10 +22,14 @@ class ProvisioningWrite(Model):
 
 
 def public_targets(targets):
-    """Validate operator-configured public DNS answers, never private runtime settings."""
+    """Normalize the explicit public gateway target; never infer it from DNS.
+
+    Legacy split-origin manifests keep working: their API target is the gateway,
+    while their old frontend target points at static hosting and must not be shown.
+    """
     result = {}
     for key, target in (targets or {}).items():
-        if key not in ("frontend", "api") or set(target) != {"type", "value"}:
+        if key not in ("edge", "frontend", "api") or set(target) != {"type", "value"}:
             raise ValueError("Invalid public DNS target")
         kind, value = target["type"], target["value"]
         if kind in ("A", "AAAA"):
@@ -41,7 +45,11 @@ def public_targets(targets):
         else:
             raise ValueError("Invalid public DNS record type")
         result[key] = {"type": kind, "value": value}
-    return result
+    if not result or set(result) == {"edge"}:
+        return result
+    if set(result) == {"frontend", "api"}:
+        return {"edge": result["api"]}
+    raise ValueError("Provide one edge target or the complete legacy frontend/API pair")
 
 
 class ProvisioningRequests:
@@ -74,8 +82,8 @@ class ProvisioningRequests:
         )
         domain = company.get("domain")
         records = [
-            {"name": domain if key == "frontend" else "api." + domain, **target}
-            for key, target in self.targets.items()
+            {"name": domain, **target}
+            for target in self.targets.values()
             if domain
         ]
         return {
@@ -100,7 +108,7 @@ class ProvisioningRequests:
                 for step in STEPS
             ],
             "dns_records": records,
-            "dns_configured": bool(domain and len(records) == 2),
+            "dns_configured": bool(domain and len(records) == 1),
             "terminals": {
                 "state": "not_verified",
                 "message": "Готовность терминалов ещё не подтверждена",

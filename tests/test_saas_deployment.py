@@ -160,8 +160,7 @@ def test_actual_central_assembly_has_accounts_dns_and_readiness_gate(deployment)
         assert value["configured"] is True
         assert value["ready"] is False
         assert value["dns_records"] == [
-            {"name": "tenant.example.org", "type": "CNAME", "value": "static.example.org"},
-            {"name": "api.tenant.example.org", "type": "A", "value": "8.8.8.8"},
+            {"name": "tenant.example.org", "type": "A", "value": "8.8.8.8"},
         ]
         headers = {"Host": "api.tenant.example.org", "Origin": "https://tenant.example.org"}
         context = client.get("/api/saas-context", headers=headers)
@@ -331,3 +330,17 @@ def test_fleet_factory_has_no_anchor_and_discovers_new_company(deployment, tmp_p
         )
         assert response.status_code == 200
         assert response.json()["full_dashboard_available"] is False
+
+
+def test_explicit_single_edge_manifest_is_supported(deployment):
+    _, _, _, config, manifest = deployment
+    config["public_dns_targets"] = {"edge": {"type": "A", "value": "8.8.4.4"}}
+    manifest.write_text(json.dumps(config))
+    with TestClient(build(deployment), base_url="https://rc.example.org") as client:
+        client.cookies.set("saas_owner_session", "owner-token")
+        reply = client.get(BASE + "/companies/" + config["company_id"] + "/provisioning")
+        assert reply.status_code == 200
+        assert reply.json()["dns_records"] == [
+            {"name": "tenant.example.org", "type": "A", "value": "8.8.4.4"},
+        ]
+        assert reply.json()["dns_configured"] is True
