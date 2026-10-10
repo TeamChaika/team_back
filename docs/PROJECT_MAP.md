@@ -12,7 +12,7 @@ SaaS-маршруты и runtime уточнены **2026-10-09**; полный t
 | Клиентский dashboard: свои Overview/Sales из Chain | [Контракт первого среза](tenant-dashboard.md) | `app/saas_admin/tenant_dashboard.py`, `dashboard_service.py`, `dashboard_transport.py`, `dashboard_reports.py`; свой membership/module gate, кэш 300с в процессе, чистые функции `app/web/overview.py`; без chaika SQL/глобальных credentials |
 | Отдельный кабинет владельца SaaS, local/production реестр компаний | [Контракт и запуск](saas-admin.md) | `app/saas_admin/server.py`, `config.py`, `postgres_backup.py`, `__main__.py`, `postgres_repository.py`, `supabase_auth.py`, `connections.py`, `connection_check.py`; существующий Supabase PostgreSQL/Auth, приватная схема restcontrol, локальный Fernet key, точный HTTPS origin, Secure cookies, приватный backup/restore, loopback или Unix socket; без импортов app.portal |
 | Настройки продавца, Telegram и ИИ компании | [Контракт](saas-admin.md#настройки-модулей-компании) | `app/saas_admin/company_module_settings.py`; owner GET/PATCH и company-admin GET/POST своего tenant; encrypted центральное хранение, write-only ключи, отдельная integrations_revision и автоматическое применение через integration_rollout/runtime_fleet |
-| Выпуск SaaS на постоянный сервер, TLS, резервные копии | [Изолированное развёртывание](../ops/saas-admin/README.md) | `requirements-saas-admin.txt`, `ops/saas-admin/restcontrol-saas.service`, `rc.caddy`, `restcontrol-backup.{service,timer}`; отдельный процесс на VPS 5.42.103.76 и PostgreSQL restcontrol; rc same-origin, tenant API с точным credentials CORS |
+| Выпуск SaaS на постоянный сервер, TLS, резервные копии | [Изолированное развёртывание](../ops/saas-admin/README.md) | `requirements-saas-admin.txt`, `ops/saas-admin/restcontrol-saas.service`, `rc.caddy`, `restcontrol-backup.{service,timer}`; отдельный процесс на VPS 5.42.103.76 и PostgreSQL restcontrol; rc и tenant same-origin /api; прежний API alias с точным credentials CORS |
 | Локальный администратор компании, временный пароль, изоляция tenant | [Контракт и запуск](saas-admin.md#доступ-администратора-компании-схема-3) | `app/saas_admin/pg_tenant_access.py`, `pg_auth.py`, `tenant_routes.py`; Supabase memberships, отдельные BFF сессии, общий React App на static App 254029 без бренда Чайки; Overview/Sales из своей Chain, остальные модули не готовы |
 | Вход, сессия, рестораны, разделы | [API и доступ](CODEMAPS/api-access.md) | [app/portal.py](../app/portal.py) |
 | Мой профиль, свой пароль, подключить Telegram | [API и доступ](CODEMAPS/api-access.md) | [app/web/profile.py](../app/web/profile.py), [app/documents/telegram_link.py](../app/documents/telegram_link.py) |
@@ -60,12 +60,17 @@ SaaS-маршруты и runtime уточнены **2026-10-09**; полный t
 
 ## Опубликованный ограниченный срез и новый полный runtime
 
-`iiko.tdpay.ru` после публикации возвращается на общий static App Timeweb `254029`;
-`api.iiko.tdpay.ru` обслуживается SaaS процессом на VPS `5.42.103.76`. Панель
-`rc.chaika.team`, PostgreSQL `restcontrol` и Supabase Auth сохраняются. Точные primary
-dashboard/technical host заданы через `VITE_PRIMARY_ORIGINS`. Tenant API проверяет
-реестр, точный frontend Origin и собственный slug; credentials CORS, host-only
-Secure SameSite=Strict cookie, CSRF. Нет wildcard или fallback к Чайке.
+Выпуск same-origin от 10.10.2026: tenant frontend использует свой `/api`, edge
+передаёт эти запросы в центральный gateway (`server.py` / `full_portal_proxy.py`).
+Общая frontend сборка остаётся в Apps; старые `api.<domain>` aliases поддерживаются.
+Gateway проверяет точный реестр Host/Origin, свой slug, membership и CSRF;
+Secure SameSite=Strict cookie остаётся host-only. Приватный child сохраняет
+канонический API Host: gateway нормализует его из проверенной компании.
+`platform_sso.py` принимает frontend origin и прежний API alias; новые callback URL
+в `tenant_payments/service.py` используют frontend origin. Payment domain получает
+только гостевые capability-маршруты; неизвестный домен fail-closed.
+См. [контракт](saas-admin.md#общий-frontend-и-api-на-домене-клиента-10102026).
+DNS/TLS, выпуск edge/child и реальный браузерный вход подтверждаются отдельно.
 
 Прежний ограниченный runtime включает `app/web/{__init__,overview,coverage}.py` только как чистые helpers
 и `defusedxml==0.7.1`; SQL-путь overview, `app.portal`, scheduler и documents worker

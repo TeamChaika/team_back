@@ -84,7 +84,7 @@ def test_context_uses_exact_registry_and_ignores_forwarded_host(client):
         "platform_origin": "https://rc.example.org",
         "company": {"id": "one", "name": "Client", "slug": "client"},
     }
-    assert client.app.state.repository.calls == ["tenant.example.org"]
+    assert client.app.state.repository.calls == ["api.tenant.example.org", "tenant.example.org"]
     cors(reply)
 
 
@@ -316,3 +316,71 @@ def test_unexpected_server_error_is_sanitized_and_keeps_cors(client, monkeypatch
     assert reply.status_code == 500
     assert "private connection details" not in reply.text
     cors(reply)
+
+
+def test_same_origin_login_cookie_session_and_csrf(client):
+    with TestClient(client.app, base_url=ORIGIN) as site:
+        context = site.get("/api/saas-context")
+        assert context.status_code == 200
+        assert "access-control-allow-origin" not in context.headers
+        reply = site.post(
+            BASE + "/auth/login",
+            headers={"Origin": ORIGIN},
+            json={"username": "admin", "password": "test-password"},
+        )
+        assert reply.status_code == 200
+        cookie = reply.headers["set-cookie"]
+        assert "Secure" in cookie and "HttpOnly" in cookie and "SameSite=strict" in cookie
+        assert "Domain=" not in cookie
+        assert site.get(BASE + "/auth/me").status_code == 200
+        assert site.post(BASE + "/auth/logout", headers={"Origin": ORIGIN}).status_code == 403
+        assert (
+            site.post(
+                BASE + "/auth/logout",
+                headers={
+                    "Origin": ORIGIN,
+                    "X-CSRF-Token": "test-csrf",
+                },
+            ).status_code
+            == 204
+        )
+
+
+@pytest.mark.parametrize(
+    "host,slug", [("tenant.example.org", "client"), ("other.example.org", "other")]
+)
+def test_same_origin_exact_host_and_namespace(client, host, slug):
+    with TestClient(client.app, base_url="https://" + host) as site:
+        context = site.get("/api/saas-context", headers={"X-Forwarded-Host": "unknown.example.org"})
+        assert context.status_code == 200
+        assert context.json()["company"]["slug"] == slug
+        assert site.get("/api/saas-tenant/foreign/auth/me").status_code == 403
+        assert site.get("/api/saas-admin/auth/me").status_code == 403
+        assert (
+            site.get(
+                "/api/saas-context", headers={"Origin": "https://evil.example.org"}
+            ).status_code
+            == 403
+        )
+        assert (
+            site.get("/api/saas-context", headers={"Sec-Fetch-Site": "cross-site"}).status_code
+            == 403
+        )
+        assert (
+            site.get(
+                "/api/saas-context",
+                headers={"Host": "unknown.example.org", "X-Forwarded-Host": host},
+            ).status_code
+            == 403
+        )
+
+
+def test_registered_site_starting_api_is_not_mistaken_for_alias(client):
+    client.app.state.repository.domains["api.custom.example.org"] = {
+        "id": "three",
+        "name": "API site",
+        "slug": "api-site",
+    }
+    response = client.get("https://api.custom.example.org/api/saas-context")
+    assert response.status_code == 200
+    assert response.json()["company"]["slug"] == "api-site"

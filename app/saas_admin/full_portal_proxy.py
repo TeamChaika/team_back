@@ -340,7 +340,7 @@ class FullPortalProxy:
         )
         headers = {
             "host": (
-                getattr(request.state, "saas_guest_api_origin", "").removeprefix("https://")
+                getattr(request.state, "saas_upstream_host", "")
                 or request.headers["host"]
             ),
             "origin": request.headers.get("origin", ""),

@@ -323,6 +323,7 @@ def test_webhook_requires_token_and_verified_money_atomic_monotonic(companies):
     deposit_id, guest = UUID(deposit["id"]), token(deposit)
     asyncio.run(service.prepare(deposit_id, guest, uuid4()))
     callback = urlsplit(provider.callback)
+    assert f"{callback.scheme}://{callback.netloc}" == store.runtime.frontend_origin
     attempt_id = UUID(callback.path.rsplit("/", 1)[1])
     callback_token = parse_qs(callback.query)["token"][0]
     with pytest.raises(HTTPException):
@@ -450,6 +451,7 @@ def test_shared_route_contract_and_capability_guest_never_reports_callback_paid(
     )
     assert prepared.status_code == 200 and prepared.json()["status"] == "pending"
     callback = urlsplit(provider.callback)
+    assert f"{callback.scheme}://{callback.netloc}" == store.runtime.frontend_origin
     notified = client.post(
         callback.path + "?" + callback.query,
         json={"operation_id": str(provider.operation_id), "status": "paid"},

@@ -1,0 +1,75 @@
+(restcontrol_static_app) {
+	reverse_proxy https://teamchaika-team-front-204d.twc1.net {
+		# Only static bytes cross this boundary, never browser identity,
+		# original route, capability query, or gateway capability.
+		header_up -Cookie
+		header_up -Authorization
+		header_up -Referer
+		header_up -Origin
+		header_up -X-CSRF-Token
+		header_up -Forwarded
+		header_up -X-RestControl-*
+		header_up -X-Original-*
+		header_up -X-Rewrite-*
+		header_up -X-Forwarded-For
+		header_up X-Forwarded-Host teamchaika-team-front-204d.twc1.net
+		header_up Host teamchaika-team-front-204d.twc1.net
+		header_down -Set-Cookie
+		transport http {
+			tls_server_name teamchaika-team-front-204d.twc1.net
+		}
+	}
+}
+
+# Import this snippet once; use it only in explicit, registry-approved site blocks.
+# RESTCONTROL_EDGE_TOKEN must match the gateway's private capability. Do not log
+# request headers or query strings. Existing rc and legacy API blocks stay separate.
+(restcontrol_tenant_site) {
+	encode zstd gzip
+	header {
+		-Server
+		Strict-Transport-Security "max-age=2592000"
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+	}
+
+	@api path /api /api/*
+	handle @api {
+		reverse_proxy unix//etc/caddy/restcontrol-run/saas.sock {
+			header_up Host {http.request.hostport}
+			header_up X-RestControl-Proxy-Token {$RESTCONTROL_EDGE_TOKEN}
+			header_up X-RestControl-Client-IP {remote_host}
+		}
+	}
+
+	handle {
+		# No non-API POST/body is forwarded to the static hosting service.
+		@not_read not method GET HEAD
+		route {
+			respond @not_read 405
+			# Vite emits flat, hashed files. Public filenames must be explicitly
+			# added here if a future release introduces others. Never match /p/*
+			# or /deposit/*: these carry guest capabilities.
+			@static_file {
+				path_regexp static_file ^/(assets/[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(js|css|woff2?|ttf|png|jpe?g|webp|svg|ico)|favicon\.ico|robots\.txt|manifest\.webmanifest)$
+			}
+			handle @static_file {
+				rewrite * {path}?
+				import restcontrol_static_app
+			}
+			handle {
+				rewrite * /index.html?
+				import restcontrol_static_app
+			}
+		}
+	}
+}
+
+# In the main Caddyfile, after importing this snippet, add only exact approved
+# domains. Examples (replace with actual active registry entries):
+# tenant.customer.example {
+#     import restcontrol_tenant_site
+# }
+# pay.customer.example {
+#     import restcontrol_tenant_site
+# }

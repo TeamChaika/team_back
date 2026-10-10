@@ -73,7 +73,7 @@ def test_guest_request_activation_cors_and_no_auth(tenant):
         headers={"Origin": "https://pay.customer.net"},
     )
     assert alias.status_code == 200
-    assert alias.json()["api_origin"] == "https://api.one.example.com"
+    assert alias.json()["api_origin"] == "https://api.pay.customer.net"
     for path in (
         "/api/me",
         "/api/saas-tenant/company-one/auth/me",

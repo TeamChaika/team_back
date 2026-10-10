@@ -282,3 +282,11 @@ def test_full_owner_scope_never_reads_or_creates_local_profile(sso):
         portal.actor_scope(actor, uuid4())
     with repo.connect() as db:
         assert db.execute("SELECT to_regclass('chaika.web_users') t").fetchone()["t"] is None
+
+
+def test_same_origin_exchange_preserves_delegation_and_replay_protection(sso):
+    token, session = exchange(sso, api_origin="https://tenant.example.org")
+    assert session["actor"]["kind"] == "platform_owner"
+    assert sso[0].tenant_session(token, "tenant")["actor"]["kind"] == "platform_owner"
+    with pytest.raises(Problem):
+        exchange(sso, api_origin="https://tenant.example.org")

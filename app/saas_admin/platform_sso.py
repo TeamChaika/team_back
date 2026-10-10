@@ -84,7 +84,7 @@ class PlatformSSO:
             if (
                 company["slug"] != slug
                 or frontend != frontend_origin
-                or api != api_origin
+                or api_origin not in (frontend, api)
                 or frontend != grant["frontend_origin"]
                 or api != grant["api_origin"]
                 or not secrets.compare_digest(grant["state"], state)

@@ -169,15 +169,21 @@ def create_app(
                 return error_response(403, "invalid_host", "Недопустимый адрес сервера")
             if not secure or not hasattr(repo, "company_for_domain"):
                 return error_response(403, "invalid_host", "Недопустимый адрес сервера")
-            # api.<registered domain> is an API-only sibling of the static frontend.
+            # Both the exact site host and its legacy API alias use the same registry.
             # The exact registry lookup is repeated on every request, including OPTIONS.
-            api_host = host.startswith("api.")
-            company_domain = host[4:] if api_host else host
+            company_domain = host
             matched = await run_in_threadpool(repo.company_for_domain, company_domain)
             payment_lookup = getattr(repo, "company_for_payment_domain", None)
             if matched is None and payment_lookup:
                 matched = await run_in_threadpool(payment_lookup, company_domain)
                 guest_surface = matched is not None
+            if matched is None and host.startswith("api."):
+                api_host = True
+                company_domain = host[4:]
+                matched = await run_in_threadpool(repo.company_for_domain, company_domain)
+                if matched is None and payment_lookup:
+                    matched = await run_in_threadpool(payment_lookup, company_domain)
+                    guest_surface = matched is not None
             if matched is None:
                 return error_response(403, "invalid_host", "Домен компании не подключён")
             company = {key: str(matched[key]) for key in ("id", "name", "slug")}
@@ -207,6 +213,19 @@ def create_app(
                     request.state.saas_cors_origin = expected_origin
                 if not guest_surface and request.headers.get("sec-fetch-site") == "cross-site":
                     return error_response(403, "invalid_origin", "Межсайтовый запрос запрещён")
+            # Same-origin fetches normally omit Origin on GET. If supplied, it
+            # must still match; forwarded host headers never select the company.
+            if not api_host:
+                callback = bool(
+                    full_proxy and public_route(request.url.path, request.method) == "callback"
+                )
+                if not callback and (
+                    request.headers.getlist("origin") not in ([], [expected_origin])
+                    or request.headers.get("sec-fetch-site") == "cross-site"
+                ):
+                    return error_response(403, "invalid_origin", "Недопустимый источник запроса")
+            # Private child runtimes retain their canonical host during migration.
+            request.state.saas_upstream_host = "api." + matched.get("domain", company_domain)
             path = request.url.path
             if guest_surface:
                 request.state.saas_guest_surface = True
@@ -222,14 +241,11 @@ def create_app(
                     "guest_reconcile",
                 }:
                     return error_response(403, "guest_boundary", "Доступна только гостевая оплата")
-                request.state.saas_guest_api_origin = "https://api." + matched.get(
-                    "domain", company_domain
-                )
+                request.state.saas_guest_api_origin = "https://" + host
                 request.state.saas_guest_payment_origin = expected_origin
             tenant_prefix = "/api/saas-tenant/" + company["slug"] + "/"
             full_api_path = bool(
                 full_proxy
-                and api_host
                 and path.startswith("/api/")
                 and not path.startswith(("/api/saas-", "/api/saas-admin"))
             )
@@ -282,7 +298,7 @@ def create_app(
                     return error_response(422, "body_too_large", "Слишком большой запрос")
                 chunks.append(chunk)
             request._body = b"".join(chunks)
-        if company and api_host and full_proxy and full_api_path:
+        if company and full_proxy and full_api_path:
             try:
                 return await full_proxy.forward(request, company)
             except Problem as exc:

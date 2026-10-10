@@ -419,3 +419,49 @@ def test_initial_sync_failure_records_only_job_identity_and_stops(monkeypatch, t
         {"module": "sync_references"} if timeout else {"module": "sync_references", "exit_code": 2}
     )
     assert "private-secret" not in str(failure.value.details)
+
+
+@pytest.mark.parametrize("wrong_company", [False, True])
+def test_public_dns_tls_acceptance_requires_same_origin_api(monkeypatch, wrong_company):
+    from types import SimpleNamespace
+
+    import httpx
+
+    company_id = uuid4()
+    operator = RuntimeOperator.__new__(RuntimeOperator)
+    operator.runtime = SimpleNamespace(
+        company_id=company_id,
+        frontend_origin="https://customer.example.org",
+        api_origin="https://api.customer.example.org",
+    )
+    urls = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["verify"] is True and kwargs["follow_redirects"] is False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, url, headers):
+            urls.append(url)
+            return httpx.Response(
+                200,
+                json={
+                    "company": {"id": str(uuid4() if wrong_company else company_id)},
+                },
+            )
+
+    monkeypatch.setattr("app.saas_admin.runtime_operator.httpx.Client", Client)
+    if wrong_company:
+        with pytest.raises(ValueError, match="another company"):
+            operator.dns_tls()
+    else:
+        assert operator.dns_tls()["ok"] is True
+    assert urls == [
+        "https://customer.example.org/",
+        "https://customer.example.org/api/saas-context",
+    ]

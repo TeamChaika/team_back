@@ -61,7 +61,7 @@ class TenantPayments:
         """Transport for an already committed attempt, under a fresh scoped authorizer."""
         attempt_id = UUID(attempt["id"])
         callback = (
-            f"{self.store.runtime.api_origin}/api/payment-callbacks/{attempt_id}?"
+            f"{self.store.runtime.frontend_origin}/api/payment-callbacks/{attempt_id}?"
             + urlencode({"token": context["callback"]})
         )
         try:

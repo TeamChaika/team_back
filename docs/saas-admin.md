@@ -249,34 +249,36 @@ Suspended/archived запрещают вход; смена slug/приостан
 на таком host доступны context и tenant API/entry соответствующего slug; owner API
 запрещён. Запись домена не подтверждает DNS/TLS или реальную browser проверку.
 
-### Общий frontend в Apps и отдельный API origin
+### Общий frontend и API на домене клиента (10.10.2026)
 
-Для customer domain `iiko.tdpay.ru` общий статический frontend Apps использует
-`https://api.iiko.tdpay.ru/api/saas-context` и свой
-`/api/saas-tenant/{slug}/…`. API обслуживает тот же SaaS BFF; отдельный сервер
-или база для клиента не создаётся. Конвенция для следующих компаний —
-`api.<company.domain>`. Префикс `api.` зарезервирован для API: hostname после
-удаления ровно одного префикса должен точно совпасть с domain в реестре.
-Проверка реестра повторяется на каждом запросе и preflight; archived/suspended
-или отключённый домен теряет доступ сразу. `X-Forwarded-Host` не выбирает компанию.
+Frontend обращается к `/api/saas-context`, `/api/saas-tenant/{slug}/…` и
+полному `/api/…` на своём HTTPS origin. Edge направляет `/api` в центральный
+SaaS gateway; frontend остаётся общей сборкой. Новому клиенту достаточно
+DNS/TLS своего домена. `runtime_operator.dns_tls` проверяет `/` и
+`/api/saas-context` этого origin с обязательным совпадением company ID.
+Настройку edge и браузерный вход проверяют отдельно от кода.
 
-На API-host разрешены только context и API своего slug, без platform API,
-чужого tenant или статического entry. Каждый запрос требует единственный точный
-`Origin: https://<company.domain>`; hostname/Origin с портом, другой Origin,
-несколько Origin и `Sec-Fetch-Site: cross-site` отклоняются. CORS разрешает
-только этот проверенный origin, credentials и `Vary: Origin`; эти заголовки
-добавляются также к ошибкам auth, validation и границы tenant для верного origin.
-OPTIONS не требует сессии, но проверяет домен, origin и namespace; разрешены
-только GET/POST и заголовки content-type/x-csrf-token. Прочие методы/заголовки
-preflight получают 403. Вся прежняя проверка membership и CSRF для действий
-остаётся обязательной.
+Gateway сначала ищет точный домен кабинета/гостевой оплаты в реестре и только
+затем пробует прежний `api.<company.domain>` alias. Каждый запрос заново проверяет
+реестр, свой slug, membership и готовность функции. Неизвестный/закрытый домен,
+platform API и чужой slug запрещены; `X-Forwarded-Host` не выбирает компанию.
+GET на своём origin может не содержать Origin; переданный Origin обязан точно
+совпадать. Запись требует Origin и прежний CSRF; cross-site запросы запрещены.
+Исключение — capability callback провайдера, который не является browser-запросом.
 
-Cookie сохраняет host-only, Secure, HttpOnly, SameSite=Strict и tenant path;
-Domain не расширяется. HTTPS frontend/API должны быть same-site поддоменами,
-чтобы браузер отправлял Strict cookie с `credentials: include`. Старый прямой
-company domain и общий `rc.chaika.team/tenant/{slug}` продолжают поддерживаться
-для перехода. Реальная работа требует отдельных DNS/TLS для frontend/API и
-браузерной проверки; локальные тесты не подтверждают выпуск или DNS.
+Старый API alias сохраняет точный credentials CORS и обязательный frontend Origin,
+чтобы старые сборки и ссылки продолжали работать. Гостевой CORS никогда не
+разрешает credentials. Cookie остаётся host-only Secure HttpOnly SameSite=Strict,
+Path=/; переход с API-host на сайт может потребовать повторного входа.
+PKCE SSO принимает собственный frontend origin и точный прежний API alias;
+сохранённые grants/handles и их parent-revocation сохраняются.
+
+Приватный child по-прежнему использует `runtime.api_origin` как внутренний
+TrustedHost. Gateway формирует этот Host только из проверенного домена компании,
+включая запросы отдельного гостевого домена. Это не требует внешнего DNS для
+внутреннего Host. Новые provider callbacks формируются через
+`runtime.frontend_origin/api/payment-callbacks`; старые callback aliases остаются.
+Для применения нового callback URL нужен выпуск child/payment worker кода.
 
 ### Подписка и возможности (локальная основа, 08.10.2026)
 
@@ -471,14 +473,14 @@ CSRF. Изменение или очистка сразу выключает п�
 `POST /api/saas-admin/companies/{id}/payment-domain/activate`: те же версии,
 `domain`, `dns_verified`, `tls_verified`, `frontend_verified`. Все три проверки
 оператор выполняет до запроса: контроль DNS, действительный HTTPS и привязка
-гостевого домена к общему frontend; отдельный `api.<гостевой домен>` направлен на
-центральный gateway с TLS. Это подтверждение оператора, не автоматическая проверка
+гостевого домена к общему frontend и маршрутизация его `/api` на
+центральный gateway с TLS. Отдельный API-поддомен больше не требуется. Это подтверждение оператора, не автоматическая проверка
 по произвольному URL и не флажки руководителя компании. Между доменами кабинетов,
 гостевыми доменами и их API-именами действуют проверки уникальности в обеих таблицах;
 домен панели платформы зарезервирован HTTP-сервисом.
 
 Гостевой context содержит `surface: payment`, `company` с часовым поясом,
-точный `payment_origin` и канонический `api_origin` кабинета. Запросы с гостевого
+точный `payment_origin` и `api_origin` текущего проверенного Host. Запросы с гостевого
 Origin/Host разрешены только к context и capability-маршрутам guest-deposits и
 guest-links; вход, восстановление пароля, профиль и dashboard запрещены. CORS
 публичных запросов не разрешает credentials; proxy не передаёт гостю сессию.

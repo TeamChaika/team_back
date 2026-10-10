@@ -631,7 +631,7 @@ class RuntimeOperator:
     def dns_tls(self, *_):
         for origin, path in [
             (self.runtime.frontend_origin, "/"),
-            (self.runtime.api_origin, "/api/saas-context"),
+            (self.runtime.frontend_origin, "/api/saas-context"),
         ]:
             with httpx.Client(
                 timeout=15, verify=True, trust_env=False, follow_redirects=False
@@ -645,7 +645,7 @@ class RuntimeOperator:
                     value = response.json()
                     if value.get("company", {}).get("id") != str(self.runtime.company_id):
                         raise ValueError("Public domain points to another company")
-        return {"ok": True, "evidence": "Both exact public HTTPS origins verified"}
+        return {"ok": True, "evidence": "Exact frontend HTTPS origin and same-origin API verified"}
 
     def runtime_health(self, *_):
         with httpx.Client(

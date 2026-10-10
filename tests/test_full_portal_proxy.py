@@ -723,3 +723,59 @@ def test_guest_shortlink_domain_has_public_only_proxy_and_no_cookie(gateway):
         headers={**headers, "Access-Control-Request-Method": "POST"},
     )
     assert denied.status_code == 403
+
+
+def test_same_origin_gateway_routes_two_companies_without_origin_header(gateway):
+    client, repo, registry, calls = gateway
+    for index in (1, 2):
+        reply = client.get(
+            f"https://client{index}.example.org/api/overview",
+            headers={
+                "Cookie": f"saas_tenant_session={UUID(int=index)}",
+                "X-Forwarded-Host": "api.foreign.example.org",
+            },
+        )
+        assert reply.status_code == 200
+        assert reply.json()["company"] == str(UUID(int=index))
+        assert calls[-1].headers["host"] == f"api.client{index}.example.org"
+        assert "access-control-allow-origin" not in reply.headers
+    assert (
+        client.get(
+            "https://client2.example.org/api/overview",
+            headers={
+                "Cookie": f"saas_tenant_session={UUID(int=1)}",
+            },
+        ).status_code
+        == 401
+    )
+
+
+def test_same_origin_payment_domain_only_public_routes(gateway):
+    client, repo, registry, calls = gateway
+    company = repo.companies["client1.example.org"]
+    repo.company_for_payment_domain = lambda host: (
+        {**company, "domain": "client1.example.org"} if host == "pay.customer.net" else None
+    )
+    context = client.get("https://pay.customer.net/api/saas-context")
+    assert context.status_code == 200
+    assert context.json()["api_origin"] == "https://pay.customer.net"
+    response = client.get(
+        "https://pay.customer.net/api/guest-links/" + "A" * 32,
+        headers={"Cookie": "saas_tenant_session=private"},
+    )
+    assert response.status_code == 200
+    assert calls[-1].headers["host"] == "api.client1.example.org"
+    assert calls[-1].headers["cookie"] == "saas_tenant_session="
+    for path in ("/api/me", "/api/saas-tenant/client1/auth/me", "/api/saas-admin/auth/me"):
+        assert client.get("https://pay.customer.net" + path).status_code == 403
+
+
+def test_same_origin_provider_callback_needs_no_browser_origin(gateway):
+    client, repo, registry, calls = gateway
+    response = client.post(
+        f"https://client1.example.org/api/payment-callbacks/{UUID(int=3)}?token=opaque",
+        json={},
+    )
+    assert response.status_code == 200
+    assert calls[-1].headers["host"] == "api.client1.example.org"
+    assert calls[-1].headers["cookie"] == "saas_tenant_session="
