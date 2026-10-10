@@ -7,6 +7,104 @@ import pytest
 from app.saas_admin.runtime_operator import RuntimeOperator, private_json
 
 
+@pytest.fixture
+def socket_operator(tmp_path):
+    from types import SimpleNamespace
+
+    operator = RuntimeOperator.__new__(RuntimeOperator)
+    operator.config = {"supervisor_managed": True}
+    operator.runtime = SimpleNamespace(
+        runtime_path=lambda name: tmp_path / name,
+        api_origin="https://api.customer.example.org",
+        company_id=uuid4(),
+        configuration_version=3,
+    )
+    return operator
+
+
+@pytest.mark.parametrize("supervised", [True, False])
+def test_launch_bound_socket_without_listener(socket_operator, supervised, monkeypatch):
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    import httpx
+
+    from app.saas_admin.provisioning import PendingCheck
+    from app.saas_admin.runtime_process_identity import bind_socket
+
+    operator = socket_operator
+    operator.config["supervisor_managed"] = supervised
+    monkeypatch.setattr(
+        "app.saas_admin.runtime_operator.subprocess.Popen",
+        lambda *args, **kwargs: pytest.fail("Must not spawn a duplicate process"),
+    )
+    # Real startup boundary: bind_socket publishes the pathname before Uvicorn listens.
+    with TemporaryDirectory(prefix="startup-", dir="/tmp") as directory:
+        operator.runtime.runtime_path = lambda name: Path(directory) / name
+        path = operator.runtime.runtime_path("collector.sock")
+        with bind_socket(path, 0o600):
+            inode = path.stat().st_ino
+            with pytest.raises(PendingCheck if supervised else httpx.ConnectError) as caught:
+                operator.launch("collector")
+            assert path.stat().st_ino == inode
+            if supervised:
+                assert caught.value.code == "runtime_process_pending"
+                assert caught.value.details == {"process": "collector"}
+
+
+@pytest.mark.parametrize("supervised", [True, False])
+def test_launch_health_timeout_only_pending_when_supervised(
+    socket_operator, monkeypatch, supervised
+):
+    import httpx
+
+    from app.saas_admin.provisioning import PendingCheck
+
+    socket_operator.config["supervisor_managed"] = supervised
+    socket_operator.runtime.runtime_path("collector.sock").touch()
+
+    def timeout(request):
+        raise httpx.ReadTimeout("synthetic timeout", request=request)
+
+    monkeypatch.setattr(httpx, "HTTPTransport", lambda **_: httpx.MockTransport(timeout))
+    with pytest.raises(PendingCheck if supervised else httpx.ReadTimeout):
+        socket_operator.launch("collector")
+
+
+@pytest.mark.parametrize(
+    "response_kind", ["own", "foreign_company", "old_version", "non200", "malformed"]
+)
+def test_launch_requires_exact_healthy_socket_identity(socket_operator, monkeypatch, response_kind):
+    import httpx
+
+    socket_operator.runtime.runtime_path("collector.sock").touch()
+    body = {
+        "company_id": str(socket_operator.runtime.company_id),
+        "configuration_version": socket_operator.runtime.configuration_version,
+    }
+    if response_kind == "foreign_company":
+        body["company_id"] = str(uuid4())
+    if response_kind == "old_version":
+        body["configuration_version"] -= 1
+    response = (
+        httpx.Response(200, text="invalid json")
+        if response_kind == "malformed"
+        else httpx.Response(503 if response_kind == "non200" else 200, json=body)
+    )
+    transport = httpx.MockTransport(lambda _: response)
+    monkeypatch.setattr(httpx, "HTTPTransport", lambda **_: transport)
+    if response_kind == "own":
+        socket_operator.launch("collector")
+    elif response_kind == "malformed":
+        import json
+
+        with pytest.raises(json.JSONDecodeError):
+            socket_operator.launch("collector")
+    else:
+        with pytest.raises(ValueError, match="configured runtime"):
+            socket_operator.launch("collector")
+
+
 @pytest.mark.parametrize("domain", ["customer.example.org", "brie-bali.chaika.team"])
 def test_render_uses_saved_own_credentials_and_scoped_roles(tmp_path, monkeypatch, domain):
     company_id = uuid4()

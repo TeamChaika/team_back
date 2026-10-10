@@ -83,8 +83,11 @@ DNS/TLS, выпуск edge/child и реальный браузерный вхо
 
 Новый полный runtime запускает существующий `app.portal` через
 `app.tenancy.bootstrap` и приватный gateway. Автоматическая подготовка:
-`runtime_fleet.py` → `fleet_discovery.py` → `runtime_operator.py`. Этап identity
-через `runtime_identity.py` проецирует только доказанного первоначального company_admin
+`runtime_fleet.py` → `fleet_discovery.py` → `runtime_operator.py`.
+Проверка сокета supervised runtime переводит ConnectError/timeout в
+`runtime_process_pending` для существующего повтора fleet; HTTP-ответ и точная
+company/version по-прежнему обязательны, неверная принадлежность — жёсткая ошибка.
+Этап identity через `runtime_identity.py` проецирует только доказанного первоначального company_admin
 в новый собственный профиль (Auth/journal/UUID/email/marker, без Auth create/reset и без
 platform-owner профиля; повтор не меняет ACL/пароль). Fingerprint tenant migrations
 сбрасывает только устаревший cache этапа migrations при обновлении manifest. Operator

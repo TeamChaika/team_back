@@ -369,10 +369,17 @@ class RuntimeOperator:
                 timeout=5,
                 trust_env=False,
             ) as client:
-                response = client.get(
-                    "/_runtime/health",
-                    headers={"host": urlsplit(self.runtime.api_origin).netloc},
-                )
+                try:
+                    response = client.get(
+                        "/_runtime/health",
+                        headers={"host": urlsplit(self.runtime.api_origin).netloc},
+                    )
+                except (httpx.ConnectError, httpx.TimeoutException):
+                    if self.config.get("supervisor_managed"):
+                        # Binding publishes the socket before the child starts listening.
+                        # Let the fleet retry; never replace or adopt an unverified socket.
+                        raise PendingCheck("runtime_process_pending", {"process": role}) from None
+                    raise
                 if (
                     response.status_code != 200
                     or response.json().get("company_id") != str(self.runtime.company_id)
@@ -382,8 +389,6 @@ class RuntimeOperator:
                     raise ValueError("Existing socket does not match the configured runtime")
             return
         if self.config.get("supervisor_managed"):
-            from .provisioning import PendingCheck
-
             raise PendingCheck("runtime_process_pending", {"process": role})
         command, environment = self.foreground_command(role)
         # No stdout or HTTP logs containing credentials or capabilities are retained.

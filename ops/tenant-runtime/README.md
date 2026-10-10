@@ -222,6 +222,11 @@ if the parent has expired, the owner retries from the panel without exporting to
 
 Fleet work prepares pending UUID credentials, supervises each company's portal,
 collector, document worker and scheduler, and resumes process-start/heartbeat waits.
+If a supervised socket is bound but its health request cannot connect or times out,
+the operator records `runtime_process_pending`; the existing fleet retry waits
+30 seconds initially and 60 seconds between later attempts. Each health request
+keeps its 5-second timeout. An HTTP error, malformed response or company/version
+mismatch remains a hard failure; no socket is removed or process duplicated.
 It refreshes module-derived settings without rotating passwords and stops its own
 process groups on archive/version replacement (including in-progress sync children).
 Stale sockets are removed only after refusal or confirmed owned process shutdown;
