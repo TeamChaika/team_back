@@ -508,9 +508,16 @@ def test_initial_history_plan_upgrade_reruns_old_proof_only_at_same_company_vers
 
 
 @pytest.mark.parametrize("fail_first", [False, True])
-@pytest.mark.parametrize("append_count", [1, 2])
+@pytest.mark.parametrize(
+    ("maintenance", "append_count"),
+    [
+        ("20261010120000_tenant_guest_links.sql", 1),
+        ("20261010120000_tenant_guest_links.sql", 2),
+        ("20261016123000_tenant_operation_settings.sql", 1),
+    ],
+)
 def test_additive_migration_refresh_preserves_partial_acceptance(
-    control, fail_first, append_count, monkeypatch
+    control, fail_first, maintenance, append_count, monkeypatch
 ):
     import hashlib
     import json
@@ -519,17 +526,9 @@ def test_additive_migration_refresh_preserves_partial_acceptance(
 
     from app.tenancy.migrations import load_migrations
 
-    # Exercise the approved historical maintenance release, not unrelated later
-    # migrations that deliberately require the ordinary provisioning checks.
+    # Each approved release must match an intact prior manifest prefix.
     manifest = load_migrations()
-    end = (
-        next(
-            i
-            for i, item in enumerate(manifest)
-            if item.name == "20261010120000_tenant_guest_links.sql"
-        )
-        + 1
-    )
+    end = next(i for i, item in enumerate(manifest) if item.name == maintenance) + 1
     monkeypatch.setattr("app.tenancy.migrations.load_migrations", lambda: manifest[:end])
     company = {"id": str(uuid4()), "version": 7, "status": "active"}
     entries = [(item.name, item.area, item.checksum) for item in manifest[:end]]
@@ -547,6 +546,7 @@ def test_additive_migration_refresh_preserves_partial_acceptance(
     checks = {
         "migrations": {"ok": True, "evidence": {"manifest_fingerprint": previous}},
         "modules": modules,
+        "initial_sync": {"ok": True, "evidence": history_evidence()},
         "payments": {"ok": False, "evidence": {"terminals": []}},
     }
     calls = []
@@ -591,6 +591,7 @@ def test_additive_migration_refresh_preserves_partial_acceptance(
     assert row["step"] == "modules"
     assert row["error_code"] == "module_configuration_required"
     assert row["checks"]["modules"] == modules
+    assert row["checks"]["initial_sync"] == checks["initial_sync"]
     assert row["checks"]["payments"] == checks["payments"]
     assert "migration_refresh" not in row["checks"]
     assert (
@@ -682,3 +683,34 @@ def test_interrupted_bot_refresh_cannot_skip_acceptance_for_new_release(
     assert "migration_refresh" not in row["checks"]
     assert row["checks"]["modules"]["code"] == "fresh_acceptance_required"
     assert row["checks"]["modules"]["evidence"] == {"fresh": True}
+
+
+@pytest.mark.parametrize("change", ["edited_baseline", "unknown_append"])
+def test_operation_settings_maintenance_requires_unchanged_prefix_and_approved_tail(
+    monkeypatch, change
+):
+    import hashlib
+    import json
+    from dataclasses import replace
+
+    from app.saas_admin.provisioning import additive_migration_refresh
+    from app.tenancy.migrations import Migration, load_migrations
+
+    migrations = load_migrations()
+    # The operation-settings release alone is accepted after the exact previous baseline.
+    entries = [(item.name, item.area, item.checksum) for item in migrations]
+    fingerprint = hashlib.sha256(json.dumps(entries[:-1]).encode()).hexdigest()
+    checks = {"migrations": {"ok": True, "evidence": {"manifest_fingerprint": fingerprint}}}
+    assert additive_migration_refresh(checks)
+    if change == "edited_baseline":
+        modified = (
+            replace(migrations[0], template=migrations[0].template + "\n-- changed"),
+            *migrations[1:],
+        )
+    else:
+        modified = (
+            *migrations,
+            Migration("20261016130000_unreviewed.sql", "analytics", "SELECT 1"),
+        )
+    monkeypatch.setattr("app.tenancy.migrations.load_migrations", lambda: modified)
+    assert not additive_migration_refresh(checks)

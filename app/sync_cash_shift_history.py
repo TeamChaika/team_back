@@ -17,6 +17,7 @@ from app.schemas.sync_jobs import CashShiftSyncQuery
 from app.services.sync_jobs import write_json
 from app.sync_cash_shifts import synchronize_cash_shifts
 from app.sync_references import SyncError, configured_sources, reference_lock, register_sources
+from app.sync_scope import load_scope, skipped
 from app.tenancy.config import load_runtime
 from app.tenancy.connection import tenant_connect
 from app.tenancy.io import runtime_directory, validate_runtime_path
@@ -99,6 +100,10 @@ def run_history(days, coverage, sync_window, checkpoint, stop: Event):
                 on_day_saved=saved,
                 stop=stop,
             )
+            if result.get("skipped"):
+                report.update(status="succeeded", skipped=True, reason=result["reason"])
+                save()
+                return report
             if not result["counts"]["logout_ok"]:
                 raise SyncError("cash_shifts_logout_failed")
         if len(coverage) != len(days):
@@ -133,6 +138,11 @@ def synchronize_history(settings, start, end, stop, directory=DIRECTORY, *, incl
             ) as db,
             reference_lock(db),
         ):
+            scope = load_scope(db)
+            if scope.empty:
+                result = skipped(scope)
+                write_json(directory / "cash-shifts-latest.json", result)
+                return result
             register_sources(db, [source])
             rows = db.execute(
                 "SELECT d.open_day,d.row_count,d.observed_at,"
@@ -142,6 +152,7 @@ def synchronize_history(settings, start, end, stop, directory=DIRECTORY, *, incl
                 f"JOIN {ANALYTICS_SCHEMA}.raw_snapshots s ON s.id=d.last_snapshot_id "
                 f"JOIN {ANALYTICS_SCHEMA}.sync_runs r ON r.id=s.run_id "
                 "WHERE d.source_id=%s AND d.open_day BETWEEN %s AND %s "
+                "AND coalesce(r.counts->>'partial_scope','false')='false' "
                 "AND (r.status='succeeded' OR "
                 "(r.status='failed' AND r.counts->>'logout_ok'='true'))",
                 (source.id, start, end),

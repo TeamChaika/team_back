@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -19,6 +20,7 @@ from app.sync_sales_history import approved_templates, collect_day, error_code
 from app.tenancy.connection import tenant_connect
 from app.tenancy.io import collector_post, temporary_directory
 from app.web.coverage import ZONE
+from app.web.sync_policy import SyncPolicy, read_policy
 from app.web.warehouse_analytics import require_department_report
 
 log = logging.getLogger(__name__)
@@ -37,7 +39,16 @@ def fetch_today(settings):
         ) as db,
         reference_lock(db),
     ):
+        policy = read_policy(db)
+        policy.require(policy.departments or [])
         template_id, templates = approved_templates(db)
+        if policy.departments is not None:
+            templates = deepcopy(templates)
+            for template in templates.values():
+                template["filters"]["Department.Id"] = {
+                    "filterType": "IncludeValues",
+                    "values": sorted(policy.departments),
+                }
         # Workers use this private collector too. Drop its idle session before taking a licence.
         try:
             response = collector_post(
@@ -60,11 +71,20 @@ def fetch_today(settings):
                 )
 
             asyncio.run(collect())
-            return parse_review(root, source.fingerprint, allow_discrepancies=True)
+            bundle = parse_review(root, source.fingerprint, allow_discrepancies=True)
+            bundle["sync_policy_key"] = policy.key
+            if policy.departments is not None:
+                for report in bundle["reports"].values():
+                    report["rows"] = [
+                        row for row in report["rows"] if policy.permits([row["Department.Id"]])
+                    ]
+            return bundle
 
 
 class LiveSales:
-    def __init__(self, settings, *, fetch=fetch_today, clock=monotonic):
+    def __init__(self, settings, *, fetch=fetch_today, clock=monotonic, policy_reader=None):
+        self.policy_reader = policy_reader or SyncPolicy
+        self.policy_key = None
         self.settings, self.fetch, self.clock = settings, fetch, clock
         self.lock = Lock()
         self.bundle = None
@@ -72,10 +92,20 @@ class LiveSales:
         self.last_success = 0.0
         self.stale = False
 
-    def get(self):
+    def get(self, scope=None):
+        policy = self.policy_reader()
+        if scope is not None and (
+            not policy.permits(scope.ids) or policy.departments == frozenset()
+        ):
+            return None, {"source": "stored", "status": "sync_paused", "stale": True}
+        policy.require(policy.departments or [])
         today = datetime.now(ZONE).date().isoformat()
         with self.lock:
-            valid_day = self.bundle and self.bundle["manifest"]["business_date"] == today
+            valid_day = (
+                self.bundle
+                and self.bundle["manifest"]["business_date"] == today
+                and self.policy_key == policy.key
+            )
             if valid_day and self.clock() < self.expires:
                 return self.bundle, self.metadata(stale=self.stale)
             try:
@@ -83,6 +113,15 @@ class LiveSales:
                 if bundle["manifest"]["business_date"] != today:
                     raise ValueError("live_sales_day_changed")
             except Exception as error:
+                current_policy = self.policy_reader()
+                if current_policy.key != policy.key:
+                    if scope is not None:
+                        return None, {"source": "stored", "status": "sync_paused", "stale": True}
+                    raise HTTPException(
+                        423, "Настройки синхронизации изменились. Обновите отчёт."
+                    ) from None
+                if isinstance(error, HTTPException) and error.status_code == 423:
+                    raise
                 log.warning("Live sales refresh unavailable: %s", error_code(error))
                 if valid_day and self.clock() - self.last_success < 1200:
                     # Don't turn yesterday or an unbounded old response into live data.
@@ -92,6 +131,12 @@ class LiveSales:
                 raise HTTPException(
                     503, "Сегодняшние данные iiko пока недоступны. Повторите запрос через минуту."
                 ) from None
+            if (
+                bundle.get("sync_policy_key", policy.key) != policy.key
+                or self.policy_reader().key != policy.key
+            ):
+                raise HTTPException(423, "Настройки синхронизации изменились. Обновите отчёт.")
+            self.policy_key = policy.key
             self.bundle = bundle
             self.last_success = self.clock()
             self.stale = False

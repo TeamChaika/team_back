@@ -19,6 +19,7 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.sync_scope import load_scope, skipped, source_enabled
 from app.tenancy.connection import tenant_connect
 from app.tenancy.io import collector_client, collector_url, runtime_directory
 from app.tenancy.sql import ANALYTICS_SCHEMA
@@ -79,6 +80,9 @@ def synchronize_events(
         ) as db,
         reference_lock(db),
     ):
+        scope = load_scope(db)
+        if scope.empty or not source_enabled(db, source.id, scope):
+            return skipped(scope)
         register_sources(db, [source])
         if source not in event_sources(db, sources, requested_source_id=query.source_id):
             raise SyncError("events_rms_mapping_required")

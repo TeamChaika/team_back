@@ -84,6 +84,12 @@ def has_store_scope(store_id, parents, allowed):
 
 
 class Repository:
+    def sync_policy(self):
+        from app.web.sync_policy import read_policy
+
+        with self.connection() as db:
+            return read_policy(db)
+
     def indicator_filters(self, scope):
         with self.connection(repeatable=True) as db:
             return serial(read_filters(db, scope))
@@ -93,7 +99,7 @@ class Repository:
         self.runtime = load_runtime()
         from app.web.warehouse_sales import WarehouseSales
 
-        self.warehouse_sales = WarehouseSales(settings)
+        self.warehouse_sales = WarehouseSales(settings, policy_reader=self.sync_policy)
         self._pool = ConnectionPool(
             settings.database_url.get_secret_value(),
             kwargs={
@@ -439,7 +445,10 @@ class Repository:
                 ).fetchall()
                 loaded_dates = [row["business_date"] for row in coverage]
                 result = db.execute(
-                    "SELECT d.business_date,r.id AS report_id,r.observed_at,s.reviewed,r.request, "
+                    "SELECT d.business_date,r.id AS report_id,"
+                    "coalesce(origin.observed_at,r.observed_at) "
+                    "AS observed_at,x.origin_report_id,(x.origin_report_id IS NOT NULL) AS frozen,"
+                    "s.reviewed,r.request, "
                     "x.ordinal,x.department_id,n.name AS department,"
                     "x.revenue,x.cost,x.checks,x.guests,"
                     "x.discount,x.return_sum,x.quantity,x.dimensions "
@@ -447,6 +456,7 @@ class Repository:
                     "s.id=d.current_set_id "
                     f"JOIN {DB}.sales_reports r ON r.set_id=s.id JOIN "
                     f"{DB}.sales_report_rows x ON x.report_id=r.id "
+                    f"LEFT JOIN {DB}.sales_reports origin ON origin.id=x.origin_report_id "
                     f"LEFT JOIN {DB}.corporate_nodes n ON n.source_id=d.source_id AND "
                     "n.id=x.department_id "
                     "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s "
@@ -755,7 +765,8 @@ class Repository:
                 "t.sales_cash,t.sales_card,t.sales_credit,t.session_start_cash,t.sum_writeoff_orders,"
                 "t.pay_in,t.pay_out,t.pay_income,t.cash_remain,t.cash_diff,t.mapping_state,"
                 "m.name AS manager,e.name AS cashier,t.manager_id,t.responsible_user_id,"
-                "t.department_id,t.group_id,t.point_of_sale_id,t.groups_snapshot_id,t.last_seen_at"
+                "t.department_id,t.group_id,t.point_of_sale_id,t.groups_snapshot_id,t.last_seen_at,"
+                "t.origin_snapshot_id,(t.origin_snapshot_id IS NOT NULL) AS frozen"
             )
             columns = [
                 ("title", "Смена"),

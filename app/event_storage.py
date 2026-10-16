@@ -15,6 +15,7 @@ from psycopg.types.json import Jsonb
 from app.schemas.iiko_events import EventsCapture
 from app.services.iiko_events import MAX_EVENT_BYTES, event_content_hash, read_events
 from app.sync_references import Source, SyncError, append_snapshot
+from app.sync_scope import load_scope, source_enabled
 from app.tenancy.config import load_runtime
 from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 
@@ -169,6 +170,8 @@ def rebuild_links(db, source_id: str) -> dict:
 
 
 def publish_events(db, run_id: UUID, snapshot: dict, types: dict) -> dict:
+    if not source_enabled(db, snapshot["source_id"]):
+        return {"events": 0, "skipped": True, **load_scope(db).metadata()}
     source, observed, day = snapshot["source_id"], snapshot["observed_at"], snapshot["day"]
     records, business_raw, redacted = read_events(snapshot["raw"], day)
     if len(records) != snapshot["expected_total"]:

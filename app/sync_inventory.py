@@ -35,6 +35,7 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.sync_scope import filter_documents, load_scope, skipped
 from app.tenancy.config import load_runtime
 from app.tenancy.connection import tenant_connect
 from app.tenancy.io import collector_client, collector_url, runtime_directory, validate_runtime_path
@@ -186,7 +187,7 @@ def upsert_rows(db, table: str, columns: list[str], keys: list[str], rows) -> in
 
 def publish_writeoffs(db, snapshot: dict, day: date) -> None:
     """Publish one writeoff day inside the caller's RAW/checkpoint transaction."""
-    parents = snapshot["payload"]["items"]
+    parents = filter_documents(db, snapshot)
     source_id = snapshot["source_id"]
 
     def headers():
@@ -262,7 +263,19 @@ def publish_inventory(db, snapshots: dict, day: date) -> dict:
         raise SyncError("inventory_incomplete")
     if not snapshots["products"]["payload"]["items"]:
         raise SyncError("empty_product_catalog")
-    counts = {}
+    snapshots = {
+        key: {
+            **value,
+            "payload": {
+                **value["payload"],
+                "items": filter_documents(db, {**value, "resource": key, "source_id": "primary"}),
+            },
+        }
+        if key in {"incoming_invoices", "writeoffs"}
+        else value
+        for key, value in snapshots.items()
+    }
+    counts = load_scope(db).metadata()
     meta_columns = ["source_id", "first_seen_at", "last_seen_at", "last_snapshot_id", "details"]
     with db.transaction():
         for resource, table, fields in [
@@ -489,6 +502,12 @@ def synchronize_inventory(
         ) as db,
         reference_lock(db),
     ):
+        scope = load_scope(db)
+        if scope.empty:
+            result = skipped(scope)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(result))
+            return result
         register_sources(db, [source])
         require_primary_source(db, "primary", sources=configured_sources(settings))
         db.execute(

@@ -27,6 +27,7 @@ from app.tenancy.connection import tenant_connect
 from app.tenancy.io import collector_post, runtime_directory
 from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 from app.web.repository import serial
+from app.web.sync_policy import read_policy
 
 PAGE_SIZE = 100
 MAX_ROWS = 10000
@@ -210,6 +211,7 @@ def load_capture(db, settings, context, order_id=None):
         saved = stored_capture(db, key)
         if saved:
             return saved
+        read_policy(db).require([context["department_id"]])
         if context["fingerprint"] != configured_sources(settings)[0].fingerprint:
             raise SyncJobError("drilldown_source_mismatch", "Настройки источника изменились.")
         with httpx.Client(timeout=30, trust_env=False) as http:

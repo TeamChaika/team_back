@@ -16,6 +16,11 @@ from starlette.concurrency import run_in_threadpool
 from app.tenancy.actor import ActorContext
 from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 from app.tenancy.sql import PAYMENTS_SCHEMA as PAYMENTS
+from app.web.operation_settings import (
+    OperationSettingsWrite,
+    read_operation_settings,
+    save_operation_settings,
+)
 from app.web.permissions import ANALYTICS_SECTIONS, SECTIONS, require_admin
 from app.web.repository import Scope, serial
 
@@ -571,6 +576,14 @@ def create_admin_router(access, repo, web, store=None):
         return scope.actor if repo.runtime.mode == "tenant" else scope.user["id"]
 
     Admin = Annotated[UUID | ActorContext, Depends(admin)]
+
+    @router.get("/operation-settings")
+    def operation_settings(actor: Admin):
+        return read_operation_settings(store)
+
+    @router.post("/operation-settings")
+    def update_operation_settings(payload: OperationSettingsWrite, actor: Admin):
+        return save_operation_settings(store, actor, payload)
 
     @router.get("/accounts")
     def accounts(actor: Admin):

@@ -4,12 +4,41 @@ from fastapi import HTTPException
 
 from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 
-LATEST = f"""WITH latest AS (
+LATEST = f"""WITH RECURSIVE policy AS (
+    SELECT coalesce((SELECT settings->'sync' FROM {DB}.operation_settings WHERE singleton),
+                    '{{"mode":"all","department_ids":[]}}'::jsonb) AS selection
+), enabled(id) AS (
+    SELECT n.id FROM {DB}.corporate_nodes n,policy p WHERE n.source_id='primary'
+      AND p.selection->'department_ids' ? n.id::text
+    UNION
+    SELECT n.id FROM {DB}.corporate_nodes n JOIN enabled e ON n.parent_id=e.id
+      WHERE n.source_id='primary'
+), latest_global AS (
     SELECT source_id,last_snapshot_id,accounting_timestamp,last_seen_at
     FROM {DB}.store_balance_reports WHERE source_id='primary'
     ORDER BY accounting_timestamp DESC LIMIT 1
+), warehouses AS (
+    SELECT s.id, (p.selection->>'mode'='all' OR EXISTS(
+       SELECT 1 FROM enabled e WHERE e.id=s.parent_id)) AS active
+    FROM {DB}.stores s CROSS JOIN policy p WHERE s.source_id='primary'
+    UNION
+    SELECT DISTINCT i.store_id,p.selection->>'mode'='all'
+    FROM {DB}.store_balance_items i CROSS JOIN policy p
+    WHERE NOT EXISTS(SELECT 1 FROM {DB}.stores s WHERE s.source_id='primary' AND s.id=i.store_id)
+ ), latest AS (
+    SELECT chosen.*,w.id AS store_id,
+           (NOT w.active OR chosen.last_snapshot_id IS DISTINCT FROM
+             (SELECT last_snapshot_id FROM latest_global)) AS frozen
+    FROM warehouses w CROSS JOIN LATERAL (
+        SELECT r.source_id,r.last_snapshot_id,r.accounting_timestamp,r.last_seen_at
+        FROM {DB}.store_balance_reports r WHERE r.source_id='primary'
+          AND (r.covered_store_ids IS NULL OR w.id=ANY(r.covered_store_ids))
+        ORDER BY r.accounting_timestamp DESC LIMIT 1
+    ) chosen
 ) """
 BASE = f"""latest r JOIN {DB}.store_balance_items i ON i.snapshot_id=r.last_snapshot_id
+    AND i.store_id=r.store_id
+    LEFT JOIN {DB}.raw_snapshots origin ON origin.id=i.origin_snapshot_id
     LEFT JOIN {DB}.products p ON p.source_id=r.source_id AND p.id=i.product_id
     LEFT JOIN {DB}.stores s ON s.source_id=r.source_id AND s.id=i.store_id
     LEFT JOIN {DB}.measure_units u ON u.source_id=p.source_id AND u.id=p.main_unit_id"""
@@ -44,7 +73,8 @@ def summary_queries(db, scope):
     stats = db.execute(
         LATEST + "SELECT i.store_id AS id,count(*) AS row_count,"
         "count(DISTINCT i.product_id) AS product_count,sum(i.sum) AS value "
-        f"FROM latest r JOIN {DB}.store_balance_items i ON i.snapshot_id=r.last_snapshot_id "
+        f"FROM latest r JOIN {DB}.store_balance_items i ON "
+        f"i.snapshot_id=r.last_snapshot_id AND i.store_id=r.store_id "
         "WHERE " + where + " GROUP BY i.store_id",
         params,
     )
@@ -104,7 +134,8 @@ def read_balances(
         LATEST
         + "SELECT i.product_id AS id,r.source_id,COALESCE(p.name,i.product_id::text) AS title,"
         "i.store_id,COALESCE(s.name,i.store_id::text) AS store,u.name AS unit,"
-        "i.amount,i.sum,r.accounting_timestamp FROM "
+        "i.amount,i.sum,r.accounting_timestamp,coalesce(origin.observed_at,r.last_seen_at) "
+        "AS last_synced_at,(r.frozen OR i.origin_snapshot_id IS NOT NULL) AS frozen FROM "
         + BASE
         + " WHERE "
         + where
@@ -112,7 +143,10 @@ def read_balances(
         "s.name NULLS LAST,p.name NULLS LAST,i.line_num LIMIT 50 OFFSET %s",
         [*params, offset],
     )
-    stamp = db.execute(LATEST + "SELECT accounting_timestamp,last_seen_at FROM latest")
+    stamp = db.execute(
+        LATEST + "SELECT max(accounting_timestamp) AS accounting_timestamp,"
+        "max(last_seen_at) AS last_seen_at,bool_or(frozen) AS partial_scope FROM latest"
+    )
     stats, stores, nodes = summary_queries(db, scope)
     totals, rows, stamp = totals.fetchone(), rows.fetchall(), stamp.fetchone()
     warehouses = summarize(scope, stats.fetchall(), stores.fetchall(), nodes.fetchall())
@@ -128,6 +162,7 @@ def read_balances(
         "limit": 50,
         "accounting_timestamp": stamp["accounting_timestamp"] if stamp else None,
         "last_synced_at": stamp["last_seen_at"] if stamp else None,
+        "partial_scope": bool(stamp and stamp["partial_scope"]),
         "stores": warehouses,
         "columns": [
             {"key": k, "label": label}

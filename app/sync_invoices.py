@@ -30,6 +30,7 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.sync_scope import filter_documents, load_scope, skipped
 from app.tenancy.config import load_runtime
 from app.tenancy.connection import tenant_connect
 from app.tenancy.io import collector_client, collector_url, runtime_directory, validate_runtime_path
@@ -69,7 +70,7 @@ def initial_progress(source: Source, start: date, end: date, resource: str = RES
 def prepare_run(
     db, source: Source, start: date, end: date, resume: UUID | None, resource: str = RESOURCE
 ):
-    progress = initial_progress(source, start, end, resource)
+    progress = {**initial_progress(source, start, end, resource), **load_scope(db).metadata()}
     run_id = resume or uuid4()
     with db.transaction():
         if resume:
@@ -77,7 +78,15 @@ def prepare_run(
                 f"SELECT job,counts FROM {ANALYTICS_SCHEMA}.sync_runs WHERE id=%s FOR UPDATE",
                 (resume,),
             ).fetchone()
-            scope = ("resource", "mode", "source_fingerprint", "date_from", "date_to", "total_days")
+            scope = (
+                "resource",
+                "mode",
+                "source_fingerprint",
+                "date_from",
+                "date_to",
+                "total_days",
+                "sync_scope_revision",
+            )
             if not row or row[0] != "inventory" or any(row[1].get(k) != progress[k] for k in scope):
                 raise SyncError("invoice_history_resume_scope_mismatch")
             progress = row[1]
@@ -103,7 +112,7 @@ def prepare_run(
 
 def publish_invoices(db, snapshot: dict, day: date) -> None:
     """Publish only returned documents; absence from an export is not deletion."""
-    parents = snapshot["payload"]["items"]
+    parents = filter_documents(db, snapshot)
     source_id = snapshot["source_id"]
     header_fields = [
         "id",
@@ -187,13 +196,15 @@ def commit_day(db, run_id: UUID, progress: dict, snapshot: dict) -> dict:
         or day > date.fromisoformat(progress["date_to"])
     ):
         raise SyncError("invoice_history_snapshot_scope_mismatch")
+    selected = filter_documents(db, snapshot)
     updated = {
         **progress,
         "next_date": (day + timedelta(days=1)).isoformat(),
         "completed_through": day.isoformat(),
         "completed_days": progress["completed_days"] + 1,
-        "documents_read": progress["documents_read"] + len(payload["items"]),
-        "items_read": progress["items_read"] + sum(len(r["items"]) for r in payload["items"]),
+        "documents_read": progress["documents_read"] + len(selected),
+        "items_read": progress["items_read"] + sum(len(r["items"]) for r in selected),
+        "excluded_documents": len(payload["items"]) - len(selected),
         "last_snapshot_id": snapshot["id"],
     }
     with db.transaction():
@@ -333,6 +344,21 @@ def synchronize_histories(
         reference_lock(db),
         collector_client(base_url=api_url, timeout=180, trust_env=False) as client,
     ):
+        scope = load_scope(db)
+        if scope.empty:
+            result = skipped(scope)
+            return [
+                emit(
+                    job.output,
+                    uuid4(),
+                    "succeeded",
+                    result["counts"],
+                    mirror=job.mirror,
+                    skipped=True,
+                    reason=result["reason"],
+                )
+                for job in requests
+            ]
         register_sources(db, [source])
         require_primary_source(db, "primary", sources=configured_sources(settings))
         response = client.get("/api/v1/iiko/connections")

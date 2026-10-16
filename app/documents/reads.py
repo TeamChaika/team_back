@@ -20,6 +20,7 @@ from app.documents.policy import (
     table,
     warehouse_grant_guard,
 )
+from app.operation_settings import filter_stores, load_settings
 
 ZONE = local_zone()
 
@@ -305,13 +306,29 @@ def options(db, user, kind):
         ).fetchall()
     )
     if not grants:
-        return {"stores": [], "recipients": [], "reasons": [], "grants": []}
+        return {
+            "stores": [],
+            "recipients": [],
+            "reasons": [],
+            "grants": [],
+            "create_stores": [],
+            "create_recipients": [],
+        }
+    stores = db.execute(
+        "SELECT id,name FROM stores WHERE id=ANY(%s) ORDER BY name",
+        ([r["store_id"] for r in grants],),
+    ).fetchall()
+    recipients = (
+        db.execute("SELECT id,name FROM stores ORDER BY name").fetchall()
+        if kind == "waybill"
+        else []
+    )
+    settings = load_settings(db)
     return {
-        "stores": db.execute(
-            "SELECT id,name FROM stores WHERE id=ANY(%s) ORDER BY name",
-            ([r["store_id"] for r in grants],),
-        ).fetchall(),
-        "recipients": db.execute("SELECT id,name FROM stores ORDER BY name").fetchall()
+        "stores": stores,
+        "recipients": recipients,
+        "create_stores": filter_stores(db, kind, stores, settings=settings),
+        "create_recipients": filter_stores(db, kind, recipients, settings=settings)
         if kind == "waybill"
         else [],
         "reasons": db.execute(

@@ -22,6 +22,7 @@ from app.sync_sales_history import approved_templates, error_code
 from app.tenancy.connection import tenant_connect
 from app.web.indicators import collect_reports
 from app.web.overview import build_overview, dates
+from app.web.sync_policy import SyncPolicy
 from app.web.warehouse_analytics import warehouse_ids
 
 log = logging.getLogger(__name__)
@@ -142,12 +143,15 @@ def fetch_reports(settings, scope, start, end, kinds):
 
 
 class WarehouseSales:
-    def __init__(self, settings, *, fetch=fetch_reports, clock=monotonic):
+    def __init__(self, settings, *, fetch=fetch_reports, clock=monotonic, policy_reader=None):
+        self.policy_reader = policy_reader or SyncPolicy
         self.settings, self.fetch, self.clock = settings, fetch, clock
         self.lock, self.cache = Lock(), OrderedDict()
         self.contexts = OrderedDict()
 
     def get(self, scope, start, end, kinds):
+        policy = self.policy_reader()
+        policy.require(scope.ids)
         stores = warehouse_ids(scope)
         if stores is None or not scope.ids:
             raise HTTPException(403, "Нет доступных складов или заведений.")
@@ -159,6 +163,7 @@ class WarehouseSales:
             str(scope.user.get("id")),
             tuple(sorted(str(i) for i in scope.ids)),
             stores,
+            policy.revision,
             start,
             end,
             kinds,
@@ -171,6 +176,8 @@ class WarehouseSales:
             try:
                 capture = self.fetch(self.settings, scope, start, end, kinds)
             except Exception as error:
+                if isinstance(error, HTTPException):
+                    raise
                 log.warning("Warehouse SALES unavailable: %s", error_code(error))
                 raise HTTPException(
                     503, "Данные iiko по выбранным складам пока недоступны. Повторите запрос позже."

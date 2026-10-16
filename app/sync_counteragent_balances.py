@@ -26,6 +26,7 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.sync_scope import carry_balance_rows, load_scope, skipped
 from app.tenancy.connection import tenant_connect
 from app.tenancy.io import collector_client, collector_url, runtime_directory
 from app.tenancy.sql import ANALYTICS_SCHEMA
@@ -92,6 +93,11 @@ def publish_counteragent_balances(db, snapshot: dict) -> dict:
         or report.received_at.tzinfo is None
     ):
         raise SyncError("counteragent_balances_incomplete")
+    scope = load_scope(db)
+    if scope.empty:
+        return skipped(scope)["counts"]
+    selected = [row for row in report.items if scope.department(row.department_id)]
+    report = report.model_copy(update={"items": selected, "total": len(selected)})
     accounts = {r.account_id for r in report.items}
     counterparties = {r.counteragent_id for r in report.items if r.counteragent_id is not None}
     departments = {r.department_id for r in report.items if r.department_id is not None}
@@ -169,6 +175,9 @@ def publish_counteragent_balances(db, snapshot: dict) -> dict:
         }
         counts["unmatched_counteragents"] = len(counterparties - known_counterparties)
         counts["unmatched_departments"] = len(departments - known_departments)
+        frozen = carry_balance_rows(db, snapshot, selected, "counteragent", scope)
+        counts.update(scope.metadata(), frozen_rows=frozen)
+        report = report.model_copy(update={"total": report.total + frozen})
         db.execute(
             f"INSERT INTO {ANALYTICS_SCHEMA}.counteragent_balance_reports"
             "(source_id,accounting_timestamp,last_snapshot_id,row_count,"
@@ -208,6 +217,9 @@ def synchronize_counteragent_balances(
         ) as db,
         reference_lock(db),
     ):
+        scope = load_scope(db)
+        if scope.empty:
+            return skipped(scope)
         register_sources(db, [source])
         require_primary_source(db, source.id, sources=configured_sources(settings))
         db.execute(

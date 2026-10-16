@@ -23,6 +23,7 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.sync_scope import active_sources, load_scope, skipped
 from app.tenancy.config import load_runtime
 from app.tenancy.connection import tenant_connect
 from app.tenancy.io import runtime_directory, validate_runtime_path
@@ -131,13 +132,17 @@ def run_history(
             source_id = item["source_id"]
             if stop.is_set():
                 break
-            if day in coverage[source_id] or item["status"] == "failed":
+            if day in coverage[source_id] or item["status"] in {"failed", "skipped"}:
                 continue
             item["status"] = "running"
             save()
             for attempt in range(3):
                 try:
                     result = sync_day(source_id, day)
+                    if result.get("skipped"):
+                        item["status"] = "skipped"
+                        item["reason"] = result["reason"]
+                        break
                     if result["status"] != "succeeded":
                         raise SyncError("events_day_not_committed")
                     coverage[source_id][day] = result["counts"]["events"]
@@ -163,11 +168,11 @@ def run_history(
         if stop.is_set():
             break
     for item in report["sources"]:
-        if item["status"] not in {"succeeded", "failed"}:
+        if item["status"] not in {"succeeded", "failed", "skipped"}:
             item["status"] = "interrupted"
     report["status"] = (
         "succeeded"
-        if all(s["status"] == "succeeded" for s in report["sources"])
+        if all(s["status"] in {"succeeded", "skipped"} for s in report["sources"])
         else "interrupted"
         if stop.is_set()
         else "failed"
@@ -202,6 +207,11 @@ def synchronize_history(
             ) as db,
             reference_lock(db),
         ):
+            sources = active_sources(db, sources)
+            if not sources:
+                result = skipped(load_scope(db))
+                write_json(directory / "events-history-latest.json", result)
+                return result
             # Also verify sources before skipping any previously committed dates.
             with db.transaction():
                 register_sources(db, sources)

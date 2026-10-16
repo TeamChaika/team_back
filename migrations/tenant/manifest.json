@@ -60,6 +60,10 @@
     {
       "file": "20261010160000_tenant_standalone_primary.sql",
       "area": "analytics"
+    },
+    {
+      "file": "20261016123000_tenant_operation_settings.sql",
+      "area": "analytics"
     }
   ]
 }

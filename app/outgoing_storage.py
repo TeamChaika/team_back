@@ -5,6 +5,7 @@ from datetime import date
 from psycopg.types.json import Jsonb
 
 from app.sync_inventory import upsert_rows
+from app.sync_scope import filter_documents
 from app.tenancy.sql import ANALYTICS_SCHEMA as DB
 
 
@@ -44,7 +45,7 @@ def outgoing_link_counts(db, source_id: str, document_ids: list) -> dict:
 
 
 def publish_outgoing_invoices(db, snapshot: dict, day: date) -> dict:
-    parents = snapshot["payload"]["items"]
+    parents = filter_documents(db, snapshot)
     source_id = snapshot["source_id"]
     ids = [r["id"] for r in parents]
 
