@@ -288,7 +288,12 @@ def test_operation_settings_http_checks_origin_before_storage(restricted):
 def test_sync_policy_change_reports_busy_without_a_partial_save(database):
     from app.sync_references import LOCK_ID
 
-    with psycopg.connect(database.info.dsn, autocommit=True) as worker:
+    # psycopg intentionally omits passwords from ConnectionInfo.dsn.
+    configured_dsn = os.environ.get("CHAIKA_DOCUMENTS_TEST_DSN") or os.environ.get(
+        "CHAIKA_TEST_DATABASE_URL"
+    )
+    worker_dsn = make_conninfo(configured_dsn, dbname=database.info.dbname)
+    with psycopg.connect(worker_dsn, autocommit=True) as worker:
         worker.execute("SELECT pg_advisory_lock(%s)", (LOCK_ID,))
         try:
             with pytest.raises(HTTPException) as error:
