@@ -237,6 +237,17 @@ class Repository:
             )
         return matches[0]["email"] if matches else candidates[0]
 
+    def support_identity(self, user_id: UUID) -> dict:
+        """Support only requires an active account, never restaurant or module grants."""
+        with self.connection() as db:
+            user = db.execute(
+                "SELECT id,display_name FROM chaika.web_users WHERE id=%s AND active",
+                (user_id,),
+            ).fetchone()
+        if not user:
+            raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
+        return user
+
     def portal_scope(self, user_id: UUID) -> Scope:
         """Document store permissions are independent of restaurant analytics."""
         with self.connection() as db:

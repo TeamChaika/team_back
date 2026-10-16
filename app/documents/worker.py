@@ -224,6 +224,9 @@ def main():
         finally:
             service.close()
         return
+    from app.support_background import capture_failure, close_primary, start_primary
+
+    support = start_primary()
     stop = Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
@@ -240,6 +243,9 @@ def main():
     next_catalog_check = datetime.min.replace(tzinfo=UTC)
     try:
         while not stop.is_set():
+            if support:
+                support[1].poll(support[2], settings.database_url.get_secret_value(),
+                                {"documents": "chaika_iiko_documents"})
             try:
                 # Transaction advisory lock also works through transaction poolers.
                 # Held for one bounded cycle; protects Telegram polling across app replicas.
@@ -265,10 +271,12 @@ def main():
                 if not healthy:
                     stop.wait(5)
             except Exception as error:
+                capture_failure("document_failed", exception=error)
                 log.warning("Document worker cycle failed (%s)", type(error).__name__)
                 stop.wait(5)
             stop.wait(1)
     finally:
+        close_primary(support)
         if bot:
             bot.close()
         service.close()

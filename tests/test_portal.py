@@ -540,3 +540,40 @@ def test_stock_suggestions_and_selection_use_authenticated_scope(client):
     }
     assert client.get("/api/resources/balances?sort=invalid").status_code == 422
     assert client.get("/api/resources/balances?direction=invalid").status_code == 422
+
+
+def test_unhandled_error_retains_exact_cors_security_and_request_id():
+    class BrokenRepository(FakeRepository):
+        def overview(self, *args):
+            raise ValueError("secret internal failure")
+
+    origin = "https://dashboard.chaika.team"
+    app = create_portal(
+        Settings(),
+        WebSettings(_env_file=None, anon_key="test", origin=origin, secure_cookie=True),
+        auth_transport=httpx.MockTransport(provider),
+        repository=BrokenRepository(),
+    )
+    with TestClient(app, base_url="https://xx.chaika.team") as client:
+        response = client.post(
+            "/api/auth/login",
+            headers={"Origin": origin},
+            json={"email": "test@example.invalid", "password": "private-password"},
+        )
+        assert response.status_code == 200
+        allowed = client.get(
+            "/api/overview?start=2026-09-01&end=2026-09-10", headers={"Origin": origin}
+        )
+        assert allowed.status_code == 500
+        assert allowed.headers["Cache-Control"] == "no-store"
+        assert allowed.headers["X-Content-Type-Options"] == "nosniff"
+        assert allowed.headers["Access-Control-Allow-Origin"] == origin
+        assert "X-Request-ID" in allowed.headers["Access-Control-Expose-Headers"]
+        UUID(allowed.headers["X-Request-ID"])
+        assert "secret" not in allowed.text
+        denied = client.get(
+            "/api/overview?start=2026-09-01&end=2026-09-10",
+            headers={"Origin": "https://attacker.example.invalid"},
+        )
+        assert denied.status_code == 500
+        assert "Access-Control-Allow-Origin" not in denied.headers
