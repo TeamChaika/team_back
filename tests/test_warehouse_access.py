@@ -215,6 +215,8 @@ def test_native_and_commercial_sql_intersection_and_active_identity():
             with psycopg.connect(server.get_uri(), autocommit=True, row_factory=dict_row) as db:
                 db.execute("CREATE ROLE chaika_backend")
                 db.execute("CREATE ROLE chaika_iiko_app")
+                db.execute("CREATE ROLE anon")
+                db.execute("CREATE ROLE authenticated")
                 db.execute("CREATE SCHEMA chaika")
                 db.execute("CREATE TABLE chaika.web_users(id uuid PRIMARY KEY,active boolean)")
                 db.execute(
@@ -224,6 +226,13 @@ def test_native_and_commercial_sql_intersection_and_active_identity():
                     Path("supabase/migrations/20261007120000_warehouse_access.sql").read_text()
                 )
                 db.execute(Path("migrations/documents/0010_global_warehouse_scope.sql").read_text())
+                # This ACL fixture has no historical reporting tables: apply the
+                # real settings DDL/grants before the unrelated provenance section.
+                settings_sql = Path(
+                    "supabase/migrations/20261016123000_operation_settings.sql"
+                ).read_text().partition("-- Preserve provenance")[0]
+                db.execute(settings_sql)
+                db.execute(Path("migrations/documents/0011_operation_settings.sql").read_text())
                 db.execute(
                     "CREATE TABLE portal_documents_userlink(user_id bigint,supabase_id uuid)"
                 )
@@ -272,6 +281,8 @@ def test_native_and_commercial_sql_intersection_and_active_identity():
                         "recipients": [],
                         "reasons": [],
                         "grants": [],
+                        "create_stores": [],
+                        "create_recipients": [],
                     }
                 assert not has_receipt_approver(db, SA)
 
@@ -285,6 +296,8 @@ def test_native_and_commercial_sql_intersection_and_active_identity():
                 for kind in ["waybill", "writeoff"]:
                     options = document_options(db, {"id": 1}, kind)
                     assert [row["id"] for row in options["stores"]] == [SA]
+                    assert [row["id"] for row in options["create_stores"]] == [SA]
+                    assert options["create_recipients"] == options["recipients"]
                     assert [row["store_id"] for row in options["grants"]] == [SA]
                 assert has_receipt_approver(db, SA) and not has_receipt_approver(db, SB)
                 db.execute("SET ROLE chaika_iiko_app")

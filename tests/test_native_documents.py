@@ -101,6 +101,14 @@ def database():
         db.execute(Path("migrations/documents/0004_receipt_discrepancies.sql").read_text())
         db.execute(Path("migrations/documents/0005_writeoff_cost_estimates.sql").read_text())
         db.execute(Path("migrations/documents/0007_telegram_cleanup.sql").read_text())
+        db.execute("CREATE SCHEMA IF NOT EXISTS chaika")
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS chaika.operation_settings ("
+            "singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),"
+            "revision integer NOT NULL CHECK(revision>0),settings jsonb NOT NULL,"
+            "updated_at timestamptz NOT NULL DEFAULT now(),updated_by uuid NOT NULL)"
+        )
+        db.execute("TRUNCATE chaika.operation_settings")
     database = DocumentDatabase(test_url)
     yield database
     database.close()
@@ -691,3 +699,111 @@ def test_bot_crash_recovers_callback_idempotently_but_never_repeats_messages(ser
             db.execute("SELECT state FROM portal_documents_notification").fetchone()["state"]
             == "unknown"
         )
+
+
+def set_operation_selection(monkeypatch, kind, ids):
+    from app import operation_settings
+
+    selected = {"mode": "selected", "store_ids": [str(value) for value in ids]}
+    configuration = {
+        "revision": 1,
+        "sync": {"mode": "all", "department_ids": []},
+        "writeoff": {"mode": "all", "store_ids": []},
+        "waybill": {"mode": "all", "store_ids": []},
+        kind: selected,
+    }
+    from app.documents import reads, workflow
+
+    for module in (operation_settings, reads, workflow):
+        monkeypatch.setattr(module, "load_settings", lambda db: configuration)
+
+
+@pytest.mark.parametrize("kind", ["waybill", "writeoff"])
+def test_operation_selection_empty_blocks_new_without_hiding_history(service, monkeypatch, kind):
+    doc = create(service, kind, reason="Reason", reason_id=1)
+    set_operation_selection(monkeypatch, kind, [])
+    options = service.dispatch(SENDER, "GET", f"{kind}/options")
+    assert [row["id"] for row in options["stores"]] == [SOURCE]
+    assert options["create_stores"] == []
+    assert options["grants"]
+    if kind == "waybill":
+        assert options["recipients"]
+        assert options["create_recipients"] == []
+    with pytest.raises(HTTPException) as exc:
+        create(service, kind, reason="Reason", reason_id=1)
+    assert exc.value.status_code == 422
+    assert service.dispatch(SENDER, "GET", kind)["total"] == 1
+    assert detail(service, doc)["id"] == doc["id"]
+    assert act(service, doc)["submission_state"] == "queued"
+
+
+def test_operation_selection_checks_waybill_receiver_and_preserves_grants(service, monkeypatch):
+    set_operation_selection(monkeypatch, "waybill", [SOURCE])
+    options = service.dispatch(SENDER, "GET", "waybill/options")
+    assert [row["id"] for row in options["create_stores"]] == [SOURCE]
+    assert [row["id"] for row in options["create_recipients"]] == [SOURCE]
+    with pytest.raises(HTTPException) as exc:
+        create(service)
+    assert exc.value.status_code == 422
+    assert "получателя" in exc.value.detail
+    # Including both warehouses cannot grant creation from the receiver warehouse.
+    set_operation_selection(monkeypatch, "waybill", [SOURCE, TARGET])
+    with pytest.raises(HTTPException) as exc:
+        create(service, store_id=str(TARGET), counteragent_id=str(SOURCE))
+    assert exc.value.status_code == 403
+
+
+def test_excluded_operation_blocks_copy_but_allows_old_edit_and_request_replay(
+    service, monkeypatch
+):
+    payload = body()
+    doc = service.dispatch(SENDER, "POST", "waybill", payload=payload)
+    set_operation_selection(monkeypatch, "waybill", [])
+    assert service.dispatch(SENDER, "POST", "waybill", payload=payload) == doc
+    with pytest.raises(HTTPException) as exc:
+        act(service, doc, "copy", SENDER, body(version=doc["version"]))
+    assert exc.value.status_code == 422
+    edited = act(service, doc, "edit", SENDER, body(version=doc["version"], comment="Updated"))
+    assert edited["version"] == doc["version"] + 1
+    assert detail(service, edited)["comment"] == "Updated"
+
+
+def test_writeoff_and_transfer_operation_choices_are_independent(service, monkeypatch):
+    set_operation_selection(monkeypatch, "writeoff", [])
+    assert create(service)["kind"] == "waybill"
+    with pytest.raises(HTTPException):
+        create(service, "writeoff", reason="Reason", reason_id=1)
+
+
+@pytest.mark.parametrize("operation", ["options", "create"])
+def test_transfer_checks_sender_and_recipient_against_one_policy_snapshot(
+    service, monkeypatch, operation
+):
+    from app import operation_settings
+    from app.documents import reads, workflow
+
+    first = {
+        "waybill": {"mode": "selected", "store_ids": [str(SOURCE)]},
+    }
+    second = {
+        "waybill": {"mode": "selected", "store_ids": [str(TARGET)]},
+    }
+    versions = iter((first, second))
+    calls = []
+
+    def concurrent_update(db):
+        calls.append(db)
+        return next(versions)
+
+    for module in (operation_settings, reads, workflow):
+        monkeypatch.setattr(module, "load_settings", concurrent_update)
+    if operation == "options":
+        options = service.dispatch(SENDER, "GET", "waybill/options")
+        assert [row["id"] for row in options["create_stores"]] == [SOURCE]
+        assert [row["id"] for row in options["create_recipients"]] == [SOURCE]
+    else:
+        with pytest.raises(HTTPException) as exc:
+            create(service)
+        assert exc.value.status_code == 422
+        assert "получателя" in exc.value.detail
+    assert len(calls) == 1

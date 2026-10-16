@@ -7,7 +7,8 @@ from uuid import UUID
 import psycopg
 
 from app.core.config import Settings
-from app.sync_references import SyncError
+from app.sync_references import SyncError, reference_lock
+from app.sync_scope import load_scope
 from app.web.coverage import ZONE
 from app.web.indicators import FILTERS, collect_reports
 
@@ -33,11 +34,21 @@ def filter_request(field, start, end):
     }
 
 
-def publish_filter(db, field, start, end, rows, *, replace):
+def publish_filter(db, field, start, end, rows, *, replace, expected_scope=None):
+    with reference_lock(db):
+        return _publish_filter_locked(
+            db, field, start, end, rows, replace=replace, expected_scope=expected_scope
+        )
+
+
+def _publish_filter_locked(db, field, start, end, rows, *, replace, expected_scope=None):
+    scope = load_scope(db)
+    if expected_scope is not None and scope.metadata() != expected_scope.metadata():
+        raise SyncError("sync_scope_changed")
     values = set()
     for row in rows:
         value, department = row.get(FILTERS[field][1]), row.get("Department.Id")
-        if value is None or department is None:
+        if value is None or department is None or not scope.department(department):
             continue
         value = str(value) if not isinstance(value, bool) else str(value).upper()
         if not 1 <= len(value) <= 500:
@@ -47,8 +58,9 @@ def publish_filter(db, field, start, end, rows, *, replace):
     with db.transaction():
         if replace:
             db.execute(
-                "DELETE FROM chaika.indicator_filter_values WHERE source_id='primary' AND field=%s",
-                (field,),
+                "DELETE FROM chaika.indicator_filter_values WHERE source_id='primary' AND field=%s "
+                "AND (%s OR department_id=ANY(%s::uuid[]))",
+                (field, scope.departments is None, list(scope.departments or [])),
             )
         with db.cursor() as cursor:
             cursor.executemany(
@@ -56,16 +68,17 @@ def publish_filter(db, field, start, end, rows, *, replace):
                 "ON CONFLICT DO NOTHING",
                 sorted(values, key=str),
             )
-        db.execute(
-            "INSERT INTO chaika.indicator_filter_sync"
-            "(source_id,field,period_start,period_end,value_count) "
-            "SELECT 'primary',%s,%s,%s,count(*) FROM chaika.indicator_filter_values "
-            "WHERE source_id='primary' AND field=%s "
-            "ON CONFLICT(source_id,field) DO UPDATE SET "
-            "period_start=LEAST(indicator_filter_sync.period_start,excluded.period_start),"
-            "period_end=excluded.period_end,synced_at=now(),value_count=excluded.value_count",
-            (field, start, end, field),
-        )
+        if scope.departments is None:
+            db.execute(
+                "INSERT INTO chaika.indicator_filter_sync"
+                "(source_id,field,period_start,period_end,value_count) "
+                "SELECT 'primary',%s,%s,%s,count(*) FROM chaika.indicator_filter_values "
+                "WHERE source_id='primary' AND field=%s "
+                "ON CONFLICT(source_id,field) DO UPDATE SET "
+                "period_start=LEAST(indicator_filter_sync.period_start,excluded.period_start),"
+                "period_end=excluded.period_end,synced_at=now(),value_count=excluded.value_count",
+                (field, start, end, field),
+            )
     return len(values)
 
 
@@ -83,6 +96,9 @@ def synchronize_filters(settings, stop, *, full=False, end=None, collect=collect
         with psycopg.connect(
             settings.database_url.get_secret_value(), autocommit=True, connect_timeout=10
         ) as db:
+            sync_scope = load_scope(db)
+            if sync_scope.empty:
+                return
             previous = db.execute(
                 "SELECT period_start,period_end FROM chaika.indicator_filter_sync "
                 "WHERE source_id='primary' AND field=%s",
@@ -93,11 +109,19 @@ def synchronize_filters(settings, stop, *, full=False, end=None, collect=collect
             if full or not previous
             else max(HISTORY_START, previous[1] - timedelta(days=7))
         )
-        rows = collect(settings, [filter_request(field, start, end)])[0]
+        request = filter_request(field, start, end)
+        if sync_scope.departments is not None:
+            request["filters"]["Department.Id"] = {
+                "filterType": "IncludeValues",
+                "values": sorted(sync_scope.departments),
+            }
+        rows = collect(settings, [request])[0]
         with psycopg.connect(
             settings.database_url.get_secret_value(), autocommit=True, connect_timeout=10
         ) as db:
-            count = publish_filter(db, field, start, end, rows, replace=full or not previous)
+            count = publish_filter(
+                db, field, start, end, rows, replace=full or not previous, expected_scope=sync_scope
+            )
         print(f"indicator_filter {field}: {count}", flush=True)
 
 

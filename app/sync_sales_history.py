@@ -26,6 +26,7 @@ from app.integrations.iiko.errors import IikoError
 from app.services.iiko_auth import IikoAuthService
 from app.services.sync_jobs import write_json
 from app.sync_references import SyncError, configured_sources, reference_lock, register_sources
+from app.sync_scope import load_scope, skipped
 
 DIRECTORY = BACKEND_DIR / ".local/sync"
 REPORTS = BACKEND_DIR / ".local/reports"
@@ -302,6 +303,11 @@ def synchronize_history(
             ) as db,
             reference_lock(db),
         ):
+            scope = load_scope(db)
+            if scope.empty:
+                result = skipped(scope)
+                write_json(directory / "sales-latest.json", result)
+                return result
             register_sources(db, [source])
             template_id, templates = approved_templates(db)
             rows = db.execute(
@@ -316,6 +322,18 @@ def synchronize_history(
                 (source.id, start, end),
             ).fetchall()
             coverage = {day: counts for day, counts in rows if set(counts) == KINDS}
+            partial_days = {
+                row[0]
+                for row in db.execute(
+                    "SELECT d.business_date FROM chaika.sales_report_days d "
+                    "JOIN chaika.sales_report_sets s ON s.id=d.current_set_id "
+                    "WHERE d.source_id=%s AND d.business_date BETWEEN %s AND %s "
+                    "AND EXISTS(SELECT 1 FROM jsonb_array_elements(s.checks) c "
+                    "WHERE c->>'partial_scope'='true')",
+                    (source.id, start, end),
+                )
+            }
+            coverage = {day: counts for day, counts in coverage.items() if day not in partial_days}
             if refresh:
                 coverage = {}
             warning_days = {

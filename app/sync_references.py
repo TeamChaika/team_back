@@ -30,6 +30,7 @@ from app.services.iiko_topology import (
     read_departments,
     read_replication,
 )
+from app.sync_scope import active_sources, load_scope, reference_ids, skipped
 
 LOCK_ID = 7623011091001
 
@@ -176,10 +177,18 @@ def append_snapshot(db: psycopg.Connection, run_id: UUID, snapshot: dict) -> Non
     )
 
 
-def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> dict:
+def publish(
+    db: psycopg.Connection, sources: list[Source], snapshots: dict, *, physical_sources=None
+) -> dict:
     """Atomically publish a complete collection; missing rows are never called deleted."""
+    scope = load_scope(db)
+    physical_sources = sources if physical_sources is None else physical_sources
+    sources = active_sources(db, sources, keep_primary=True, include_blocked=True)
     primary = snapshots[("primary", "departments")]
     stores = snapshots[("primary", "stores")]
+    active_nodes, active_stores = reference_ids(
+        db, scope, primary["payload"]["items"], stores["payload"]["items"]
+    )
     if not primary["payload"]["items"] or not stores["payload"]["items"]:
         raise SyncError("empty_primary_reference_set")
     hierarchies = {
@@ -196,8 +205,18 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
         for key in rms_ids
     }
     mapping = map_departments(hierarchies["primary"], rms_ids, hierarchies, groups)
+    prior_matches = {
+        row[0]
+        for row in db.execute("SELECT source_id FROM chaika.rms_bindings WHERE state='matched'")
+    }
     counts = {
         "sources": len(sources),
+        "policy_blocked_sources": [
+            b.connection_id
+            for b in mapping.bindings
+            if not scope.department(b.department_id)
+            or (b.state != "matched" and b.connection_id in prior_matches)
+        ],
         "corporate_nodes": len(primary["payload"]["items"]),
         "stores": len(stores["payload"]["items"]),
         "rms_bindings": len(mapping.bindings),
@@ -209,7 +228,10 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
         ],
     }
     with db.transaction():
-        db.execute("UPDATE chaika.sources SET configured = false")
+        db.execute(
+            "UPDATE chaika.sources SET configured = (id=ANY(%s::text[]))",
+            ([source.id for source in physical_sources],),
+        )
         for source in sources:
             observed = snapshots[(source.id, "server_type")]
             db.execute(
@@ -218,11 +240,13 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
                 (observed["payload"]["server_type"], observed["observed_at"], source.id),
             )
         for table, snapshot in [("corporate_nodes", primary), ("stores", stores)]:
+            permitted = active_stores if table == "stores" else active_nodes
             db.execute(
-                sql.SQL("UPDATE chaika.{} SET present_in_latest=false WHERE source_id=%s").format(
-                    sql.Identifier(table)
-                ),
-                ("primary",),
+                sql.SQL(
+                    "UPDATE chaika.{} SET present_in_latest=false "
+                    "WHERE source_id=%s AND (%s OR id=ANY(%s::uuid[]))"
+                ).format(sql.Identifier(table)),
+                ("primary", scope.departments is None, list(permitted)),
             )
             columns = ["source_id", "id", "parent_id", "code", "name"]
             if table == "corporate_nodes":
@@ -242,6 +266,8 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
                 ),
             )
             for row in snapshot["payload"]["items"]:
+                if scope.departments is not None and str(row["id"]) not in permitted:
+                    continue
                 values = {
                     **row,
                     "source_id": "primary",
@@ -250,14 +276,27 @@ def publish(db: psycopg.Connection, sources: list[Source], snapshots: dict) -> d
                     "last_snapshot_id": snapshot["id"],
                 }
                 db.execute(statement, [values.get(c) for c in columns])
-        # Clear old matches inside this transaction, allowing restaurants to swap RMS.
-        db.execute("UPDATE chaika.rms_bindings SET state='not_configured',department_id=NULL")
+        # A changed upstream mapping must block new events without hiding history.
+        blocked = counts["policy_blocked_sources"]
+        db.execute(
+            "UPDATE chaika.rms_bindings SET sync_blocked=true WHERE source_id=ANY(%s::text[])",
+            (blocked,),
+        )
+        # Disabled physical connections retain their verified department mapping.
+        db.execute(
+            "UPDATE chaika.rms_bindings SET state='not_configured',department_id=NULL "
+            "WHERE source_id=ANY(%s::text[])",
+            ([source.id for source in sources if source.id not in blocked],),
+        )
         for binding in mapping.bindings:
+            if binding.connection_id in blocked:
+                continue
             db.execute(
                 "INSERT INTO chaika.rms_bindings (source_id,chain_source_id,department_id,state,"
                 "details,observed_at,chain_snapshot_id,rms_snapshot_id,groups_snapshot_id) "
                 "VALUES (%s,'primary',%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (source_id) DO UPDATE SET "
                 "department_id=EXCLUDED.department_id,state=EXCLUDED.state,details=EXCLUDED.details,"
+                "sync_blocked=false,"
                 "observed_at=EXCLUDED.observed_at,chain_snapshot_id=EXCLUDED.chain_snapshot_id,"
                 "rms_snapshot_id=EXCLUDED.rms_snapshot_id,groups_snapshot_id=EXCLUDED.groups_snapshot_id",
                 (
@@ -291,7 +330,15 @@ def synchronize(settings: Settings, api_url: str, output: Path) -> dict:
         ) as db,
         reference_lock(db),
     ):
-        register_sources(db, sources)
+        physical_sources = sources
+        scope = load_scope(db)
+        if scope.empty:
+            result = skipped(scope)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(result))
+            return result
+        sources = active_sources(db, sources, keep_primary=True, include_blocked=True)
+        register_sources(db, physical_sources)
         db.execute(
             "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' WHERE status='running'"
@@ -320,7 +367,7 @@ def synchronize(settings: Settings, api_url: str, output: Path) -> dict:
 
             try:
                 actual = request("GET", "/connections")["items"]
-                expected = {s.id: s.base_url for s in sources}
+                expected = {s.id: s.base_url for s in physical_sources}
                 if {r["connection_id"]: r["base_url"] for r in actual} != expected:
                     raise SyncError("backend_source_config_mismatch")
                 for source in sources:
@@ -349,7 +396,8 @@ def synchronize(settings: Settings, api_url: str, output: Path) -> dict:
                 try:
                     # Publication and successful run status commit together.
                     with db.transaction():
-                        counts = publish(db, sources, snapshots)
+                        counts = publish(db, sources, snapshots, physical_sources=physical_sources)
+                        counts.update(scope.metadata())
                         db.execute(
                             "UPDATE chaika.sync_runs SET status='succeeded',finished_at=now(),"
                             "counts=%s WHERE id=%s",

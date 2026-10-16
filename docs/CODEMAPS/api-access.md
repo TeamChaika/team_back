@@ -31,3 +31,7 @@
 клиенте. `/api/me` возвращает warehouse_scope и warehouse_capabilities. Разделы
 без проверенной складской привязки закрывает `require_warehouse_section`,
 включая прямые запросы к деталям, экспорту и командам.
+
+## Настройки операций
+
+`GET/POST /api/management/operation-settings` использует действующий admin + Origin guard; SaaS — свою analytics-схему и текущего owner/member actor. Правила revision, аудит и HTTP423 при активной синхронизации: [контракт](../operation-settings.md).

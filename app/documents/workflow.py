@@ -26,6 +26,7 @@ from app.documents.policy import (
 )
 from app.documents.reads import summary
 from app.documents.telegram_cleanup import approved
+from app.operation_settings import allowed_store, load_settings
 
 
 def has_receipt_approver(db, store_id):
@@ -251,6 +252,14 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
             require(
                 db, user["id"], kind, "edit" if action == "edit" else "create", fields["store_id"]
             )
+            if action in {"create", "copy"}:
+                settings = load_settings(db)
+                if not allowed_store(db, kind, fields["store_id"], settings=settings):
+                    invalid("Этот склад отключён для создания документов в настройках операций.")
+                if kind == "waybill" and not allowed_store(
+                    db, kind, fields["counteragent_id"], settings=settings
+                ):
+                    invalid("Склад получателя отключён для перемещений в настройках операций.")
             if action == "edit" and any(
                 fields[k] != doc[k] for k in ("store_id", "counteragent_id")
             ):

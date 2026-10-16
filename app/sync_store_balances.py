@@ -26,6 +26,7 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.sync_scope import carry_balance_rows, load_scope, skipped
 
 
 def capture_store_balances(
@@ -83,6 +84,11 @@ def publish_store_balances(db, snapshot: dict) -> dict:
         or report.received_at != snapshot["observed_at"]
     ):
         raise SyncError("store_balances_incomplete")
+    scope = load_scope(db)
+    if scope.empty:
+        return skipped(scope)["counts"]
+    selected = [row for row in report.items if scope.store(row.store_id)]
+    report = report.model_copy(update={"items": selected, "total": len(selected)})
     counts = {
         "rows": report.total,
         "stores": len({r.store_id for r in report.items}),
@@ -116,13 +122,20 @@ def publish_store_balances(db, snapshot: dict) -> dict:
                 )
             }
             counts[f"unmatched_{table}"] = len(ids - known)
+        frozen = carry_balance_rows(db, snapshot, selected, "store", scope)
+        counts.update(scope.metadata(), frozen_rows=frozen)
+        report = report.model_copy(update={"total": report.total + frozen})
         db.execute(
             "INSERT INTO chaika.store_balance_reports"
             "(source_id,accounting_timestamp,last_snapshot_id,row_count,"
-            "first_seen_at,last_seen_at) "
-            "VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(source_id,accounting_timestamp) DO UPDATE SET "
+            "first_seen_at,last_seen_at,covered_store_ids) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s) ON "
+            "CONFLICT(source_id,accounting_timestamp) DO UPDATE SET "
             "last_snapshot_id=EXCLUDED.last_snapshot_id,row_count=EXCLUDED.row_count,"
-            "last_seen_at=EXCLUDED.last_seen_at "
+            "last_seen_at=EXCLUDED.last_seen_at,"
+            "covered_store_ids=CASE WHEN chaika.store_balance_reports.covered_store_ids IS NULL "
+            "OR EXCLUDED.covered_store_ids IS NULL THEN NULL ELSE ARRAY(SELECT DISTINCT unnest("
+            "chaika.store_balance_reports.covered_store_ids || EXCLUDED.covered_store_ids)) END "
             "WHERE chaika.store_balance_reports.last_seen_at <= EXCLUDED.last_seen_at",
             (
                 snapshot["source_id"],
@@ -131,6 +144,7 @@ def publish_store_balances(db, snapshot: dict) -> dict:
                 report.total,
                 snapshot["observed_at"],
                 snapshot["observed_at"],
+                None if scope.departments is None else list(scope.stores),
             ),
         )
     return counts
@@ -153,6 +167,9 @@ def synchronize_store_balances(
         ) as db,
         reference_lock(db),
     ):
+        scope = load_scope(db)
+        if scope.empty:
+            return skipped(scope)
         register_sources(db, [source])
         if not db.execute(
             "SELECT 1 FROM chaika.sources WHERE id=%s AND server_type='CHAIN'", (source.id,)

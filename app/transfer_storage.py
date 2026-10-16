@@ -5,11 +5,12 @@ from datetime import date
 from psycopg.types.json import Jsonb
 
 from app.sync_inventory import upsert_rows
+from app.sync_scope import filter_documents
 
 
 def publish_transfers(db, snapshot: dict, day: date) -> dict:
     """Publish one internal-transfer day inside the caller's RAW/checkpoint transaction."""
-    parents = snapshot["payload"]["items"]
+    parents = filter_documents(db, snapshot)
     source_id = snapshot["source_id"]
 
     def headers():
