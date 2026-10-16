@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -131,6 +132,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         yield
+        await run_in_threadpool(app.state.support_capture.close)
         if owned_repository:
             await run_in_threadpool(repo.auth.close)
 
@@ -309,6 +311,7 @@ def create_app(
         cors_origin = getattr(request.state, "saas_cors_origin", None)
         if cors_origin:
             response.headers["Access-Control-Allow-Origin"] = cors_origin
+            response.headers["Access-Control-Expose-Headers"] = "X-Request-ID"
             if not getattr(request.state, "saas_guest_surface", False):
                 response.headers["Access-Control-Allow-Credentials"] = "true"
             response.headers.append("Vary", "Origin")
@@ -327,7 +330,50 @@ def create_app(
 
     @app.middleware("http")
     async def boundary(request, call_next):
-        return response_headers(request, await enforce_boundary(request, call_next))
+        from app.support.models import Context, screen_for_path
+
+        request_id = uuid4()
+        request.state.support_request_id = request_id
+        captured = False
+        try:
+            response = await enforce_boundary(request, call_next)
+        except Exception as exc:
+            company = getattr(request.state, "saas_company", None)
+            if company and "support" not in request.url.path:
+                app.state.support_capture.submit(
+                    getattr(
+                        request.state,
+                        "support_context",
+                        Context(company["id"], company["name"], "system"),
+                    ),
+                    code="unhandled_exception",
+                    screen=screen_for_path(request.url.path),
+                    status_code=500,
+                    request_id=request_id,
+                    exception=exc,
+                )
+            captured = True
+            response = error_response(500, "internal_error", "Внутренняя ошибка сервера")
+        response.headers["X-Request-ID"] = str(request_id)
+        company = getattr(request.state, "saas_company", None)
+        if (
+            not captured
+            and company
+            and response.status_code >= 500
+            and "support" not in request.url.path
+        ):
+            app.state.support_capture.submit(
+                getattr(
+                    request.state,
+                    "support_context",
+                    Context(company["id"], company["name"], "system"),
+                ),
+                code="http_5xx",
+                screen=screen_for_path(request.url.path),
+                status_code=response.status_code,
+                request_id=request_id,
+            )
+        return response_headers(request, response)
 
     @app.exception_handler(Exception)
     async def unexpected_error_handler(request, exc):
@@ -345,6 +391,10 @@ def create_app(
         return session
 
     owner_dependency = Depends(owner)
+
+    from app.support.routes import mount_central
+
+    mount_central(app, repo, owner)
 
     @app.get("/api/saas-context")
     def context(request: Request):

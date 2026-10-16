@@ -77,6 +77,40 @@ to the whole directory. This is disaster recovery, not protection from a host
 administrator. Snapshot retention is manual in this first small registry;
 monitor disk usage before enabling large client datasets here.
 
+## Support schema backup
+
+The existing `restcontrol-backup` JSON snapshot covers only the registry. The
+separate `support-backup.service`/`.timer` run the fixed root-owned
+`support-backup.sh`: `docker exec supabase-db pg_dump -U supabase_admin -d postgres
+--format=custom --schema=support`. No runtime env or application secrets are read.
+
+Before installation, root must create `/var/lib/restcontrol-support-backups`
+with ownership `root:root` and mode `0700`. The directory, `/var/lib`, and the
+script's parent directories must be ordinary root-controlled directories,
+without symlinks or write permissions/ACLs for the application user. This path
+is outside the application-writable registry backup directory. The script
+requires the backup directory to exist already and checks its owner/mode.
+
+Install `support-backup.sh` as the ordinary file
+`/usr/local/libexec/restcontrol-support-backup`, owned by `root:root` with mode
+`0755`; do not execute it through the application's `current` release symlink.
+Install the two units as root-owned files into `/etc/systemd/system`, then run
+`systemctl daemon-reload` and `systemctl enable --now support-backup.timer`
+only during an authorized release. No files are installed by this change.
+Run `systemctl start support-backup.service` for the initial backup and require
+successful exit plus a nonempty `.dump` file. The timer runs daily at 00:25 UTC
+with up to five minutes of jitter. This repository change does not install it.
+
+Files are private (`umask 077`); a successful, nonempty dump is renamed atomically
+inside the same directory. Failed attempts retain `.partial` files and never
+appear as `.dump`. The command deadline is 280 seconds and the unit deadline is
+300 seconds. No automatic deletion or retention cleanup is installed. Monitor
+backup age and disk usage separately. Dump contents are never written to the
+journal. These dumps contain support records and operator notes; keep them private.
+Restore testing must target a separate empty database with the support roles and
+migration prerequisites, using `pg_restore`; never restore over production as a
+code rollback. An off-host copy and proven restore remain separate operator steps.
+
 ## Rollback
 
 Stop only `restcontrol-saas`, preserve its latest data snapshot, repoint `current`

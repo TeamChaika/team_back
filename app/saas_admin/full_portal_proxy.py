@@ -281,6 +281,11 @@ class FullPortalProxy:
             actor, session = await run_in_threadpool(
                 self.repository.tenant_actor_session, token, company["id"]
             )
+            from app.support.models import Context
+
+            request.state.support_context = Context(
+                str(company["id"]), company["name"], str(actor.auth_user_id), actor.display_name
+            )
             if str(actor.company_id) != str(company["id"]):
                 raise Problem(403, "tenant_boundary", "Другая компания")
             if setup and actor.kind != "platform_owner":
@@ -339,10 +344,7 @@ class FullPortalProxy:
             is not None
         )
         headers = {
-            "host": (
-                getattr(request.state, "saas_upstream_host", "")
-                or request.headers["host"]
-            ),
+            "host": (getattr(request.state, "saas_upstream_host", "") or request.headers["host"]),
             "origin": request.headers.get("origin", ""),
             "cookie": "saas_tenant_session=" + token,
             "x-csrf-token": request.headers.get("x-csrf-token", ""),

@@ -198,6 +198,11 @@ class FleetSupervisor:
         self.integrations_revisions = {}
         self.child_started = {}
         self.integration_retry_after = {}
+        from .support_monitor import build_monitor
+
+        self.support_monitor = build_monitor(preparer)
+        self.support_contexts = {}
+        self.support_exits = {}
 
     def start(self, path, action, version=None):
         key = (str(path), action)
@@ -222,6 +227,12 @@ class FleetSupervisor:
     def _start(self, path, action, version=None):
         key = (str(path), action)
         process = self.children.get(key)
+        if process is not None and process.poll() not in (None, 0):
+            context = self.support_contexts.get(str(path))
+            occurrence = (getattr(process, "pid", None), self.child_started.get(key))
+            if self.support_monitor and context and self.support_exits.get(key) != occurrence:
+                self.support_monitor.exited(context, f"process:{action}:{occurrence}")
+                self.support_exits[key] = occurrence
         if (
             process is not None
             and process.poll() is not None
@@ -367,6 +378,14 @@ class FleetSupervisor:
                     self.stop(key)
             self.prepared_versions.pop(str(path), None)
             return
+        from .support_monitor import observe
+
+        try:
+            context = observe(self.support_monitor, config, company)
+            if context:
+                self.support_contexts[str(path)] = context
+        except Exception:
+            logging.getLogger(__name__).warning("support_background_unavailable")
         version = company["version"]
         revision_getter = (
             getattr(self.preparer.settings_service, "integrations_revision", None)
@@ -505,6 +524,8 @@ class FleetSupervisor:
                 self.retry_after[str(path)] = time.monotonic() + 60
 
     def close(self):
+        if self.support_monitor:
+            self.support_monitor.close()
         for key in list(self.children):
             self.stop(key)
 
