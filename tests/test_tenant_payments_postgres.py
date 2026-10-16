@@ -618,6 +618,118 @@ def test_provider_creation_currency_and_validated_merchant_settle_documented_sse
     assert calls[0] == ("GET", "/users/check-api-key/")
 
 
+def test_first_qr_uses_current_feature_policy_without_settlement(companies):
+    from app.saas_admin.feature_readiness import feature_readiness
+
+    _, (store, _) = companies
+    admin = owner(store)
+    venue, _ = setup(store, admin)
+    company = {
+        "id": str(store.runtime.company_id),
+        "version": 1,
+        "status": "active",
+        "modules": {"deposits": True},
+    }
+    checks = {
+        "modules": {
+            "ok": False,
+            "evidence": {
+                "company_id": company["id"],
+                "configuration_version": 1,
+                "probes": [
+                    {"path": path, "ok": True}
+                    for path in (
+                        "/api/me",
+                        "/api/deposits",
+                        "/api/deposits/permissions",
+                        "/api/payment-settings",
+                    )
+                ],
+                "services": {},
+            },
+        }
+    }
+    provider = Provider()
+    service = TenantPayments(
+        store,
+        lambda _: provider,
+        feature_authorizer=lambda feature: feature_readiness(company, checks, working=True)[
+            feature
+        ]["write"],
+    )
+    deposit = store.create(admin, payload(venue))
+    for _ in range(2):
+        result = asyncio.run(service.prepare(UUID(deposit["id"]), token(deposit), uuid4()))
+        assert result["payment"]["state"] == "pending"
+        assert result["payment"]["payment_url"]
+    assert provider.calls == 1
+    assert "payments" not in checks  # No synthetic settlement/readiness proof was created.
+
+
+@pytest.mark.parametrize("change", ["key", "default", "inactive_venue"])
+def test_terminal_change_during_validation_never_dispatches_old_configuration(companies, change):
+    _, (store, _) = companies
+    admin = owner(store)
+    venue, terminal = setup(store, admin)
+    provider = Provider()
+    original_check = provider.check_terminal
+
+    async def check_and_change(**kwargs):
+        result = await original_check(**kwargs)
+        if change == "inactive_venue":
+            store.save_venue(admin, venue, VenueInput(name="Same venue", active=False, revision=2))
+        else:
+            store.save_terminal(
+                admin,
+                venue,
+                terminal if change == "key" else uuid4(),
+                TerminalInput(
+                    name="Updated terminal",
+                    api_key=SecretStr("synthetic-key-2"),
+                    mode="sandbox",
+                    make_default=True,
+                    revision=1 if change == "key" else None,
+                ),
+            )
+        return result
+
+    provider.check_terminal = check_and_change
+    service = TenantPayments(store, lambda _: provider, feature_authorizer=lambda _: True)
+    deposit = store.create(admin, payload(venue))
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(service.prepare(UUID(deposit["id"]), token(deposit), uuid4()))
+    assert error.value.status_code == 409
+    assert provider.calls == 0
+    assert store.guest(UUID(deposit["id"]), token(deposit))["payment"]["state"] == "failed"
+
+
+def test_creation_guard_holds_settings_until_provider_dispatch_finishes(companies):
+    _, (store, _) = companies
+    admin = owner(store)
+    venue, terminal = setup(store, admin)
+    deposit = store.create(admin, payload(venue))
+    attempt, _ = reserved(store, UUID(deposit["id"]), token(deposit), uuid4())
+    with store.creation_terminal_guard(UUID(attempt["id"])):
+        for table, identifier in (("venues", venue), ("terminals", terminal)):
+            with store.connection() as db:
+                with pytest.raises(psycopg.errors.LockNotAvailable):
+                    store.execute(
+                        db,
+                        "SELECT id FROM {payments}." + table + " WHERE id=%s FOR UPDATE NOWAIT",
+                        (identifier,),
+                    )
+                db.rollback()
+    store.save_terminal(
+        admin,
+        venue,
+        terminal,
+        TerminalInput(name="Updated", mode="sandbox", make_default=True, revision=1),
+    )
+    with pytest.raises(HTTPException):
+        with store.creation_terminal_guard(UUID(attempt["id"])):
+            pytest.fail("Old terminal version must not be dispatched")
+
+
 def test_invalid_terminal_context_never_creates_provider_operation(companies):
     from datetime import date
 

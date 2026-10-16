@@ -152,7 +152,10 @@ identity, connections, initial_sync, dns_tls and runtime_health. It does not mar
 company ready or establish an accepted historical binding. `feature_readiness` maps
 all 28 known feature IDs to `{state, read, write, reasons}` using current company/version
 module probes and explicit service evidence. Missing own Telegram, AI, commercial seller
-or payment settlement proof only closes the corresponding features. Finance has no
+only closes the corresponding features. Missing payment settlement proof keeps
+full acceptance incomplete, but does not block a first QR: creation still requires
+current runtime/module probes, subscription and fresh per-attempt provider terminal
+validation. Finance has no
 tenant schema/catalog capability and remains unavailable. Unknown evidence fails closed.
 Gateway and private verifier enforce writes separately; portal actor/warehouse ACLs remain.
 The owner retains the exact setup routes even when working modules are incomplete.
@@ -163,8 +166,11 @@ portal response. Busy provisioning returns 503; a changed company version return
 On upgrade, explicitly enqueue/retry previously accepted companies: the provisioner
 rechecks legacy module evidence without company/version/services and payment proofs
 without terminal_version_id while retaining compatible schema/sync evidence.
-Failed terminal writes keep the revocation. Retry real acceptance before creating a new
-payment; reconciliation of existing persisted operations remains available.
+Failed terminal writes keep the full-acceptance revocation. Ordinary guest QR creation
+does not require an earlier paid operation. Before provider dispatch, the payment
+service rechecks the reserved venue/default terminal/version and holds shared row
+locks until the bounded POST finishes; settings writes use the same venue/terminal
+lock order. Reconciliation of existing persisted operations remains available.
 Capability/role files, vaults and operator manifests must remain outside static roots.
 
 History availability is separate from deployment readiness: context and authenticated

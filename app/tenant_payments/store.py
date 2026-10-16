@@ -769,6 +769,50 @@ class PaymentStore:
             self.audit(db, principal, "deposit.edit", deposit_id)
             return self.public_deposit(self._deposit(db, deposit_id), staff=True, db=db)
 
+    @contextmanager
+    def creation_terminal_guard(self, attempt_id):
+        """Keep the reserved terminal current until its bounded provider POST finishes.
+
+        Terminal settings lock venue then terminal in the same order. Shared row
+        locks allow independent payments, but serialize settings changes with the
+        external dispatch. Settlement still uses the immutable attempt version.
+        """
+        with self.connection() as db:
+            db.execute("SET LOCAL lock_timeout = '5s'")
+            attempt = self.execute(
+                db,
+                "SELECT a.terminal_id,a.terminal_version_id,a.state,d.venue_id "
+                "FROM {payments}.attempts a JOIN {payments}.deposits d ON d.id=a.deposit_id "
+                "WHERE a.id=%s",
+                (attempt_id,),
+            ).fetchone()
+            if not attempt or attempt["state"] != "creating":
+                raise HTTPException(409, "Попытка оплаты изменилась. Обновите страницу.")
+            try:
+                venue = self.execute(
+                    db,
+                    "SELECT * FROM {payments}.venues WHERE id=%s FOR SHARE",
+                    (attempt["venue_id"],),
+                ).fetchone()
+                terminal = self.execute(
+                    db,
+                    "SELECT * FROM {payments}.terminals WHERE id=%s FOR SHARE",
+                    (attempt["terminal_id"],),
+                ).fetchone()
+            except psycopg.errors.LockNotAvailable:
+                raise HTTPException(409, "Настройки оплаты обновляются. Повторите позже.") from None
+            if (
+                not venue
+                or not venue["active"]
+                or venue["default_terminal_id"] != attempt["terminal_id"]
+                or not terminal
+                or not terminal["active"]
+                or terminal["venue_id"] != venue["id"]
+                or terminal["current_version_id"] != attempt["terminal_version_id"]
+            ):
+                raise HTTPException(409, "Настройки оплаты изменились. Обновите страницу.")
+            yield
+
     def reserve(self, deposit_id, token, request_id):
         """Commit the intent before returning a credential for the external POST."""
         with self.connection() as db:

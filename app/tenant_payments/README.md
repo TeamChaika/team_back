@@ -49,6 +49,9 @@ under this prefix save config with revision checks. The existing management rout
 may call `store.management/save_venue/save_terminal` directly to preserve its URLs.
 Terminal mutations create immutable encrypted versions. Attempts pin their own
 version, key, amount and currency, including after default-terminal changes.
+Immediately before creation, the reserved version must still be current and active.
+Shared venue/terminal row locks prevent settings changes during the bounded provider
+POST; already dispatched operations retain their original version for reconciliation.
 
 ## Guest and provider lifecycle
 
@@ -105,7 +108,15 @@ request key, so no automatic create retry is safe.
 See [PROVIDER.md](PROVIDER.md). Current official QR Manager Swagger publishes
 the sandbox host. This adapter separately pins the live host from the existing
 production integration. Both modes are explicit and supported. Authenticated key/terminal
-checks precede creation. Expanded provider-returned SBP QR currency + server
+checks precede each new attempt. Feature readiness for `payments.create` requires
+current company/version-bound module probes, a working runtime and an enabled
+subscription entitlement; it does not require a previously settled attempt.
+The service freshly validates the selected terminal before the provider POST,
+including after a guest selects an alternative terminal. Full runtime acceptance
+still requires the `payments` check with genuine settlement evidence; issuing a
+QR does not mark payment acceptance complete. See
+[operator acceptance](../../docs/payment-acceptance.md).
+Expanded provider-returned SBP QR currency + server
 creation UUID + versioned merchant context can settle documented SSE statuses.
 Unified QR links carry no currency; these remain `currency_unverified` unless a
 provider status explicitly supplies valid currency. See PROVIDER.md for the

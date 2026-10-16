@@ -80,7 +80,9 @@ def test_unavailable_or_stale_runtime_cannot_authorize_any_feature(accepted, wor
 def test_foreign_company_and_absent_evidence_fail_closed(accepted):
     company, checks = accepted
     checks["modules"]["evidence"]["company_id"] = "another-company"
-    assert not feature_readiness(company, checks, working=True)["profile.account"]["read"]
+    readiness = feature_readiness(company, checks, working=True)
+    assert not readiness["profile.account"]["read"]
+    assert not readiness["payments.create"]["write"]
     assert all(
         item["state"] == "not_checked"
         for item in feature_readiness(company, {}, working=True).values()
@@ -108,7 +110,7 @@ def test_optional_modules_do_not_block_document_drafts_approval_or_analytics(acc
     assert readiness["payments.status"]["read"] is True
     for feature in ("notifications.telegram", "assistant.chat", "commercial.incoming"):
         assert readiness[feature]["read"] is False
-    assert readiness["payments.create"]["write"] is False
+    assert readiness["payments.create"]["write"] is True
 
 
 def test_get_probes_do_not_authorize_external_commands_without_service_evidence(accepted):
@@ -125,12 +127,12 @@ def test_get_probes_do_not_authorize_external_commands_without_service_evidence(
         "assistant.chat",
         "notifications.telegram",
         "employees.management",
-        "payments.create",
         "operations.sync",
     ):
         assert readiness[feature]["write"] is False, feature
     assert readiness["documents.dispatch"]["read"] is True
     assert readiness["documents.waybills"]["write"] is True
+    assert readiness["payments.create"]["write"] is True
 
 
 @pytest.mark.parametrize(
@@ -155,16 +157,21 @@ def test_disabled_operator_control_blocks_writes_preserves_reads(accepted, flag,
 @pytest.mark.parametrize(
     "proof",
     [
+        None,
+        {},
         {"ok": True, "evidence": {"enabled": False}},
         {"ok": True, "evidence": {"terminals": []}},
         {"ok": False, "evidence": {"terminals": []}},
     ],
 )
-def test_disabled_or_incomplete_payment_acceptance_cannot_create(accepted, proof):
+def test_first_payment_does_not_require_prior_payment_acceptance(accepted, proof):
     company, checks = accepted
-    checks["payments"] = proof
+    if proof is None:
+        checks.pop("payments")
+    else:
+        checks["payments"] = proof
     readiness = feature_readiness(company, checks, working=True)
-    assert readiness["payments.create"]["write"] is False
+    assert readiness["payments.create"]["write"] is True
     assert readiness["payments.status"]["read"] is True
     assert readiness["deposits.bookings"]["write"] is True
 
@@ -179,10 +186,10 @@ def test_disabled_or_incomplete_payment_acceptance_cannot_create(accepted, proof
         ("check_id", ""),
     ],
 )
-def test_payment_terminal_proof_must_be_complete_and_current(accepted, key, value):
+def test_historical_payment_proof_does_not_gate_new_payment_creation(accepted, key, value):
     company, checks = accepted
     checks["payments"]["evidence"]["terminals"][0][key] = value
-    assert not feature_readiness(company, checks, working=True)["payments.create"]["write"]
+    assert feature_readiness(company, checks, working=True)["payments.create"]["write"]
 
 
 def test_expired_subscription_keeps_history_but_denies_writes(accepted):
@@ -197,6 +204,8 @@ def test_expired_subscription_keeps_history_but_denies_writes(accepted):
     readiness = feature_readiness(company, checks, working=True)
     assert readiness["documents.waybills"]["read"] is True
     assert readiness["documents.waybills"]["write"] is False
+    assert readiness["payments.create"]["read"] is True
+    assert readiness["payments.create"]["write"] is False
 
 
 def test_failed_probe_is_scoped_and_all_duplicates_must_pass(accepted):
@@ -208,3 +217,29 @@ def test_failed_probe_is_scoped_and_all_duplicates_must_pass(accepted):
     assert not readiness["purchases.prices"]["read"]
     assert not readiness["purchases.impact"]["read"]
     assert readiness["analytics.overview"]["read"]
+
+
+@pytest.mark.parametrize("path", ["/api/me", *DEPENDENCIES["payments.create"].paths])
+@pytest.mark.parametrize("missing", [False, True])
+def test_payment_creation_requires_current_successful_module_probes(accepted, path, missing):
+    company, checks = accepted
+    probes = checks["modules"]["evidence"]["probes"]
+    if missing:
+        probes[:] = [probe for probe in probes if probe["path"] != path]
+    else:
+        next(probe for probe in probes if probe["path"] == path)["ok"] = False
+    assert not feature_readiness(company, checks, working=True)["payments.create"]["write"]
+
+
+@pytest.mark.parametrize("module_disabled", [False, True])
+def test_payment_creation_requires_enabled_module_and_feature(accepted, module_disabled):
+    company, checks = accepted
+    if module_disabled:
+        company["modules"]["deposits"] = False
+    else:
+        company["subscription"] = {
+            "policy": "plans_v1",
+            "plan_id": "full",
+            "overrides": {"payments.create": {"mode": "deny"}},
+        }
+    assert not feature_readiness(company, checks, working=True)["payments.create"]["write"]

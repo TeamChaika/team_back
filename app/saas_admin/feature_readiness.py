@@ -1,8 +1,10 @@
 """Version-pinned operational evidence, separate from actor/warehouse authorization.
 
 A successful read probe proves a readable service. External commands additionally
-require their own worker/configuration/payment evidence. Registry callers must
-supply checks from the current provisioning version, never a historical runtime.
+require their own worker/configuration evidence. Payment creation validates the
+selected terminal afresh in the payment service; settlement is full acceptance
+evidence. Registry callers must supply checks from the current provisioning
+version, never a historical runtime.
 """
 
 from dataclasses import dataclass
@@ -71,7 +73,6 @@ DEPENDENCIES = {
     "payments.create": Dependencies(
         ("/api/deposits", "/api/deposits/permissions", "/api/payment-settings"),
         write_services=(),
-        write_check="payments",
     ),
     "payments.status": Dependencies(("/api/deposits", "/api/deposits/permissions")),
     "management.users": Dependencies(("/api/management/accounts",), write_services=()),
@@ -85,28 +86,6 @@ DEPENDENCIES = {
     "assistant.chat": Dependencies(("/api/assistant/status",), ("assistant_configured",), ()),
     "operations.sync": Dependencies(("/api/status",), write_services=("scheduler",)),
 }
-
-
-def _payment_verified(check, company):
-    evidence = check.get("evidence", {})
-    if check.get("ok") is not True or not isinstance(evidence, dict):
-        return False
-    terminals = evidence.get("terminals")
-    return (
-        evidence.get("enabled") is not False
-        and isinstance(terminals, list)
-        and bool(terminals)
-        and all(
-            isinstance(item, dict)
-            and item.get("configuration_version") == company.get("version")
-            and item.get("mode") in {"sandbox", "live"}
-            and all(
-                isinstance(item.get(key), str) and item[key].strip()
-                for key in ("terminal_id", "terminal_version_id", "check_id", "settled_attempt_id")
-            )
-            for item in terminals
-        )
-    )
 
 
 def feature_readiness(company: dict, checks: dict, *, working: bool) -> dict[str, dict]:
@@ -180,12 +159,9 @@ def feature_readiness(company: dict, checks: dict, *, working: bool) -> dict[str
             if deps.write_check:
                 check = checks.get(deps.write_check, {})
                 check = check if isinstance(check, dict) else {}
-                if deps.write_check == "payments":
-                    valid = _payment_verified(check, company)
-                else:
-                    proof = check.get("evidence", {})
-                    count = proof.get("checked_connections") if isinstance(proof, dict) else None
-                    valid = check.get("ok") is True and type(count) is int and count > 0
+                proof = check.get("evidence", {})
+                count = proof.get("checked_connections") if isinstance(proof, dict) else None
+                valid = check.get("ok") is True and type(count) is int and count > 0
                 if not valid:
                     write = False
                     reasons.append(deps.write_check + "_acceptance_required")

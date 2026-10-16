@@ -4,6 +4,7 @@ from urllib.parse import urlencode
 from uuid import UUID
 
 from fastapi import HTTPException
+from fastapi.concurrency import contextmanager_in_threadpool
 from starlette.concurrency import run_in_threadpool
 
 from app.tenant_payments.provider import CreationRejected, CreationUnknown, VerificationUnavailable
@@ -81,15 +82,16 @@ class TenantPayments:
             )
             if not checked["ready"]:
                 raise CreationRejected("Terminal subscription or receipt configuration unavailable")
-            await authorizer()
-            created = await provider.create(
-                api_key=context["api_key"],
-                amount_minor=context["amount_minor"],
-                currency=context["currency"],
-                request_id=request_id,
-                notification_url=callback,
-                redirect_url=context["redirect_url"],
-            )
+            async with contextmanager_in_threadpool(self.store.creation_terminal_guard(attempt_id)):
+                await authorizer()
+                created = await provider.create(
+                    api_key=context["api_key"],
+                    amount_minor=context["amount_minor"],
+                    currency=context["currency"],
+                    request_id=request_id,
+                    notification_url=callback,
+                    redirect_url=context["redirect_url"],
+                )
         except HTTPException:
             await run_in_threadpool(self.store.record_creation, attempt_id, rejected=True)
             raise
