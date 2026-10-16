@@ -271,10 +271,12 @@ def test_tenant_bootstrap_uses_own_capture_and_only_valid_capture_advances(
         def transaction(self):
             return nullcontext()
 
-        def cursor(self):
+        def cursor(self, **kwargs):
             return nullcontext(self)
 
         def execute(self, query, parameters=None):
+            if not isinstance(query, str):
+                query = query.as_string()
             if query.startswith("INSERT"):
                 writes.append((query, parameters))
             return self
@@ -347,7 +349,7 @@ def test_tenant_bootstrap_uses_own_capture_and_only_valid_capture_advances(
     )
     assert calls == [*history.REPORT_ORDER, "logout", "closed"]
     invalid = fault not in {None, "discrepancy"}
-    assert report["counts"]["completed_days"] == (0 if invalid else 1)
+    assert report["counts"]["completed_days"] == (0 if invalid else 1), report
     assert report["status"] == ("failed" if invalid else "succeeded")
     assert len(published) == (0 if invalid else 1)
     assert bool(writes) == (not invalid)

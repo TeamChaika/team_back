@@ -215,7 +215,7 @@ def runtime(db, sample, monkeypatch):
         return httpx.Response(responses["logout"], json={"state": "logged_out"})
 
     client = httpx.Client(transport=httpx.MockTransport(handle), base_url="http://127.0.0.1:8010")
-    monkeypatch.setattr(sync_employees.httpx, "Client", lambda **kwargs: client)
+    monkeypatch.setattr(sync_employees, "collector_client", lambda **kwargs: client)
     return settings, db, calls, responses
 
 

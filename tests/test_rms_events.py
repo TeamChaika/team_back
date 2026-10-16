@@ -395,7 +395,7 @@ def runtime(db, tmp_path, monkeypatch):
         return httpx.Response(statuses["logout"], json={"state": "logged_out"})
 
     client = httpx.Client(base_url="http://127.0.0.1:8010", transport=httpx.MockTransport(handle))
-    monkeypatch.setattr(sync.httpx, "Client", lambda **kwargs: client)
+    monkeypatch.setattr(sync, "collector_client", lambda **kwargs: client)
     monkeypatch.setattr(sync.psycopg, "connect", lambda *a, **k: nullcontext(db))
     monkeypatch.setattr(sync, "configured_sources", lambda _: [source])
     monkeypatch.setattr(sync, "BACKEND_DIR", tmp_path)

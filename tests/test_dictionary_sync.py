@@ -207,7 +207,7 @@ def runtime(db, bundle, monkeypatch):
         return httpx.Response(states.get(kind, 200), json=responses[kind])
 
     client = httpx.Client(base_url="http://127.0.0.1:8010", transport=httpx.MockTransport(handle))
-    monkeypatch.setattr(sync.httpx, "Client", lambda **kwargs: client)
+    monkeypatch.setattr(sync, "collector_client", lambda **kwargs: client)
     return calls, states
 
 
