@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 from app.core.config import Settings
 from app.services.iiko_olap_sales import _unique_fields
 from app.sync_references import configured_sources, reference_lock
+from app.sync_scope import load_scope, skipped
 
 KINDS = {"daily", "dishes", "payments", "discounts", "returns", "waiters", "hours"}
 METRICS = {
@@ -158,6 +159,24 @@ def parse_review(
 
 
 def publish(db, bundle: dict) -> dict:
+    scope = load_scope(db)
+    if scope.empty:
+        return skipped(scope)
+    if scope.departments is not None:
+        bundle = {
+            **bundle,
+            "id": uuid5(bundle["id"], json.dumps(scope.metadata(), sort_keys=True)),
+            "reports": {
+                kind: {
+                    **report,
+                    "rows": [
+                        row for row in report["rows"] if scope.department(row["Department.Id"])
+                    ],
+                }
+                for kind, report in bundle["reports"].items()
+            },
+            "checks": [*bundle["checks"], {"exact_match": True, **scope.metadata()}],
+        }
     manifest = bundle["manifest"]
     observed = max(
         datetime.fromisoformat(r["info"]["received_at"]) for r in bundle["reports"].values()
@@ -208,6 +227,16 @@ def publish(db, bundle: dict) -> dict:
         for kind, report in bundle["reports"].items():
             info = report["info"]
             report_id = uuid5(bundle["id"], kind)
+            frozen_count = 0
+            if scope.departments is not None:
+                frozen_count = db.execute(
+                    "SELECT count(*) FROM chaika.sales_report_rows old "
+                    "JOIN chaika.sales_reports report ON report.id=old.report_id "
+                    "JOIN chaika.sales_report_days day ON day.current_set_id=report.set_id "
+                    "WHERE day.source_id='primary' AND day.business_date=%s AND report.kind=%s "
+                    "AND NOT(old.department_id=ANY(%s::uuid[]))",
+                    (manifest["business_date"], kind, list(scope.departments)),
+                ).fetchone()[0]
             report_records.append(
                 (
                     report_id,
@@ -217,7 +246,7 @@ def publish(db, bundle: dict) -> dict:
                     info["received_at"],
                     None if report.get("capture_id") else report["raw"],
                     info["sha256"],
-                    len(report["rows"]),
+                    len(report["rows"]) + frozen_count,
                     report.get("capture_id"),
                 ),
             )
@@ -246,6 +275,33 @@ def publish(db, bundle: dict) -> dict:
                 "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 row_records,
             )
+        frozen_rows = 0
+        if scope.departments is not None:
+            for kind in bundle["reports"]:
+                report_id = uuid5(bundle["id"], kind)
+                copied = db.execute(
+                    "INSERT INTO chaika.sales_report_rows "
+                    "(report_id,ordinal,department_id,revenue,cost,checks,guests,discount,"
+                    "return_sum,quantity,dimensions,origin_report_id) "
+                    "SELECT %s,%s+row_number() OVER(ORDER BY old.ordinal),old.department_id,"
+                    "old.revenue,old.cost,old.checks,old.guests,old.discount,old.return_sum,"
+                    "old.quantity,old.dimensions,coalesce(old.origin_report_id,old.report_id) "
+                    "FROM chaika.sales_report_rows old "
+                    "JOIN chaika.sales_reports report ON report.id=old.report_id "
+                    "JOIN chaika.sales_report_days day ON day.current_set_id=report.set_id "
+                    "WHERE day.source_id='primary' AND day.business_date=%s AND report.kind=%s "
+                    "AND NOT(old.department_id=ANY(%s::uuid[]))",
+                    (
+                        report_id,
+                        counts[kind],
+                        manifest["business_date"],
+                        kind,
+                        list(scope.departments),
+                    ),
+                ).rowcount
+                counts[kind] += copied
+                frozen_rows += copied
+
         db.execute(
             "INSERT INTO chaika.sales_report_days(source_id,business_date,current_set_id) "
             "VALUES('primary',%s,%s) ON CONFLICT(source_id,business_date) DO UPDATE "
@@ -256,6 +312,8 @@ def publish(db, bundle: dict) -> dict:
         )
     return {
         "status": "imported",
+        **scope.metadata(),
+        "frozen_rows": frozen_rows,
         "id": str(bundle["id"]),
         "date": manifest["business_date"],
         "rows": counts,

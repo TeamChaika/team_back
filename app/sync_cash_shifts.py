@@ -30,6 +30,7 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.sync_scope import load_scope, skipped
 
 
 def capture_cash_shifts(settings, source: Source, query, response, directory: Path | None = None):
@@ -118,6 +119,9 @@ def publish_cash_shifts(db, snapshot, groups) -> dict:
         or report.received_at.tzinfo is None
     ):
         raise SyncError("cash_shifts_incomplete")
+    scope = load_scope(db)
+    if scope.empty:
+        return skipped(scope)["counts"]
     known = {
         r[0]
         for r in db.execute(
@@ -135,9 +139,25 @@ def publish_cash_shifts(db, snapshot, groups) -> dict:
         "point_of_sale_name",
         "mapping_state",
     ]
+    frozen_ids = set()
+    if scope.departments is not None:
+        frozen_ids = {
+            row[0]
+            for row in db.execute(
+                "SELECT id FROM chaika.cash_shifts WHERE source_id=%s "
+                "AND (department_id IS NULL OR NOT(department_id=ANY(%s::uuid[])))",
+                (snapshot["source_id"], list(scope.departments)),
+            )
+        }
     records = []
+    rejected_ids = []
     for row in report.items:
+        if row.id in frozen_ids:
+            continue
         binding = bindings.get(row.point_of_sale_id, {"mapping_state": "missing"})
+        if not scope.department(binding.get("department_id")):
+            rejected_ids.append(row.id)
+            continue
         counts["matched" if binding["mapping_state"] == "matched" else "unmapped"] += 1
         counts["open" if row.close_date is None else "closed"] += 1
         counts["accepted"] += row.accept_date is not None
@@ -160,6 +180,31 @@ def publish_cash_shifts(db, snapshot, groups) -> dict:
                 ),
                 records,
             )
+        counts["shifts"] = len(records)
+        frozen = 0
+        if scope.departments is not None:
+            copied = [column for column in columns if column != "snapshot_id"]
+            frozen = db.execute(
+                "INSERT INTO chaika.cash_shift_observations "
+                "(snapshot_id,origin_snapshot_id," + ",".join(copied) + ") "
+                "SELECT %s,coalesce(old.origin_snapshot_id,old.snapshot_id),"
+                + ",".join("old." + column for column in copied)
+                + " FROM chaika.cash_shift_observations old "
+                "JOIN chaika.cash_shift_days previous ON previous.last_snapshot_id=old.snapshot_id "
+                "WHERE previous.source_id=%s AND previous.open_day=%s "
+                "AND (old.department_id IS NULL OR NOT(old.department_id=ANY(%s::uuid[])) "
+                "OR old.id=ANY(%s::uuid[])) "
+                "ON CONFLICT(snapshot_id,id) DO NOTHING",
+                (
+                    snapshot["id"],
+                    snapshot["source_id"],
+                    query.open_date_from,
+                    list(scope.departments),
+                    rejected_ids,
+                ),
+            ).rowcount
+        dict.update(counts, scope.metadata(), frozen_rows=frozen)
+        report = report.model_copy(update={"total": len(records) + frozen})
         db.execute(
             "INSERT INTO chaika.cash_shift_days"
             "(source_id,open_day,last_snapshot_id,observed_at,row_count) VALUES(%s,%s,%s,%s,%s) "
@@ -199,6 +244,9 @@ def synchronize_cash_shifts(
         ) as db,
         reference_lock(db),
     ):
+        scope = load_scope(db)
+        if scope.empty:
+            return skipped(scope)
         register_sources(db, [source])
         if not db.execute(
             "SELECT 1 FROM chaika.sources WHERE id=%s AND server_type='CHAIN'", (source.id,)
@@ -210,6 +258,7 @@ def synchronize_cash_shifts(
         )
         run_id = uuid4()
         counts = dict(
+            **scope.metadata(),
             completed_days=0,
             total_days=(query.open_date_to - query.open_date_from).days + 1,
             shifts=0,

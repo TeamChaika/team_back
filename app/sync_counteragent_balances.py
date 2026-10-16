@@ -26,6 +26,7 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.sync_scope import carry_balance_rows, load_scope, skipped
 
 
 def capture_counteragent_balances(
@@ -85,6 +86,11 @@ def publish_counteragent_balances(db, snapshot: dict) -> dict:
         or report.received_at.tzinfo is None
     ):
         raise SyncError("counteragent_balances_incomplete")
+    scope = load_scope(db)
+    if scope.empty:
+        return skipped(scope)["counts"]
+    selected = [row for row in report.items if scope.department(row.department_id)]
+    report = report.model_copy(update={"items": selected, "total": len(selected)})
     accounts = {r.account_id for r in report.items}
     counterparties = {r.counteragent_id for r in report.items if r.counteragent_id is not None}
     departments = {r.department_id for r in report.items if r.department_id is not None}
@@ -154,6 +160,9 @@ def publish_counteragent_balances(db, snapshot: dict) -> dict:
         }
         counts["unmatched_counteragents"] = len(counterparties - known_counterparties)
         counts["unmatched_departments"] = len(departments - known_departments)
+        frozen = carry_balance_rows(db, snapshot, selected, "counteragent", scope)
+        counts.update(scope.metadata(), frozen_rows=frozen)
+        report = report.model_copy(update={"total": report.total + frozen})
         db.execute(
             "INSERT INTO chaika.counteragent_balance_reports"
             "(source_id,accounting_timestamp,last_snapshot_id,row_count,"
@@ -191,6 +200,9 @@ def synchronize_counteragent_balances(
         ) as db,
         reference_lock(db),
     ):
+        scope = load_scope(db)
+        if scope.empty:
+            return skipped(scope)
         register_sources(db, [source])
         if not db.execute(
             "SELECT 1 FROM chaika.sources WHERE id=%s AND server_type='CHAIN'", (source.id,)

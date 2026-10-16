@@ -75,8 +75,14 @@ def create_portal(
     limiter = LoginLimiter(web.max_login_attempts)
     chats = assistant_store or AssistantStore(repo)
     employees = employee_editor or EmployeeEditor(settings, repo)
-    live_sales = LiveSales(settings) if settings.live_sales_enabled else None
-    indicators = indicator_service or IndicatorService(settings)
+    live_sales = (
+        LiveSales(settings, policy_reader=getattr(repo, "sync_policy", None))
+        if settings.live_sales_enabled
+        else None
+    )
+    indicators = indicator_service or IndicatorService(
+        settings, policy_reader=getattr(repo, "sync_policy", None)
+    )
     document_config = document_settings or DocumentSettings()
 
     @asynccontextmanager
@@ -381,7 +387,7 @@ def create_portal(
             and not scope.warehouse_restricted
             and start <= datetime.now(ZONE).date() <= end
         ):
-            bundle, metadata = live_sales.get()
+            bundle, metadata = live_sales.get(scope)
             return {
                 **repo.sales(
                     scope,
@@ -440,7 +446,7 @@ def create_portal(
             and not scope.warehouse_restricted
             and start <= datetime.now(ZONE).date() <= end
         ):
-            bundle, metadata = live_sales.get()
+            bundle, metadata = live_sales.get(scope)
             return {
                 **repo.overview(scope, start, end, granularity, live_bundle=bundle),
                 "live": metadata,

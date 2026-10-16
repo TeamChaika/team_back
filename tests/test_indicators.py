@@ -270,6 +270,7 @@ def test_unconfirmed_logout_quarantines_the_direct_service(monkeypatch):
 
     monkeypatch.setattr(indicators.psycopg, "connect", lambda *a, **k: nullcontext(None))
     monkeypatch.setattr(indicators, "reference_lock", lambda _: nullcontext())
+    monkeypatch.setattr(indicators, "guard_requests", lambda *_: None)
     monkeypatch.setattr(indicators.httpx, "post", no_collector)
     monkeypatch.setattr(indicators, "IikoClient", Client)
     monkeypatch.setattr(indicators, "IikoAuthService", Auth)

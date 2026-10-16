@@ -31,6 +31,7 @@ from app.services.iiko_auth import IikoAuthService
 from app.sync_references import reference_lock
 from app.sync_sales_history import FixedReport, error_code
 from app.web.coverage import ZONE
+from app.web.sync_policy import SyncPolicy, guard_requests
 from app.web.warehouse_analytics import warehouse_ids
 
 log = logging.getLogger(__name__)
@@ -183,6 +184,7 @@ def collect_reports(settings, bodies):
         ) as db,
         reference_lock(db),
     ):
+        guard_requests(db, bodies)
         try:
             response = httpx.post(
                 "http://127.0.0.1:8010/api/v1/iiko/connections/primary/logout",
@@ -285,7 +287,8 @@ def fetch_warehouse_options(settings, query, ids, stores, field):
 
 
 class IndicatorService:
-    def __init__(self, settings, *, fetch=fetch_values, clock=monotonic):
+    def __init__(self, settings, *, fetch=fetch_values, clock=monotonic, policy_reader=None):
+        self.policy_reader = policy_reader or SyncPolicy
         self.settings = settings
         self.fetch, self.clock = fetch, clock
         self.guard = Lock()
@@ -322,12 +325,22 @@ class IndicatorService:
         """Bounded asynchronous cache; pending/error results never use venue options."""
         if field not in FILTERS:
             raise HTTPException(422, "Неизвестный фильтр.")
+        policy = self.policy_reader()
+        policy.require(scope.ids)
         stores = warehouse_ids(scope)
         ids = sorted(str(value) for value in scope.ids)
         if stores is None or not ids:
             raise HTTPException(403, "Нет доступных складов.")
         key = json.dumps(
-            ["warehouse_options", ids, stores, field, query.model_dump(mode="json")], sort_keys=True
+            [
+                "warehouse_options",
+                policy.revision,
+                ids,
+                stores,
+                field,
+                query.model_dump(mode="json"),
+            ],
+            sort_keys=True,
         )
         with self.guard:
             entry = self.cache.get(key)
@@ -359,10 +372,14 @@ class IndicatorService:
         try:
             result, _ = future.result()
             return {**result, "status": "ready"}
+        except HTTPException:
+            raise
         except Exception:
             return {"values": [], "sync": None, "status": "unavailable"}
 
     def _job(self, scope, query, metric):
+        policy = self.policy_reader()
+        policy.require(scope.ids)
         if metric is not None and metric not in METRIC_INPUTS:
             raise HTTPException(422, "Неизвестный показатель.")
         ids = sorted(str(value) for value in scope.ids)
@@ -372,6 +389,7 @@ class IndicatorService:
         inputs = tuple(sorted(METRIC_INPUTS[metric] if metric else BASE | EXTRA))
         key = json.dumps(
             [
+                policy.revision,
                 ids,
                 stores,
                 query.model_dump(mode="json", exclude={"day", "direct", "filters"})
@@ -459,6 +477,8 @@ class IndicatorService:
 
     @staticmethod
     def _error(error):
+        if isinstance(error, HTTPException):
+            raise error
         if error_code(error) == "iiko_session_unknown":
             raise HTTPException(
                 503, "Соединение с iiko требует проверки. Фильтры доступны."

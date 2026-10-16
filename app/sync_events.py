@@ -19,6 +19,7 @@ from app.sync_references import (
     reference_lock,
     register_sources,
 )
+from app.sync_scope import load_scope, skipped, source_enabled
 
 
 def synchronize_events(
@@ -42,6 +43,9 @@ def synchronize_events(
         ) as db,
         reference_lock(db),
     ):
+        scope = load_scope(db)
+        if scope.empty or not source_enabled(db, source.id, scope):
+            return skipped(scope)
         register_sources(db, [source])
         if not db.execute(
             "SELECT 1 FROM chaika.sources s JOIN chaika.rms_bindings b ON b.source_id=s.id "

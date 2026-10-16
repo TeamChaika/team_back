@@ -11,6 +11,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
+from app.web.operation_settings import (
+    OperationSettingsWrite,
+    read_operation_settings,
+    save_operation_settings,
+)
 from app.web.permissions import ANALYTICS_SECTIONS, SECTIONS, require_admin
 from app.web.repository import Scope, serial
 
@@ -427,6 +432,14 @@ def create_admin_router(access, repo, web, store=None):
         return scope.user["id"]
 
     Admin = Annotated[UUID, Depends(admin)]
+
+    @router.get("/operation-settings")
+    def operation_settings(actor: Admin):
+        return read_operation_settings(store)
+
+    @router.post("/operation-settings")
+    def update_operation_settings(payload: OperationSettingsWrite, actor: Admin):
+        return save_operation_settings(store, actor, payload)
 
     @router.get("/accounts")
     def accounts(actor: Admin):
