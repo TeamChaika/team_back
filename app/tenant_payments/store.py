@@ -20,7 +20,7 @@ from psycopg.types.json import Jsonb
 
 from app.tenancy.config import TenantRuntime
 from app.tenancy.sql import render
-from app.tenant_payments.models import PaymentPrincipal
+from app.tenant_payments.models import PaymentPrincipal, TerminalMerchantMismatch
 
 
 def digest(value: str) -> str:
@@ -238,7 +238,7 @@ class PaymentStore:
             if not version or version["mode"] != verified.mode:
                 raise HTTPException(422, "Режим терминала не подтверждён.")
             if version["merchant_id"] and version["merchant_id"] != verified.merchant_id:
-                raise HTTPException(422, "Получатель платежей не соответствует настройке.")
+                raise TerminalMerchantMismatch()
             check_id = uuid4()
             self.execute(
                 db,
@@ -893,7 +893,13 @@ class PaymentStore:
                 "redirect_url": self.guest_url(deposit, db=db),
             }
 
-    def record_creation(self, attempt_id, created=None, *, rejected=False):
+    def record_creation(self, attempt_id, created=None, *, rejected=False, failure_code=None):
+        if failure_code is not None and (
+            failure_code not in ("creation_rejected", "terminal_merchant_mismatch")
+            or not rejected
+            or created is not None
+        ):
+            raise ValueError("Invalid creation failure code")
         with self.connection() as db:
             row = self.execute(
                 db, "SELECT * FROM {payments}.attempts WHERE id=%s FOR UPDATE", (attempt_id,)
@@ -937,13 +943,17 @@ class PaymentStore:
                     )
                 return
             if created is None:
+                # A local rejection proves non-dispatch only for a fresh reservation.
+                # Never turn a prior uncertain POST or callback operation into a retry.
+                if rejected and (row["state"] != "creating" or row["operation_id"]):
+                    return
                 self.execute(
                     db,
                     "UPDATE {payments}.attempts SET "
                     "state=%s,diagnostic=%s,updated_at=now() WHERE id=%s",
                     (
                         "failed" if rejected and not row["operation_id"] else "unknown",
-                        "creation_rejected" if rejected else "creation_unknown",
+                        (failure_code or "creation_rejected") if rejected else "creation_unknown",
                         attempt_id,
                     ),
                 )

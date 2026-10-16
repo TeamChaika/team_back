@@ -283,6 +283,148 @@ def test_concurrent_intent_reserves_once_unknown_never_recreates(companies):
     assert result["payment"]["state"] == "unknown"
 
 
+def test_terminal_merchant_mismatch_is_safe_pre_dispatch_failure(companies):
+    _, (store, _) = companies
+    admin = owner(store)
+    venue, terminal = setup(store, admin)
+    store.save_terminal(
+        admin,
+        venue,
+        terminal,
+        TerminalInput(
+            name="Configured terminal",
+            merchant_id="different-configured-merchant",
+            revision=1,
+            mode="sandbox",
+            make_default=True,
+        ),
+    )
+    provider = Provider()
+    service = TenantPayments(store, lambda _: provider, feature_authorizer=lambda _: True)
+    deposit = store.create(admin, payload(venue))
+    deposit_id, guest = UUID(deposit["id"]), token(deposit)
+    for action in (
+        lambda: service.validate_terminal(admin, venue, terminal),
+        lambda: service.prepare(deposit_id, guest, uuid4()),
+    ):
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(action())
+        assert error.value.status_code == 422
+        assert error.value.detail == "Получатель платежей не соответствует настройке."
+    assert provider.calls == 0
+    payment = store.guest(deposit_id, guest)["payment"]
+    assert payment["state"] == "failed"
+    assert payment["diagnostic"] == "terminal_merchant_mismatch"
+    assert "different-configured-merchant" not in str(payment)
+    assert "synthetic-merchant" not in str(payment)
+    attempt_id = store.latest_attempt(deposit_id)
+    context = store.check_context(attempt_id)
+    assert context["operation_id"] is None
+    assert context["terminal_check_id"] is None
+
+
+@pytest.mark.parametrize("known_operation", [False, True])
+@pytest.mark.parametrize("failure_code", [None, "terminal_merchant_mismatch"])
+def test_creation_rejection_preserves_uncertain_attempt(companies, known_operation, failure_code):
+    _, (store, _) = companies
+    admin = owner(store)
+    venue, _ = setup(store, admin)
+    deposit = store.create(admin, payload(venue))
+    deposit_id, guest = UUID(deposit["id"]), token(deposit)
+    attempt, context = reserved(store, deposit_id, guest, uuid4())
+    attempt_id = UUID(attempt["id"])
+    operation = uuid4() if known_operation else None
+    if operation:
+        store.callback(attempt_id, context["callback"], operation)
+    else:
+        store.record_creation(attempt_id)
+    before = store.guest(deposit_id, guest)["payment"]
+    store.record_creation(attempt_id, rejected=True, failure_code=failure_code)
+    assert store.guest(deposit_id, guest)["payment"] == before
+    assert store.check_context(attempt_id)["operation_id"] == operation
+    _, next_context = store.reserve(deposit_id, guest, uuid4())
+    assert next_context is None
+
+
+def test_creation_failure_diagnostic_preserves_paid_operation(companies):
+    _, (store, _) = companies
+    admin = owner(store)
+    venue, _ = setup(store, admin)
+    deposit = store.create(admin, payload(venue))
+    deposit_id, guest = UUID(deposit["id"]), token(deposit)
+    provider = Provider()
+    service = TenantPayments(store, lambda _: provider, feature_authorizer=lambda _: True)
+    asyncio.run(service.prepare(deposit_id, guest, uuid4()))
+    attempt_id = store.latest_attempt(deposit_id)
+    assert store.record_check(
+        attempt_id, VerifiedOperation(provider.operation_id, 50000, "RUB", "paid")
+    ) == "paid"
+    before = store.guest(deposit_id, guest)["payment"]
+    store.record_creation(attempt_id, rejected=True, failure_code="terminal_merchant_mismatch")
+    assert store.guest(deposit_id, guest)["payment"] == before
+    assert store.check_context(attempt_id)["operation_id"] == provider.operation_id
+    assert store.get(admin, deposit_id)["status"] == "paid"
+
+
+@pytest.mark.parametrize("failure_code", ["creation_rejected", "terminal_merchant_mismatch"])
+def test_refresh_preserves_definite_pre_dispatch_failure(companies, failure_code):
+    _, (store, _) = companies
+    admin = owner(store)
+    venue, _ = setup(store, admin)
+    deposit = store.create(admin, payload(venue))
+    deposit_id, guest = UUID(deposit["id"]), token(deposit)
+    attempt, _ = store.reserve(deposit_id, guest, uuid4())
+    attempt_id = UUID(attempt["id"])
+    store.record_creation(attempt_id, rejected=True, failure_code=failure_code)
+
+    def no_provider(_):
+        pytest.fail("Definite pre-dispatch failures must not contact the provider")
+
+    service = TenantPayments(store, no_provider, feature_authorizer=lambda _: True)
+    # Expire the lease before each public/manual refresh path.
+    for refresh in (
+        lambda: service.refresh_guest(deposit_id, guest),
+        lambda: service.reconcile(attempt_id),
+        lambda: service.reconcile(attempt_id, leased=True),
+    ):
+        with store.connection() as db:
+            store.execute(
+                db, "UPDATE {payments}.attempts SET next_check_at=now() WHERE id=%s", (attempt_id,)
+            )
+        asyncio.run(refresh())
+        payment = store.guest(deposit_id, guest)["payment"]
+        assert payment["state"] == "failed"
+        assert payment["diagnostic"] == failure_code
+        assert store.check_context(attempt_id)["operation_id"] is None
+    next_attempt, context = store.reserve(deposit_id, guest, uuid4())
+    assert next_attempt["id"] != attempt["id"]
+    assert context is not None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"rejected": True, "failure_code": "provider raw secret"},
+        {"failure_code": "terminal_merchant_mismatch"},
+        {
+            "rejected": True,
+            "failure_code": "terminal_merchant_mismatch",
+            "created": CreatedOperation(uuid4(), "https://provider.example/pay"),
+        },
+    ],
+)
+def test_creation_rejects_unsafe_failure_diagnostic(companies, kwargs):
+    _, (store, _) = companies
+    admin = owner(store)
+    venue, _ = setup(store, admin)
+    deposit = store.create(admin, payload(venue))
+    attempt, _ = reserved(store, UUID(deposit["id"]), token(deposit), uuid4())
+    attempt_id = UUID(attempt["id"])
+    with pytest.raises(ValueError, match="Invalid creation failure code"):
+        store.record_creation(attempt_id, **kwargs)
+    assert store.check_context(attempt_id)["state"] == "creating"
+
+
 def test_attempt_persisted_before_unknown_provider_post_and_worker_restart(companies):
     _, (store, _) = companies
     admin = owner(store)

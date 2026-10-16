@@ -52,6 +52,11 @@ version, key, amount and currency, including after default-terminal changes.
 Immediately before creation, the reserved version must still be current and active.
 Shared venue/terminal row locks prevent settings changes during the bounded provider
 POST; already dispatched operations retain their original version for reconciliation.
+If the configured merchant differs from the provider's terminal check, creation is
+rejected before the provider POST and the guest attempt stores only the safe
+`terminal_merchant_mismatch` diagnostic. Management retains its HTTP 422 detail.
+Creation failure codes are whitelisted; a rejection cannot make an uncertain
+attempt or an already known provider operation retriable.
 
 ## Guest and provider lifecycle
 

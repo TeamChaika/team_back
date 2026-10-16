@@ -13,6 +13,13 @@ from app.web.deposits import DepositFilters, NewDeposit
 __all__ = ["DepositFilters", "NewDeposit", "PaymentPrincipal", "VenueInput", "TerminalInput"]
 
 
+class TerminalMerchantMismatch(HTTPException):
+    """Safe, typed rejection before dispatch; keep the management API detail."""
+
+    def __init__(self):
+        super().__init__(422, "Получатель платежей не соответствует настройке.")
+
+
 @dataclass(frozen=True)
 class PaymentPrincipal:
     """Only construct from a freshly verified server-side company scope."""

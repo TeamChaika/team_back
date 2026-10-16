@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from fastapi.concurrency import contextmanager_in_threadpool
 from starlette.concurrency import run_in_threadpool
 
+from app.tenant_payments.models import TerminalMerchantMismatch
 from app.tenant_payments.provider import CreationRejected, CreationUnknown, VerificationUnavailable
 
 
@@ -92,6 +93,14 @@ class TenantPayments:
                     notification_url=callback,
                     redirect_url=context["redirect_url"],
                 )
+        except TerminalMerchantMismatch:
+            await run_in_threadpool(
+                self.store.record_creation,
+                attempt_id,
+                rejected=True,
+                failure_code="terminal_merchant_mismatch",
+            )
+            raise
         except HTTPException:
             await run_in_threadpool(self.store.record_creation, attempt_id, rejected=True)
             raise
@@ -111,6 +120,13 @@ class TenantPayments:
         context = await run_in_threadpool(self.store.check_context, attempt_id)
         if context["state"] == "paid":
             return "paid"
+        if (
+            context["state"] == "failed"
+            and not context["operation_id"]
+            and context["diagnostic"] in ("creation_rejected", "terminal_merchant_mismatch")
+        ):
+            # Definite pre-dispatch failures have no provider operation to refresh.
+            return "failed"
         if not context["operation_id"]:
             return await run_in_threadpool(
                 self.store.record_check, attempt_id, diagnostic="creation_unknown"
