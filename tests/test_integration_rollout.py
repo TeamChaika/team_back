@@ -372,13 +372,16 @@ def test_prepare_pending_revision_race_keeps_other_company_progress(tmp_path):
     from app.saas_admin.repository import Problem
     from app.saas_admin.runtime_fleet import FleetPreparer
 
+    first = "00000000-0000-0000-0000-000000000001"
+    second = "00000000-0000-0000-0000-000000000002"
+
     @contextmanager
     def connect():
         yield SimpleNamespace(
             execute=lambda *a: SimpleNamespace(
                 fetchall=lambda: [
-                    {"company_id": "first"},
-                    {"company_id": "second"},
+                    {"company_id": first},
+                    {"company_id": second},
                 ]
             )
         )
@@ -387,7 +390,7 @@ def test_prepare_pending_revision_race_keeps_other_company_progress(tmp_path):
 
     def prepare(company):
         calls.append(company["id"])
-        if company["id"] == "first":
+        if company["id"] == first:
             raise Problem(409, "integrations_version_changed", "secret must not enter logs")
         return tmp_path / "second.json"
 
@@ -395,4 +398,4 @@ def test_prepare_pending_revision_race_keeps_other_company_progress(tmp_path):
     preparer.repo = SimpleNamespace(connect=connect, get=lambda identifier: {"id": identifier})
     preparer.prepare = prepare
     assert preparer.prepare_pending() == [tmp_path / "second.json"]
-    assert calls == ["first", "second"]
+    assert calls == [first, second]

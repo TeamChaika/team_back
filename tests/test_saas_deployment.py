@@ -168,7 +168,17 @@ def test_actual_central_assembly_has_accounts_dns_and_readiness_gate(deployment)
         portal = client.get("/api/overview", headers=headers)
         assert portal.status_code == 503
         assert portal.json()["detail"]["code"] == "runtime_not_ready"
-        assert not any(route.path.startswith("/verify/") for route in app.routes)
+        def route_paths(routes):
+            for route in routes:
+                if hasattr(route, "path"):
+                    yield route.path
+                nested = getattr(route, "original_router", None)
+                if nested is not None:
+                    yield from route_paths(nested.routes)
+
+        paths = set(route_paths(app.routes))
+        assert "/api/saas-admin/support/tickets" in paths
+        assert not any(path.startswith("/verify/") for path in paths)
         assert repo.auth.closes == 0
     assert repo.auth.closes == 1
 

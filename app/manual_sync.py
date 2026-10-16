@@ -187,6 +187,9 @@ def run_one(db, settings, stop, *, execute):
         execute(job, started_at, settings, stop)
     except Exception as error:
         state, code = "failed", error_code(error)
+        from app.support_background import capture_failure
+
+        capture_failure("sync_failed", exception=error)
         log.warning("Manual sync failed: %s (%s)", row["job"], code)
     else:
         state, code = "succeeded", None

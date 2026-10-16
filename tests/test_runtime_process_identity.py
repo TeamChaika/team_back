@@ -138,7 +138,12 @@ def test_failed_tenant_launch_does_not_stop_neighbor_and_backs_off(tmp_path, mon
 def test_corrupt_binding_does_not_prevent_next_company_tick(tmp_path, monkeypatch):
     for name in ("c_bad.json", "c_good.json"):
         (tmp_path / name).touch()
-    supervisor = FleetSupervisor(SimpleNamespace(root=tmp_path, prepare_pending=lambda: None))
+    prepared = []
+
+    def prepare_pending(*, create_missing_only):
+        prepared.append(create_missing_only)
+
+    supervisor = FleetSupervisor(SimpleNamespace(root=tmp_path, prepare_pending=prepare_pending))
     seen = []
 
     def tick(path):
@@ -149,6 +154,7 @@ def test_corrupt_binding_does_not_prevent_next_company_tick(tmp_path, monkeypatc
     monkeypatch.setattr(supervisor, "tick_company", tick)
     supervisor.tick()
     assert set(seen) == {"c_bad.json", "c_good.json"}
+    assert prepared == [True]
 
 
 def test_bound_socket_is_private_and_live_socket_is_never_replaced(tmp_path):

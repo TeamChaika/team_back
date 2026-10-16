@@ -257,7 +257,7 @@ def test_worker_logs_out_and_records_only_committed_days(db, sample, monkeypatch
         return httpx.Response(502 if failure == "logout" else 200, json={"state": "logged_out"})
 
     client = httpx.Client(base_url="http://127.0.0.1:8010", transport=httpx.MockTransport(handle))
-    monkeypatch.setattr(sync.httpx, "Client", lambda **kwargs: client)
+    monkeypatch.setattr(sync, "collector_client", lambda **kwargs: client)
     if failure == "publish":
 
         def fail(*args):

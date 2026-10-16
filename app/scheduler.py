@@ -278,6 +278,9 @@ def run_due(db, settings, stop, *, now=None, execute=run_job, manual=False):
                 "next_retry_at=now()+interval '5 minutes' WHERE job=%s AND slot=%s",
                 (code, job.key, slot),
             )
+            from app.support_background import capture_failure
+
+            capture_failure("sync_failed", exception=error)
             log.warning("Scheduled sync failed: %s (%s)", job.key, code)
         else:
             db.execute(
@@ -302,6 +305,9 @@ def main():
         or not settings.sync_api_key.get_secret_value()
     ):
         raise SystemExit("Scheduler requires iiko, database and sync API key configuration")
+    from app.support_background import close_primary, start_primary
+
+    support = start_primary()
     stop = Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
@@ -380,6 +386,7 @@ def main():
             if collector.poll() is not None:
                 raise SyncError("scheduler_collector_stopped")
     finally:
+        close_primary(support)
         collector.terminate()
         try:
             collector.wait(timeout=15)
