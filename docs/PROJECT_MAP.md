@@ -48,3 +48,14 @@
 ## Выбор заведений и рабочих складов
 
 [Синхронизация и склады](operation-settings.md) — настройки администратора, API/БД, границы истории и прямого OLAP, порядок выпуска.
+
+### Поддержка и диагностика · 16.10.2026
+
+`app/support/{models,store,capture,routes}.py`, primary `app/portal.py`, central
+`app/saas_admin/server.py`; [контракт и включение](support-stage-one.md).
+Отдельная PostgreSQL-схема support, session_user RLS для отдельной primary роли,
+проверенные tenant/owner сессии в gateway. Кнопка обращения независима от бизнес-модулей;
+свои обращения, общая очередь владельца, аудит статусов, ограниченная диагностика
+без URL/headers/body/текста исключений. Миграция `20261016170000_support_stage_one.sql`.
+Фоновые ошибки — `app/support_background.py` и центральный `app/saas_admin/support_monitor.py`;
+границы и фактический выпуск проверять по release записи.

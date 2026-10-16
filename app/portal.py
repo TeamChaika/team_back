@@ -147,10 +147,15 @@ def create_portal(
                 await run_in_threadpool(indicators.close)
             if repository is None:
                 await run_in_threadpool(repo.close)
+            await run_in_threadpool(app.state.support_capture.close)
 
     app = FastAPI(
         title="Chaika Team", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
     )
+    from app.support.routes import mount_primary
+
+    # Capture must be inside security and CORS so sanitized 500s retain their headers.
+    mount_primary(app, repo)
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=4)
     app.add_middleware(
         CORSMiddleware,
@@ -158,6 +163,7 @@ def create_portal(
         allow_credentials=True,
         allow_methods=["GET", "POST"],
         allow_headers=["Content-Type"],
+        expose_headers=["X-Request-ID"],
     )
 
     @app.middleware("http")
@@ -206,9 +212,26 @@ def create_portal(
         started = perf_counter()
         user_id = await request.app.state.auth.user(request.cookies.get(ACCESS_COOKIE))
         authenticated = perf_counter()
+        import os
+
+        from app.support.models import Context
+
+        request.state.support_context = Context(
+            os.environ.get("SUPPORT_COMPANY_ID", "primary-dashboard"),
+            os.environ.get("SUPPORT_COMPANY_NAME", "Чайка"),
+            str(user_id),
+            "Сотрудник",
+        )
         selection = tuple(sorted(set(department_id or []), key=str))
         selected = selection[0] if len(selection) == 1 else selection or None
         scope = await run_in_threadpool(repo.scope, user_id, selected)
+        context = request.state.support_context
+        request.state.support_context = Context(
+            context.company_id,
+            context.company_name,
+            context.actor_id,
+            scope.user.get("display_name", "Сотрудник"),
+        )
         require_personal_password(scope.user)
         require_section(scope.user, section_for_path(request.url.path))
         require_warehouse_section(scope, section_for_path(request.url.path))
@@ -224,7 +247,24 @@ def create_portal(
         started = perf_counter()
         user_id = await request.app.state.auth.user(request.cookies.get(ACCESS_COOKIE))
         authenticated = perf_counter()
+        import os
+
+        from app.support.models import Context
+
+        request.state.support_context = Context(
+            os.environ.get("SUPPORT_COMPANY_ID", "primary-dashboard"),
+            os.environ.get("SUPPORT_COMPANY_NAME", "Чайка"),
+            str(user_id),
+            "Сотрудник",
+        )
         scope = await run_in_threadpool(repo.portal_scope, user_id)
+        context = request.state.support_context
+        request.state.support_context = Context(
+            context.company_id,
+            context.company_name,
+            context.actor_id,
+            scope.user.get("display_name", "Сотрудник"),
+        )
         if (request.method, request.url.path) not in {
             ("GET", "/api/me"),
             ("POST", "/api/profile/password"),
