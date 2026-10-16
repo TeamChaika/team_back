@@ -1,6 +1,6 @@
 # QR Manager transport contract
 
-Official specification checked **2026-10-09**:
+Official specification checked **2026-10-16**:
 https://docs.qrmanager.ru/static/merged_swagger-2.json (API v2.0), linked from
 https://docs.qrmanager.ru/docs/v2.
 
@@ -10,7 +10,9 @@ https://docs.qrmanager.ru/docs/v2.
   from the existing deployed `paychaikatema/backend/app/services/qr_manager.py`;
   this provenance is operator configuration, not a claim Swagger publishes live.
 - `POST /operations/qr-code/`, required `X-Api-Key`, body `sum` positive integer
-  kopecks, `notification_url`, `redirect_url`. Local caller accepts RUB only;
+  kopecks, `notification_url`, `redirect_url`, and `qr_size=600`. The documented
+  image is returned only when `qr_size` is requested (allowed range 100–1000).
+  Local caller accepts RUB only;
   the operation schema itself does **not** establish a currency field.
 - Response `results.operation_id` UUID, `payment_page_link` (fallback `qr_link`),
   optional `qr_img`. No documented absolute validity timestamp; none is invented.

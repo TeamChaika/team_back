@@ -58,6 +58,7 @@ def test_create_documented_fields_and_no_unsupported_idempotency_header():
         assert "Idempotency-Key" not in request.headers
         assert json.loads(request.content) == {
             "sum": 12345,
+            "qr_size": 600,
             "notification_url": "https://example.com/callback/token",
             "redirect_url": "https://example.com/payment",
         }
@@ -76,6 +77,7 @@ def test_create_documented_fields_and_no_unsupported_idempotency_header():
     result = create(QRManagerProvider(transport=httpx.MockTransport(respond)))
     assert result.operation_id == OPERATION
     assert result.payment_url == "https://example.com/pay"
+    assert result.qr_image == "https://example.com/qr.png"
     assert result.valid_until is None
     assert "synthetic-private-key" not in repr(result)
 

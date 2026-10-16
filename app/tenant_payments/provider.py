@@ -250,6 +250,8 @@ class QRManagerProvider:
             }
             body = {
                 "sum": amount_minor,
+                # QR Manager returns qr_img only when a size is requested.
+                "qr_size": 600,
                 "notification_url": _https_url(notification_url),
                 "redirect_url": _https_url(redirect_url),
             }
