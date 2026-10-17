@@ -301,6 +301,19 @@ class IndicatorService:
     def close(self):
         self.executor.shutdown(wait=True, cancel_futures=True)
 
+    def _department_ids(self, scope, policy):
+        """Narrow implicit all-network reads; explicit selections remain strict."""
+        ids = sorted(str(value) for value in scope.ids)
+        if getattr(scope, "selection_ids", None) == () and policy.departments is not None:
+            active = [value for value in ids if value in policy.departments]
+            if not active:
+                policy.require(ids)
+            ids = active
+        policy.require(ids)
+        if not ids:
+            raise HTTPException(403, "Нет доступных ресторанов.")
+        return ids
+
     def _fetch(self, query, ids, inputs, stores=None):
         if self.session_unknown:
             raise IikoError("iiko_session_unknown", "Выход из iiko не подтверждён.")
@@ -328,9 +341,8 @@ class IndicatorService:
         if field not in FILTERS:
             raise HTTPException(422, "Неизвестный фильтр.")
         policy = self.policy_reader()
-        policy.require(scope.ids)
+        ids = self._department_ids(scope, policy)
         stores = warehouse_ids(scope)
-        ids = sorted(str(value) for value in scope.ids)
         if stores is None or not ids:
             raise HTTPException(403, "Нет доступных складов.")
         key = json.dumps(
@@ -381,12 +393,9 @@ class IndicatorService:
 
     def _job(self, scope, query, metric):
         policy = self.policy_reader()
-        policy.require(scope.ids)
+        ids = self._department_ids(scope, policy)
         if metric is not None and metric not in METRIC_INPUTS:
             raise HTTPException(422, "Неизвестный показатель.")
-        ids = sorted(str(value) for value in scope.ids)
-        if not ids:
-            raise HTTPException(403, "Нет доступных ресторанов.")
         stores = warehouse_ids(scope)
         inputs = tuple(sorted(METRIC_INPUTS[metric] if metric else BASE | EXTRA))
         key = json.dumps(

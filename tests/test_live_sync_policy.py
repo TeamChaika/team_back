@@ -14,6 +14,7 @@ from test_warehouse_sales import scope as warehouse_scope
 from app.web import indicators, sync_policy
 from app.web.indicators import IndicatorQuery, IndicatorService
 from app.web.live_sales import LiveSales
+from app.web.repository import Scope
 from app.web.sync_policy import SyncPolicy, guard_requests
 from app.web.warehouse_sales import WarehouseSales
 
@@ -113,6 +114,111 @@ def test_indicators_do_not_reuse_cache_after_disabling_venue():
         with pytest.raises(HTTPException) as error:
             service.get(user_scope, IndicatorQuery(day=DAY))
         assert error.value.status_code == 423 and calls == [1]
+    finally:
+        service.close()
+
+
+def indicator_scope(selected=None):
+    return Scope(
+        user={"role": "employee"},
+        departments=({"id": ACTIVE}, {"id": PAUSED}),
+        selected=selected,
+        store_ids=(),
+        rms_ids=(),
+    )
+
+
+def test_all_network_indicators_intersect_enabled_with_user_grants():
+    calls = []
+    unauthorized = UUID(int=3)
+    service = IndicatorService(
+        None,
+        fetch=lambda settings, query, ids, inputs: calls.append(ids) or result(),
+        policy_reader=lambda: SyncPolicy(2, frozenset([str(ACTIVE), str(unauthorized)])),
+    )
+    try:
+        response = service.get(indicator_scope(), IndicatorQuery(day=DAY))
+        assert response["status"] == "ready"
+        assert calls == [[str(ACTIVE)]]
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("selected", [PAUSED, (ACTIVE, PAUSED)])
+def test_explicit_paused_indicator_selection_is_never_silently_removed(selected):
+    calls = []
+    service = IndicatorService(
+        None,
+        fetch=lambda *args: calls.append(args) or result(),
+        policy_reader=lambda: SyncPolicy(2, frozenset([str(ACTIVE)])),
+    )
+    try:
+        with pytest.raises(HTTPException) as error:
+            service.get(indicator_scope(selected), IndicatorQuery(day=DAY))
+        assert error.value.status_code == 423
+        assert "отключено" in error.value.detail
+        assert calls == []
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("departments", [frozenset(), frozenset([str(UUID(int=3))])])
+def test_all_network_without_enabled_authorized_venues_never_queries_iiko(departments):
+    calls = []
+    service = IndicatorService(
+        None,
+        fetch=lambda *args: calls.append(args) or result(),
+        policy_reader=lambda: SyncPolicy(2, departments),
+    )
+    try:
+        with pytest.raises(HTTPException) as error:
+            service.get(indicator_scope(), IndicatorQuery(day=DAY))
+        assert error.value.status_code == 423 and calls == []
+    finally:
+        service.close()
+
+
+def test_all_network_policy_change_rebuilds_cache_for_new_enabled_scope():
+    state, calls = [SyncPolicy()], []
+    service = IndicatorService(
+        None,
+        fetch=lambda settings, query, ids, inputs: calls.append(ids) or result(),
+        policy_reader=lambda: state[0],
+    )
+    try:
+        service.get(indicator_scope(), IndicatorQuery(day=DAY))
+        state[0] = SyncPolicy(2, frozenset([str(ACTIVE)]))
+        service.get(indicator_scope(), IndicatorQuery(day=DAY))
+        assert calls == [[str(ACTIVE), str(PAUSED)], [str(ACTIVE)]]
+    finally:
+        service.close()
+
+
+def test_all_network_warehouse_options_keep_store_and_department_restrictions(monkeypatch):
+    calls = []
+    store = UUID(int=10)
+
+    def fetch(settings, query, ids, stores, field):
+        calls.append((ids, stores, field))
+        return {"values": ["Allowed"], "sync": None}
+
+    monkeypatch.setattr(indicators, "fetch_warehouse_options", fetch)
+    service = IndicatorService(
+        None, policy_reader=lambda: SyncPolicy(2, frozenset([str(ACTIVE)]))
+    )
+    scope = Scope(
+        user={"role": "employee", "warehouse_scope_mode": "selected"},
+        departments=indicator_scope().departments,
+        selected=None,
+        store_ids=(store,),
+        rms_ids=(),
+    )
+    try:
+        query = IndicatorQuery(day=DAY)
+        service.warehouse_options(scope, query, "product")
+        list(service.cache.values())[0][0].result(timeout=2)
+        assert service.warehouse_options(scope, query, "product")["values"] == ["Allowed"]
+        assert calls == [([str(ACTIVE)], (str(store),), "product")]
     finally:
         service.close()
 
