@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -168,3 +169,103 @@ def test_migration_rejects_incomplete_storage_states(db, record, assignment):
                 "UPDATE chaika.raw_snapshots SET " + assignment + " WHERE id=%s", (record["id"],)
             )
     assert current(db, record)["raw"] == record["raw"]
+
+
+@pytest.fixture
+def batch_table(db):
+    schema = "archive_batch_" + uuid4().hex
+    db.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    db.execute(
+        sql.SQL(
+            "CREATE TABLE {}.raw_snapshots "
+            "(id uuid PRIMARY KEY, source_bytes bigint, raw bytea, normalized jsonb)"
+        ).format(sql.Identifier(schema))
+    )
+
+    def insert(size, *, external=False):
+        key, raw = uuid4(), os.urandom(size)
+        db.execute(
+            sql.SQL("INSERT INTO {}.raw_snapshots VALUES (%s,%s,%s,%s)").format(
+                sql.Identifier(schema)
+            ),
+            (
+                key,
+                size,
+                None if external else raw,
+                None if external else Jsonb({"size": size}),
+            ),
+        )
+        return key
+
+    return schema, insert
+
+
+def test_batch_defaults_keep_tail_order_and_limit(db, batch_table):
+    schema, insert = batch_table
+    first, second, third = insert(100), insert(200), insert(300)
+    selected = backfill.select_batch(db, schema, limit=2)
+    assert [row["id"] for row in selected] == [third, second]
+    assert first not in [row["id"] for row in selected]
+    assert all(set(row) == {"id", "source_bytes", "stored_bytes"} for row in selected)
+
+
+def test_batch_filters_tiny_external_and_source_oversize(db, batch_table):
+    schema, insert = batch_table
+    wanted = insert(12000)
+    insert(100)
+    insert(20000)
+    insert(12000, external=True)
+    selected = backfill.select_batch(
+        db,
+        schema,
+        limit=100,
+        min_stored_bytes=8192,
+        max_source_bytes=16000,
+    )
+    assert [row["id"] for row in selected] == [wanted]
+    assert selected[0]["stored_bytes"] >= 12000
+
+
+def test_batch_budget_is_aggregate_and_inclusive(db, batch_table):
+    schema, insert = batch_table
+    for _ in range(3):
+        insert(12000)
+    all_rows = backfill.select_batch(db, schema, limit=100)
+    exact = sum(row["stored_bytes"] for row in all_rows[:2])
+    selected = backfill.select_batch(db, schema, limit=100, max_stored_bytes=exact)
+    assert selected == all_rows[:2]
+    selected = backfill.select_batch(db, schema, limit=100, max_stored_bytes=exact - 1)
+    assert selected == all_rows[:1]
+
+
+def test_batch_oversized_tail_does_not_starve_smaller_rows(db, batch_table):
+    schema, insert = batch_table
+    wanted = insert(12000)
+    insert(30000)
+    selected = backfill.select_batch(db, schema, limit=100, max_stored_bytes=16000)
+    assert [row["id"] for row in selected] == [wanted]
+
+
+def test_batch_no_eligible_rows_is_empty(db, batch_table):
+    schema, insert = batch_table
+    insert(12000)
+    assert backfill.select_batch(db, schema, limit=100, max_stored_bytes=1) == []
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"limit": 0},
+        {"min_stored_bytes": -1},
+        {"max_stored_bytes": 0},
+        {"max_source_bytes": 0},
+        {"min_stored_bytes": 20, "max_stored_bytes": 10},
+    ],
+)
+def test_batch_rejects_invalid_limits_before_query(limits):
+    class NoQuery:
+        def execute(self, *args):
+            pytest.fail("Invalid limits must be rejected without querying")
+
+    with pytest.raises(ValueError, match="batch_limits_invalid"):
+        backfill.select_batch(NoQuery(), "chaika", **({"limit": 1} | limits))

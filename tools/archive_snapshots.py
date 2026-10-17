@@ -99,6 +99,51 @@ def private_json(path):
     return json.loads(path.read_text())
 
 
+def select_batch(
+    db, schema, *, limit, min_stored_bytes=0, max_stored_bytes=None, max_source_bytes=None
+):
+    """Select only metadata; stored bytes estimate payload size, not reclaimable disk.
+
+    Oversized rows are left for a later run with larger limits. Within the eligible
+    tail, stop before the first row that would exceed the aggregate stored budget.
+    Parent CTID order is a heuristic and does not establish TOAST physical order.
+    """
+    if (
+        limit < 1
+        or min_stored_bytes < 0
+        or (max_stored_bytes is not None and max_stored_bytes < 1)
+        or (max_source_bytes is not None and max_source_bytes < 1)
+        or (max_stored_bytes is not None and min_stored_bytes > max_stored_bytes)
+    ):
+        raise ValueError("archive_batch_limits_invalid")
+    filters = [sql.SQL("raw IS NOT NULL"), sql.SQL("normalized IS NOT NULL")]
+    parameters = []
+    if max_source_bytes is not None:
+        filters.append(sql.SQL("source_bytes <= %s"))
+        parameters.append(max_source_bytes)
+    stored_size = sql.SQL("pg_column_size(raw)::bigint + pg_column_size(normalized)::bigint")
+    filters.append(sql.SQL("({}) >= %s").format(stored_size))
+    parameters.append(min_stored_bytes)
+    if max_stored_bytes is not None:
+        filters.append(sql.SQL("({}) <= %s").format(stored_size))
+        parameters.append(max_stored_bytes)
+    parameters.append(limit)
+    rows = db.execute(
+        sql.SQL(
+            "SELECT id,source_bytes,{} AS stored_bytes FROM {}.raw_snapshots "
+            "WHERE {} ORDER BY ctid DESC LIMIT %s"
+        ).format(stored_size, sql.Identifier(schema), sql.SQL(" AND ").join(filters)),
+        parameters,
+    )
+    selected, total = [], 0
+    for row in rows:
+        if max_stored_bytes is not None and total + row["stored_bytes"] > max_stored_bytes:
+            break
+        selected.append(row)
+        total += row["stored_bytes"]
+    return selected
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--schema", required=True)
@@ -108,11 +153,27 @@ def main():
     parser.add_argument("--guard-file")
     parser.add_argument("--minimum-free-bytes", type=int, default=768 * 1024 * 1024)
     parser.add_argument("--limit", type=int, default=1)
+    parser.add_argument("--min-stored-bytes", type=int, default=0)
+    parser.add_argument(
+        "--max-stored-bytes",
+        type=int,
+        help="Aggregate stored payload budget; oversized rows skipped",
+    )
+    parser.add_argument(
+        "--max-source-bytes", type=int, help="Per-row RAW byte cap; larger rows skipped"
+    )
     parser.add_argument("--workers", type=int, default=1, choices=range(1, 5))
     args = parser.parse_args()
     validate_scope(args.schema)
     if args.limit < 1 or args.minimum_free_bytes < 512 * 1024 * 1024:
         parser.error("Positive limit and at least 512 MiB free-space floor required")
+    if (
+        args.min_stored_bytes < 0
+        or (args.max_stored_bytes is not None and args.max_stored_bytes < 1)
+        or (args.max_source_bytes is not None and args.max_source_bytes < 1)
+        or (args.max_stored_bytes is not None and args.min_stored_bytes > args.max_stored_bytes)
+    ):
+        parser.error("Invalid stored/source byte limits")
     if args.apply and not args.guard_file:
         parser.error("--apply requires a fresh independent --guard-file")
     config = replace(ArchiveConfig.from_env(), scope=args.schema)
@@ -127,16 +188,26 @@ def main():
     if args.apply:
         guard()
     with psycopg.connect(**parameters, autocommit=True, row_factory=dict_row) as db:
-        ids = [
-            row["id"]
-            for row in db.execute(
-                sql.SQL(
-                    "SELECT id FROM {}.raw_snapshots WHERE raw IS NOT NULL "
-                    "ORDER BY ctid DESC LIMIT %s"
-                ).format(sql.Identifier(args.schema)),
-                (args.limit,),
-            )
-        ]
+        selected = select_batch(
+            db,
+            args.schema,
+            limit=args.limit,
+            min_stored_bytes=args.min_stored_bytes,
+            max_stored_bytes=args.max_stored_bytes,
+            max_source_bytes=args.max_source_bytes,
+        )
+    ids = [row["id"] for row in selected]
+    print(
+        json.dumps(
+            {
+                "selected": len(selected),
+                "selected_stored_bytes": sum(row["stored_bytes"] for row in selected),
+                "selected_source_bytes": sum(row["source_bytes"] for row in selected),
+                "apply": args.apply,
+            }
+        ),
+        flush=True,
+    )
 
     def process(key):
         if args.apply:
