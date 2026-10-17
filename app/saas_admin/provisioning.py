@@ -39,6 +39,7 @@ def additive_migration_refresh(checks):
         "20261010110000_tenant_telegram_bot_namespace.sql",
         "20261010120000_tenant_guest_links.sql",
         "20261016123000_tenant_operation_settings.sql",
+        "20261017120000_tenant_snapshot_archive.sql",
     }
     for count in range(1, len(entries)):
         if hashlib.sha256(json.dumps(entries[:count]).encode()).hexdigest() == fingerprint:

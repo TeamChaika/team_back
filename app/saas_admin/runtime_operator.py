@@ -261,6 +261,21 @@ class RuntimeOperator:
         env.update(
             {k: v for k, v in identity.environment().items() if k.startswith("RESTCONTROL_TENANT_")}
         )
+        archive = self.config.get("snapshot_archive")
+        if archive is not None:
+            from app.snapshot_archive_broker import register_grant
+
+            if (
+                not isinstance(archive, dict)
+                or set(archive) != {"mode", "socket", "grants_directory"}
+                or archive["mode"] != "broker"
+                or not Path(archive["socket"]).is_absolute()
+                or identity.policy["mode"] != "linux"
+            ):
+                raise ValueError("Tenant archive requires an explicit isolated Linux broker")
+            register_grant(archive["grants_directory"], str(runtime.company_id), identity.uid)
+            env["RESTCONTROL_TENANT_SNAPSHOT_ARCHIVE_MODE"] = "broker"
+            env["RESTCONTROL_TENANT_SNAPSHOT_ARCHIVE_BROKER_SOCKET"] = archive["socket"]
         identity.write_private(self.manifest.name, json.dumps(env))
         return env
 
