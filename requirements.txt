@@ -13,3 +13,4 @@ reportlab==4.4.9
 openpyxl==3.1.5
 
 certifi==2026.7.22
+boto3==1.43.114

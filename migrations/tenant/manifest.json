@@ -64,6 +64,10 @@
     {
       "file": "20261016123000_tenant_operation_settings.sql",
       "area": "analytics"
+    },
+    {
+      "file": "20261017120000_tenant_snapshot_archive.sql",
+      "area": "analytics"
     }
   ]
 }

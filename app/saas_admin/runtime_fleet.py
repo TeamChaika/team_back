@@ -84,6 +84,8 @@ class FleetPreparer:
                 if saved["company_id"] != str(company_id):
                     raise ValueError("Existing operator belongs to another company")
                 saved["supervisor_managed"] = True
+                if self.template.get("snapshot_archive") is not None:
+                    saved["snapshot_archive"] = self.template["snapshot_archive"]
                 settings = saved.setdefault("document_settings", {})
                 settings["worker_enabled"] = bool(
                     company.get("modules", {}).get("documents")

@@ -159,3 +159,14 @@ full/working/setup-ready. См. [первоначальную загрузку](
 без URL/headers/body/текста исключений. Миграция `20261016170000_support_stage_one.sql`.
 Фоновые ошибки — `app/support_background.py` и центральный `app/saas_admin/support_monitor.py`;
 границы и фактический выпуск проверять по release записи.
+
+### RAW snapshots в приватном S3 · 17.10.2026
+
+`app/snapshot_archive.py` сохраняет legacy inline чтение и проверяет внешние payload.
+Tenant использует исключительно HTTP-over-UDS `app/snapshot_archive_broker.py`;
+SO_PEERCRED + root-owned UID grants определяют компанию, ключ S3 остаётся в broker.
+`RuntimeOperator.prepare_manifest` обновляет grant при подготовке runtime; trusted
+`operator_template.snapshot_archive` включает режим для новых и существующих компаний.
+Миграция `20261017120000_tenant_snapshot_archive.sql` сохраняет UUID/FK metadata.
+[Развёртывание и контракт broker](../ops/snapshot-archive/README.md).
+После очистки inline payload откат допустим только на S3-совместимый reader.

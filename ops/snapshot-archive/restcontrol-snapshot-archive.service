@@ -1,0 +1,28 @@
+[Unit]
+Description=Private tenant snapshot archive broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/restcontrol-saas/current
+EnvironmentFile=/etc/restcontrol/snapshot-archive.env
+ExecStart=/opt/restcontrol-saas/current/.venv/bin/python -m app.snapshot_archive_broker --socket /run/restcontrol-archive/archive.sock --grants /etc/restcontrol/snapshot-archive-grants
+RuntimeDirectory=restcontrol-archive
+RuntimeDirectoryMode=0711
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/run/restcontrol-archive
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+LimitNOFILE=128
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target
