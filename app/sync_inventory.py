@@ -26,6 +26,7 @@ from app.services.iiko_outgoing import read_outgoing_invoices
 from app.services.iiko_products import read_products
 from app.services.iiko_transfers import read_transfers
 from app.services.iiko_writeoffs import read_writeoffs
+from app.snapshot_archive import load_snapshot_payload
 from app.sync_references import (
     Source,
     SyncError,
@@ -460,20 +461,41 @@ def restore_snapshots(db, run_id: UUID, source: Source, day: date) -> dict:
     snapshots = {}
     manifest = job[2].get("snapshot_ids", {})
     ids = [str(UUID(value)) for value in manifest.values()]
-    for key, resource, observed_at, payload, valid in db.execute(
-        "SELECT id,resource,observed_at,normalized,encode(sha256(raw),'hex')=sha256 "
-        "FROM chaika.raw_snapshots WHERE (run_id=%s OR id=ANY(%s::uuid[])) "
+    columns = (
+        "id",
+        "resource",
+        "observed_at",
+        "normalized",
+        "raw",
+        "sha256",
+        "source_bytes",
+        "source_id",
+        "payload_object_key",
+        "payload_object_sha256",
+        "payload_object_bytes",
+        "payload_format_version",
+        "payload_verified_at",
+    )
+    for record in db.execute(
+        "SELECT " + ",".join(columns) + " FROM chaika.raw_snapshots "
+        "WHERE (run_id=%s OR id=ANY(%s::uuid[])) "
         "AND source_id=%s ORDER BY observed_at",
         (run_id, ids, source.id),
     ):
+        row = dict(zip(columns, record, strict=True))
+        resource = row["resource"]
+        payload = load_snapshot_payload(row)["payload"]
         if (
             resource not in RESOURCES
-            or not valid
             or payload.get("source_fingerprint") != source.fingerprint
             or payload.get("sync_business_date") != day.isoformat()
         ):
             raise SyncError("inventory_resume_scope_mismatch")
-        snapshots[resource] = {"id": str(key), "observed_at": observed_at, "payload": payload}
+        snapshots[resource] = {
+            "id": str(row["id"]),
+            "observed_at": row["observed_at"],
+            "payload": payload,
+        }
     return snapshots
 
 
