@@ -52,6 +52,40 @@ def run_startup(code, env=None):
     return result.stdout
 
 
+def test_tenant_indicator_all_network_keeps_tenant_grants_and_sync_policy():
+    run_startup("""
+from datetime import UTC, datetime
+from uuid import UUID
+from fastapi import HTTPException
+from app.core.config import Settings
+from app.web.indicators import IndicatorQuery, IndicatorService
+from app.web.repository import Scope
+from app.web.sync_policy import SyncPolicy
+active, paused, ungranted = UUID(int=1), UUID(int=2), UUID(int=3)
+calls = []
+scope = Scope({'role': 'employee'}, ({'id': active}, {'id': paused}), None, (), ())
+def fetch(settings, query, ids, inputs):
+    calls.append(ids)
+    assert settings.iiko_login == 'tenant-login'
+    return {'values': [{}, {}], 'observed_at': datetime.now(UTC)}
+service = IndicatorService(Settings(), fetch=fetch,
+    policy_reader=lambda: SyncPolicy(2, frozenset([str(active), str(ungranted)])))
+try:
+    assert service.get(scope, IndicatorQuery(day='2026-10-16'))['status'] == 'ready'
+    assert calls == [[str(active)]]
+    explicit = Scope(scope.user, scope.departments, paused, (), ())
+    try:
+        service.get(explicit, IndicatorQuery(day='2026-10-16'))
+    except HTTPException as error:
+        assert error.status_code == 423
+    else:
+        raise AssertionError('paused tenant venue was queried')
+    assert calls == [[str(active)]]
+finally:
+    service.close()
+""")
+
+
 def test_settings_and_existing_sql_modules_use_one_tenant_without_legacy_fallback():
     run_startup("""
 from app.core.config import Settings
