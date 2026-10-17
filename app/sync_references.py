@@ -30,6 +30,7 @@ from app.services.iiko_topology import (
     read_departments,
     read_replication,
 )
+from app.snapshot_archive import archive_snapshot
 from app.sync_scope import active_sources, load_scope, reference_ids, skipped
 
 LOCK_ID = 7623011091001
@@ -159,6 +160,30 @@ def register_sources(db: psycopg.Connection, sources: list[Source]) -> None:
 
 
 def append_snapshot(db: psycopg.Connection, run_id: UUID, snapshot: dict) -> None:
+    pointer = archive_snapshot(snapshot)
+    if pointer is not None:
+        db.execute(
+            "INSERT INTO chaika.raw_snapshots "
+            "(id,run_id,source_id,resource,observed_at,sha256,source_bytes,raw,normalized,"
+            "payload_object_key,payload_object_sha256,payload_object_bytes,"
+            "payload_format_version,payload_verified_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,NULL,%s,%s,%s,%s,%s)",
+            (
+                snapshot["id"],
+                run_id,
+                snapshot["source_id"],
+                snapshot["resource"],
+                snapshot["observed_at"],
+                snapshot["sha256"],
+                len(snapshot["raw"]),
+                pointer.object_key,
+                pointer.object_sha256,
+                pointer.object_bytes,
+                pointer.format_version,
+                pointer.verified_at,
+            ),
+        )
+        return
     db.execute(
         "INSERT INTO chaika.raw_snapshots "
         "(id,run_id,source_id,resource,observed_at,sha256,source_bytes,raw,normalized) "

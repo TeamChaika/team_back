@@ -24,6 +24,7 @@
 | Складские права и Telegram документов | [Документы](CODEMAPS/documents.md) | [app/documents/policy.py](../app/documents/policy.py) |
 | Очередь документов и сверка `unknown` | [Документы](CODEMAPS/documents.md) | [app/documents/dispatch.py](../app/documents/dispatch.py) |
 | Приватный API iiko и загрузчики | [Сбор и данные](CODEMAPS/sync-data.md) | [app/main.py](../app/main.py) |
+| Архив RAW iiko в S3, backfill и восстановление | [Архив снимков](snapshot-archive.md) | `app/snapshot_archive.py`, `tools/archive_snapshots.py`; UUID/FK и бизнес-таблицы остаются в PostgreSQL |
 | История OLAP и PostgreSQL | [Сбор и данные](CODEMAPS/sync-data.md) | [app/sync_sales_history.py](../app/sync_sales_history.py) |
 | Плановые задания и ручной refresh | [Сбор и данные](CODEMAPS/sync-data.md) | [app/scheduler.py](../app/scheduler.py) |
 | Миграции, тесты, CI | [Сбор и данные](CODEMAPS/sync-data.md) | [.github/workflows/ci.yml](../.github/workflows/ci.yml) |

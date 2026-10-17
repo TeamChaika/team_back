@@ -6,6 +6,7 @@
 | --- | --- |
 | Подключения и лицензия iiko | [app/services/iiko_auth.py](../../app/services/iiko_auth.py), [app/services/iiko_connections.py](../../app/services/iiko_connections.py); приватный маршрут [iiko_connections.py](../../app/api/routes/iiko_connections.py) |
 | Структура и RAW | [app/sync_references.py](../../app/sync_references.py): `configured_sources`, `reference_lock`, `append_snapshot`, `corporate_nodes`, `stores`, `rms_bindings` |
+| Payload RAW в S3 | [app/snapshot_archive.py](../../app/snapshot_archive.py): verified upload + envelope reader; `sync_references.append_snapshot`, `sync_inventory.restore_snapshots`; [контракт и backfill](../snapshot-archive.md) |
 | Номенклатура и техкарты | [app/sync_inventory.py](../../app/sync_inventory.py) → `products`, `assembly_charts`, `assembly_chart_items/scopes` |
 | Накладные/списания/перемещения | [app/sync_invoices.py](../../app/sync_invoices.py), [app/sync_outgoing.py](../../app/sync_outgoing.py), [app/sync_transfers.py](../../app/sync_transfers.py), [app/sync_writeoffs.py](../../app/sync_writeoffs.py) → документы и позиции `chaika.*` |
 | OLAP-история | [app/sync_sales_history.py](../../app/sync_sales_history.py) → [app/import_sales_review.py](../../app/import_sales_review.py) → `sales_report_sets/days/reports/rows`; публикация дня учитывает проверку и покрытие |
