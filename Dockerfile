@@ -6,8 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000
 
 WORKDIR /app
-COPY requirements.txt ./
-RUN python -m pip install --no-cache-dir -r requirements.txt \
+COPY requirements-linux.lock ./
+RUN python -m pip install --no-cache-dir \
+    --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+    --require-hashes --only-binary=:all: -r requirements-linux.lock \
     && useradd --uid 10001 --create-home appuser \
     && mkdir -p /app/.local \
     && chown appuser:appuser /app/.local
