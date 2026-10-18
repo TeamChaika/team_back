@@ -13,6 +13,12 @@
 
 ## Процессы и точки входа
 
+Docker-сборка: `Dockerfile` → `requirements-linux.lock` (Linux amd64 / Python 3.12,
+полные pins и официальные PyPI SHA256) → HTTPS index Tsinghua с обязательной
+проверкой hashes и wheels-only. Прямые зависимости остаются в `requirements.txt`;
+новый lock должен входить в whitelist `.dockerignore`.
+[Подготовка и проверки сборки](../timeweb.md#зависимости-docker-сборки).
+
 | Что | Где искать |
 | --- | --- |
 | Публичный HTTP-процесс | [app/serve.py](../../app/serve.py) → `app.portal:app`; `PORT`, по умолчанию 8000, один worker |

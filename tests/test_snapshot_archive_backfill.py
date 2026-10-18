@@ -1,7 +1,11 @@
 """Real PostgreSQL checks for verified offload and preserved relational history."""
 
 import hashlib
+import json
 import os
+import sys
+import time
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -109,6 +113,65 @@ def test_verified_offload_preserves_metadata_and_foreign_key(db, record, config)
     restored = archive.load_snapshot_payload(saved, settings)
     assert restored == {"raw": record["raw"], "payload": record["normalized"]}
     assert len(client.values) == 1
+
+
+def test_cli_binary_payload_fetch_roundtrip(db, record, config, monkeypatch, tmp_path):
+    raw = bytes(range(256)) * 1024
+    payload = {"items": [None, True, False, 123, 1.25, "Чайка 🐦"], "nested": {"value": []}}
+    db.execute(
+        "UPDATE chaika.raw_snapshots SET raw=%s,normalized=%s,sha256=%s,source_bytes=%s "
+        "WHERE id=%s",
+        (raw, Jsonb(payload), hashlib.sha256(raw).hexdigest(), len(raw), record["id"]),
+    )
+    formats = []
+    execute = db.execute
+
+    def tracked_execute(*args, **kwargs):
+        cursor = execute(*args, **kwargs)
+        if cursor.description and "raw" in {column.name for column in cursor.description}:
+            formats.append(
+                tuple(cursor.pgresult.fformat(i) for i in range(cursor.pgresult.nfields))
+            )
+        return cursor
+
+    monkeypatch.setattr(db, "execute", tracked_execute)
+    monkeypatch.setattr(backfill.psycopg, "connect", lambda **kwargs: nullcontext(db))
+    monkeypatch.setattr(
+        backfill,
+        "select_batch",
+        lambda *args, **kwargs: [
+            {"id": record["id"], "source_bytes": len(raw), "stored_bytes": len(raw)}
+        ],
+    )
+    monkeypatch.setattr(backfill.ArchiveConfig, "from_env", lambda: config[0])
+    dsn, guard, manifest = (tmp_path / name for name in ("db.json", "guard.json", "manifest.jsonl"))
+    dsn.write_text("{}")
+    dsn.chmod(0o600)
+    guard.write_text(json.dumps({"checked_at": time.time(), "available_bytes": 2 * 1024**3}))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "archive_snapshots",
+            "--schema",
+            "chaika",
+            "--dsn-file",
+            str(dsn),
+            "--manifest",
+            str(manifest),
+            "--apply",
+            "--guard-file",
+            str(guard),
+        ],
+    )
+
+    backfill.main()
+
+    assert formats == [(1,) * 7]
+    saved = current(db, record)
+    assert saved["raw"] is None and saved["normalized"] is None
+    assert archive.load_snapshot_payload(saved, config[0]) == {"raw": raw, "payload": payload}
+    assert json.loads(manifest.read_text())["offloaded"] is True
 
 
 def test_sql_numeric_semantics_mismatch_preserves_inline(db, record, config):

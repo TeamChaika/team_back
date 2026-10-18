@@ -219,6 +219,7 @@ def main():
                     "FROM {}.raw_snapshots WHERE id=%s AND raw IS NOT NULL"
                 ).format(sql.Identifier(args.schema)),
                 (key,),
+                binary=True,
             ).fetchone()
             if row is None:
                 return {"schema": args.schema, "id": str(key), "skipped": True}

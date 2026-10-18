@@ -3,6 +3,7 @@
 !Dockerfile
 !.dockerignore
 !requirements.txt
+!requirements-linux.lock
 !main.py
 !app/
 !app/**
