@@ -4,6 +4,8 @@ import os
 
 import uvicorn
 
+from app.archive_verify import verify_archive_startup
+
 
 def main() -> None:
     raw_port = os.environ.get("PORT", "").strip() or "8000"
@@ -14,6 +16,7 @@ def main() -> None:
     if not 1 <= port <= 65535:
         raise SystemExit("PORT must be an integer between 1 and 65535.")
 
+    verify_archive_startup()
     uvicorn.run("app.portal:app", host="0.0.0.0", port=port, workers=1, access_log=False)
 
 

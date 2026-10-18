@@ -30,6 +30,21 @@ Docker-сборка: `Dockerfile` → `requirements-linux.lock` (Linux amd64 / P
 
 Worker может работать отдельно от HTTP-приложения. При правках Telegram, отправки или восстановления очереди установить **фактическое место запуска и версию worker**: успешный деплой API не доказывает обновление отдельного процесса. Эта карта не подтверждает текущий хост worker. Не запускать второй старый polling-бот поверх нового.
 
+Временная операторская проверка архива: `CHAIKA_ARCHIVE_VERIFY_SNAPSHOT_IDS`
+содержит ровно два разных UUID через запятую: один external и один inline снимок
+`chaika.raw_snapshots`. По умолчанию проверка выключена. Перед `uvicorn.run`
+[app/archive_verify.py](../../app/archive_verify.py) читает их по одному в binary
+режиме через readonly PostgreSQL-соединение (connect 10s, statement 10s, lock 2s)
+и фактический `load_snapshot_payload`; разрешён только S3 scope `chaika`.
+Записей в PostgreSQL/S3 нет. При ошибке HTTP не запускается; stdout содержит только
+`CHAIKA_ARCHIVE_VERIFY` и фиксированный JSON-код без текста исключения.
+Успех содержит UUID/SHA/размер проверенных снимков, UTC-время начала проверки,
+PID/UID и SHA файлов `snapshot_archive.py`, `sync_inventory.py`, `sync_references.py`,
+`web/indicators.py`; payload, DSN и S3-ключи не выводятся. Commit сопоставляют
+по CI/образу/deploy metadata, а не доверяют переменной окружения. После получения
+доказательства удалить временную переменную: проверка зависит от доступности S3
+и может задержать startup до сетевых timeout/retry. Тесты: `tests/test_archive_verify.py`.
+
 ## Конфигурация и схема
 
 - Основные настройки: [app/core/config.py](../../app/core/config.py), web/cookies/CORS: [app/web/settings.py](../../app/web/settings.py), документы: [app/documents/config.py](../../app/documents/config.py).
