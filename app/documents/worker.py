@@ -9,6 +9,7 @@ from time import monotonic
 
 import httpx
 from psycopg.types.json import Jsonb
+from psycopg_pool import PoolTimeout, TooManyRequests
 
 from app.commercial_invoices.runtime import build_service as commercial_service
 from app.core.logging import configure_http_logging
@@ -241,6 +242,7 @@ def main():
         else None
     )
     next_catalog_check = datetime.min.replace(tzinfo=UTC)
+    consecutive_pool_failures = 0
     try:
         while not stop.is_set():
             if support:
@@ -251,6 +253,7 @@ def main():
                 # Held for one bounded cycle; protects Telegram polling across app replicas.
                 with worker_leader(service.database) as leader:
                     if leader is None:
+                        consecutive_pool_failures = 0
                         stop.wait(3)
                         continue
                     now = datetime.now(UTC)
@@ -268,11 +271,22 @@ def main():
                                 "Document catalog refresh failed (%s)", type(error).__name__
                             )
                     healthy = process_jobs(service, bot, leader, commercial)
+                consecutive_pool_failures = 0
                 if not healthy:
                     stop.wait(5)
             except Exception as error:
                 capture_failure("document_failed", exception=error)
                 log.warning("Document worker cycle failed (%s)", type(error).__name__)
+                consecutive_pool_failures = (
+                    consecutive_pool_failures + 1
+                    if isinstance(error, (PoolTimeout, TooManyRequests))
+                    else 0
+                )
+                if consecutive_pool_failures >= 3:
+                    # After a prolonged DB outage a saturated pool can stop recovering.
+                    # Exit so the supervisor recreates it; normal dispatch recovery still
+                    # preserves uncertain deliveries instead of blindly resending them.
+                    raise SystemExit("document_worker_database_unavailable") from None
                 stop.wait(5)
             stop.wait(1)
     finally:

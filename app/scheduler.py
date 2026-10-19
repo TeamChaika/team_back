@@ -188,9 +188,11 @@ def run_job(job, slot, settings, stop, *, namespace="scheduled"):
             AccountingReportQuery(timestamp=datetime.now(ZONE).replace(tzinfo=None, microsecond=0)),
         )
     elif job.key == "inventory":
+        from app.documents.catalog_sync import refresh_after_inventory
         from app.sync_inventory import synchronize_inventory
 
         synchronize_inventory(settings, API, day, root / "inventory.json")
+        refresh_after_inventory()
     elif job.key == "cash_shifts":
         from app.schemas.sync_jobs import CashShiftSyncQuery
         from app.sync_cash_shifts import synchronize_cash_shifts
