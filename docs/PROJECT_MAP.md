@@ -66,3 +66,12 @@
 без URL/headers/body/текста исключений. Миграция `20261016170000_support_stage_one.sql`.
 Фоновые ошибки — `app/support_background.py` и центральный `app/saas_admin/support_monitor.py`;
 границы и фактический выпуск проверять по release записи.
+
+### Архив заведений в аналитике · 19.10.2026
+
+`GET/POST /api/management/venue-archives` — административная настройка видимости в
+`operation_settings.analytics.archived_department_ids`; общая ревизия и аудит.
+`app/web/sync_policy.py::analytics_department_ids` и
+`Repository.analytics_scope` сужают «Обзор» и «Показатели» по умолчанию.
+История доступна с `include_archived=true`; права, обмен и документы не меняются.
+[Контракт и проверки](venue-archive.md).

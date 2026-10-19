@@ -11,6 +11,7 @@ from app.operation_settings import load_settings
 class SyncPolicy:
     revision: int = 0
     departments: frozenset[str] | None = None
+    archived_departments: frozenset[str] = frozenset()
 
     @property
     def key(self):
@@ -35,6 +36,7 @@ def read_policy(db):
     return SyncPolicy(
         saved["revision"],
         None if selected["mode"] == "all" else frozenset(selected["department_ids"]),
+        frozenset(saved["analytics"]["archived_department_ids"]),
     )
 
 
@@ -48,3 +50,19 @@ def guard_requests(db, bodies):
         if selected.get("filterType") != "IncludeValues" or not selected.get("values"):
             policy.require(["unscoped"])
         policy.require(selected["values"])
+
+
+def analytics_department_ids(scope, policy, include_archived=False):
+    """Visibility only: grants and synchronization remain separate restrictions."""
+    ids = sorted(str(value) for value in scope.ids)
+    if not include_archived:
+        if {
+            str(value) for value in getattr(scope, "selection_ids", ())
+        } & policy.archived_departments:
+            raise HTTPException(403, "Выбрано архивное заведение. Включите «Показать архивные».")
+        ids = [value for value in ids if value not in policy.archived_departments]
+    if not ids:
+        raise HTTPException(
+            403, "Нет действующих доступных заведений. Включите «Показать архивные»."
+        )
+    return ids

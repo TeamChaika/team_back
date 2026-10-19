@@ -43,6 +43,17 @@ def _validate_selection(mode, ids):
         raise ValueError("All mode must not include selected identifiers")
 
 
+class VenueSettingsWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(ge=0, strict=True)
+    archived_department_ids: list[UUID] = Field(max_length=1000)
+
+    @model_validator(mode="after")
+    def check_selection(self):
+        _validate_selection("selected", self.archived_department_ids)
+        return self
+
+
 class OperationSettingsWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
     revision: int = Field(ge=0, strict=True)
@@ -92,6 +103,23 @@ def read_operation_settings(administration):
         return _response(db)
 
 
+def read_venue_settings(administration):
+    with administration.repo.connection(repeatable=True) as db:
+        return _venue_response(db)
+
+
+def _venue_response(db):
+    saved = load_settings(db)
+    return serial(
+        {
+            "revision": saved["revision"],
+            "archived_department_ids": saved["analytics"]["archived_department_ids"],
+            "departments": _catalog(db)["departments"],
+            "updated_at": saved["updated_at"],
+        }
+    )
+
+
 def save_operation_settings(administration, actor, payload):
     with administration.write(actor) as db:
         # Namespaced lock also serializes the first insert, when no row exists yet.
@@ -102,7 +130,8 @@ def save_operation_settings(administration, actor, payload):
         before = load_settings(db)
         if before["revision"] != payload.revision:
             raise HTTPException(409, "Настройки изменены другим администратором. Обновите их.")
-        if before["sync"] != payload.sync.model_dump(mode="json"):
+        venue_only = isinstance(payload, VenueSettingsWrite)
+        if not venue_only and before["sync"] != payload.sync.model_dump(mode="json"):
             locked = db.execute(
                 "SELECT pg_try_advisory_xact_lock(%s) AS acquired", (LOCK_ID,)
             ).fetchone()
@@ -113,11 +142,17 @@ def save_operation_settings(administration, actor, payload):
         catalog = _catalog(db)
         departments = {row["id"] for row in catalog["departments"]}
         stores = {row["id"] for row in catalog["stores"]}
-        if set(payload.sync.department_ids) - departments:
-            raise HTTPException(422, "Неизвестное заведение. Обновите список.")
-        if (set(payload.writeoff.store_ids) | set(payload.waybill.store_ids)) - stores:
-            raise HTTPException(422, "Неизвестный склад. Обновите список.")
-        values = payload.model_dump(mode="json", exclude={"revision"})
+        values = {key: before[key] for key in ("sync", "writeoff", "waybill", "analytics")}
+        if venue_only:
+            if set(payload.archived_department_ids) - departments:
+                raise HTTPException(422, "Неизвестное заведение. Обновите список.")
+            values["analytics"] = payload.model_dump(mode="json", exclude={"revision"})
+        else:
+            if set(payload.sync.department_ids) - departments:
+                raise HTTPException(422, "Неизвестное заведение. Обновите список.")
+            if (set(payload.writeoff.store_ids) | set(payload.waybill.store_ids)) - stores:
+                raise HTTPException(422, "Неизвестный склад. Обновите список.")
+            values.update(payload.model_dump(mode="json", exclude={"revision"}))
         actor_id = getattr(actor, "auth_user_id", actor)
         after_revision = before["revision"] + 1
         db.execute(
@@ -137,8 +172,8 @@ def save_operation_settings(administration, actor, payload):
             (
                 after_revision,
                 actor_id,
-                Jsonb({k: before[k] for k in ("sync", "writeoff", "waybill")}),
+                Jsonb({k: before[k] for k in ("sync", "writeoff", "waybill", "analytics")}),
                 Jsonb(values),
             ),
         )
-        return _response(db)
+        return _venue_response(db) if venue_only else _response(db)

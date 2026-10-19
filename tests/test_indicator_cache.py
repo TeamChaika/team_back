@@ -370,3 +370,33 @@ def test_eviction_between_registration_and_read_returns_loading(cache, services,
     assert service.get(service.repository.scope(), query(), "revenue")["status"] == "loading"
     drain(service)
     assert service.get(service.repository.scope(), query(), "revenue")["status"] == "ready"
+
+
+def test_archive_revision_invalidates_payload_and_background_skips_archived(cache, services):
+    repo = Repository()
+    repo.departments = [DEPT, OTHER]
+    fetched = []
+    service = services(repo, lambda *args: fetched.append(args[2]) or payload())
+    service.tick()
+    drain(service)
+    old_key, _ = service._spec(repo.scope(), query())
+    repo.policy = SyncPolicy(1, None, frozenset([str(OTHER)]))
+    new_key, spec = service._spec(repo.scope(), query())
+    assert old_key != new_key and spec["departments"] == [str(DEPT)]
+    assert service.get(repo.scope(), query())["status"] == "loading"
+    drain(service)
+    assert fetched[-1] == [str(DEPT)]
+    with pytest.raises(HTTPException):
+        service._spec(repo.scope(selected=(OTHER,)), query())
+    with_archives = query().model_copy(update={"include_archived": True})
+    archive_key, spec = service._spec(repo.scope(), with_archives)
+    assert archive_key != new_key and spec["departments"] == [str(DEPT), str(OTHER)]
+    repo.policy = SyncPolicy(2, None, frozenset([str(DEPT), str(OTHER)]))
+    service.last_warm = None
+    before = len(fetched)
+    expire(cache)
+    service.tick()
+    drain(service)
+    assert len(fetched) == before
+    with pytest.raises(HTTPException):
+        service.get(repo.scope(), query())

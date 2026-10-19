@@ -130,3 +130,15 @@ UUID значения) и `Store.Name` («Со склада») подтверж�
 `drilldown_available` позволяют интерфейсу открыть этот прямой снимок.
 Контекст только по заведению ограниченному пользователю недоступен.
 История по складам проверяется в `tests/test_warehouse_sales.py`; общий режим сохраняет прежний источник.
+
+## Архив заведений (19.10.2026)
+
+`operation_settings.settings.analytics.archived_department_ids` — отдельная
+видимость, не sync policy. `GET/POST /api/management/venue-archives` доступен
+администратору; старый `/management/venues` сохраняет конфигурацию депозитов.
+`Repository.analytics_scope` сужает Overview и справочники показателей,
+`IndicatorService._department_ids` — их расчёты, опции и прогрев кэша.
+`include_archived=false` по умолчанию; включение архива не расширяет права
+и не включает прямой iiko для выключенного обмена. Метаданные `/api/me`
+сохраняют весь разрешённый список и помечают `archived`.
+[Полный контракт](../venue-archive.md).

@@ -8,6 +8,7 @@ from psycopg.rows import dict_row
 DEFAULT_SCHEMA = "chaika"
 DEFAULT_SETTINGS = {
     "revision": 0,
+    "analytics": {"archived_department_ids": []},
     "sync": {"mode": "all", "department_ids": []},
     "writeoff": {"mode": "all", "store_ids": []},
     "waybill": {"mode": "all", "store_ids": []},
@@ -31,12 +32,14 @@ def load_settings(db):
     # A missing migration must fail rather than silently enable disabled scopes.
     with db.cursor(row_factory=dict_row) as cursor:
         row = cursor.execute(
-            sql.SQL("SELECT revision,settings,updated_at,updated_by FROM {} WHERE singleton")
-            .format(settings_table(db))
+            sql.SQL(
+                "SELECT revision,settings,updated_at,updated_by FROM {} WHERE singleton"
+            ).format(settings_table(db))
         ).fetchone()
     if row is None:
         return deepcopy(DEFAULT_SETTINGS)
     return {
+        **deepcopy(DEFAULT_SETTINGS),
         **deepcopy(row["settings"]),
         "revision": row["revision"],
         "updated_at": row["updated_at"],
