@@ -79,6 +79,30 @@ def has_store_scope(store_id, parents, allowed):
 
 
 class Repository:
+    def indicator_warm_scopes(self):
+        """Finite defaults sourced from actual active users, never fabricated owner rights."""
+        with self.connection() as db:
+            users = db.execute(
+                "SELECT id FROM chaika.web_users WHERE active "
+                "AND NOT password_change_required AND 'indicators'=ANY(sections) "
+                "ORDER BY id LIMIT 256"
+            ).fetchall()
+        # Defaults first; individual venues use the same representative's current rights.
+        scopes = []
+        for user in users:
+            try:
+                scope = self.scope(user["id"])
+                scopes.append(scope)
+                yield scope
+            except HTTPException:
+                continue
+        for scope in scopes:
+            for department in scope.departments:
+                try:
+                    yield self.scope(scope.user["id"], department["id"])
+                except HTTPException:
+                    continue
+
     def sync_policy(self):
         from app.web.sync_policy import read_policy
 

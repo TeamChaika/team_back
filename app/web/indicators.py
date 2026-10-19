@@ -1,17 +1,19 @@
-"""Independent, cached iiko indicators. No sales totals are read from PostgreSQL."""
+"""Direct iiko aggregates with a durable last-good cache, never sums of stored sales."""
 
 import asyncio
 import json
 import logging
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Lock
+from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Annotated
+from uuid import UUID
 
 import httpx
 import psycopg
@@ -287,7 +289,17 @@ def fetch_warehouse_options(settings, query, ids, stores, field):
 
 
 class IndicatorService:
-    def __init__(self, settings, *, fetch=fetch_values, clock=monotonic, policy_reader=None):
+    def __init__(
+        self,
+        settings,
+        *,
+        fetch=fetch_values,
+        clock=monotonic,
+        policy_reader=None,
+        store=None,
+        repository=None,
+        utcnow=None,
+    ):
         self.policy_reader = policy_reader or SyncPolicy
         self.settings = settings
         self.fetch, self.clock = fetch, clock
@@ -295,9 +307,159 @@ class IndicatorService:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="indicators")
         self.cache = OrderedDict()
         self.session_unknown = False
+        self.store, self.repository = store, repository
+        self.utcnow = utcnow or (lambda: datetime.now(UTC))
+        self.stop = Event()
+        self.thread = None
+        self.pending = {}
+        self.last_warm = None
+
+    def start(self):
+        if self.store is not None and self.thread is None:
+            self.thread = Thread(target=self._run, name="indicator-refresh", daemon=True)
+            self.thread.start()
+
+    def _run(self):
+        while not self.stop.is_set():
+            try:
+                self.tick()
+            except Exception as error:
+                log.warning("Indicator background unavailable: %s", error_code(error))
+            self.stop.wait(5)
 
     def close(self):
+        self.stop.set()
+        if self.thread is not None:
+            self.thread.join()
         self.executor.shutdown(wait=True, cancel_futures=True)
+
+    def _spec(self, scope, query):
+        policy = self.policy_reader()
+        ids = self._department_ids(scope, policy)
+        stores = warehouse_ids(scope)
+        filters = query.effective_filters()
+        filters |= {key: [] for key in DEFAULTS if key not in filters}
+        spec = {
+            "version": 1,
+            "source": "primary",
+            "policy_revision": policy.revision,
+            "departments": ids,
+            "stores": list(stores) if stores is not None else None,
+            "query": query.model_dump(mode="json", exclude={"day", "direct", "filters"})
+            | {"filters": filters},
+        }
+        key = sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
+        return key, spec
+
+    def _register(self, scope, query):
+        key, spec = self._spec(scope, query)
+        if not self.store.register(key, spec, scope.user["id"], list(scope.selection_ids)):
+            raise HTTPException(429, "Очередь показателей занята. Повторите через минуту.")
+        return key
+
+    def _authorized(self, row):
+        from app.web.permissions import require_section
+
+        scope = self.repository.scope(
+            UUID(str(row["user_id"])), tuple(UUID(str(v)) for v in row["selection"])
+        )
+        require_section(scope.user, "indicators")
+        query = IndicatorQuery(**row["spec"]["query"])
+        key, _ = self._spec(scope, query)
+        if key != row["key"]:
+            raise HTTPException(403, "Область показателей изменилась.")
+        return scope, query
+
+    def _refresh(self, key):
+        token = self.store.claim(key)
+        if token is None:
+            return
+        try:
+            row = self.store.read(key)
+            scope, query = self._authorized(row)
+            spec = row["spec"]
+            data, _ = self._fetch(query, spec["departments"], tuple(BASE | EXTRA), spec["stores"])
+            # Permissions/policy may have changed during the network request.
+            self._authorized(row)
+            self.store.success(key, token, data)
+        except HTTPException as error:
+            if error.status_code in (403, 423):
+                self.store.discard(key, token)
+            else:
+                self.store.failure(key, token, error_code(error))
+        except Exception as error:
+            self.store.failure(key, token, error_code(error))
+
+    def _schedule(self, key):
+        with self.guard:
+            self.pending = {k: f for k, f in self.pending.items() if not f.done()}
+            if key not in self.pending and len(self.pending) < 48:
+                self.pending[key] = self.executor.submit(self._refresh, key)
+                self.pending[key].add_done_callback(self._refresh_done)
+
+    @staticmethod
+    def _refresh_done(future):
+        if not future.cancelled() and future.exception() is not None:
+            log.warning("Indicator refresh failed: %s", error_code(future.exception()))
+
+    def tick(self):
+        """One nonblocking background tick, also directly testable without HTTP traffic."""
+        now = self.utcnow()
+        if self.last_warm is None or (now - self.last_warm).total_seconds() >= 300:
+            query = IndicatorQuery(day=now.astimezone(ZONE).date())
+            seen = set()
+            for scope in self.repository.indicator_warm_scopes():
+                try:
+                    key, _ = self._spec(scope, query)
+                    if key not in seen:
+                        self._register(scope, query)
+                        seen.add(key)
+                except HTTPException:
+                    continue
+                if len(seen) >= 32:
+                    break
+            self.last_warm = now
+        for row in self.store.due():
+            if self.stop.is_set():
+                break
+            self._schedule(row["key"])
+
+    def _persistent_job(self, scope, query):
+        key, _ = self._spec(scope, query)
+        row = self.store.read(key)
+        now = self.utcnow()
+        # Hits only read; renew the demand lease at most once an hour.
+        if row is None or row["expires_at"] - now < timedelta(hours=23):
+            self._register(scope, query)
+            row = self.store.read(key)
+            now = self.utcnow()
+        if row is None:
+            # Another process may evict a newly admitted key at capacity. Retry by polling.
+            return Future()
+        if row["due_at"] <= now:
+            self._schedule(key)
+        future = Future()
+        if row["payload"] is not None:
+            data = dict(row["payload"])
+            data["values"] = [
+                {
+                    key: Decimal(value) if isinstance(value, str) else value
+                    for key, value in totals.items()
+                }
+                for totals in data["values"]
+            ]
+            data["cache"] = {
+                "stale": (now - row["observed_at"]).total_seconds() >= 300,
+                "refreshing": bool(row["lease_until"] and row["lease_until"] > now)
+                or row["due_at"] <= now,
+                "refresh_error": row["last_error"],
+                "next_refresh_at": row["due_at"],
+            }
+            future.set_result((data, self.clock()))
+        elif row["last_error"] and row["due_at"] > now:
+            future.set_exception(IikoError(row["last_error"], "Показатели временно недоступны."))
+        # Cold entries are polled, never held behind the provider request.
+        return future
 
     def _department_ids(self, scope, policy):
         """Narrow implicit all-network reads; explicit selections remain strict."""
@@ -395,7 +557,9 @@ class IndicatorService:
         if metric is not None and metric not in METRIC_INPUTS:
             raise HTTPException(422, "Неизвестный показатель.")
         stores = warehouse_ids(scope)
-        inputs = tuple(sorted(METRIC_INPUTS[metric] if metric else BASE | EXTRA))
+        if self.store is not None:
+            return self._persistent_job(scope, query)
+        inputs = tuple(sorted(BASE | EXTRA))
         key = json.dumps(
             [
                 policy.revision,
@@ -444,6 +608,8 @@ class IndicatorService:
 
     def get(self, scope, query, metric=None):
         future = self._job(scope, query, metric)
+        if self.store is not None and not future.done():
+            return {"status": "loading", "metric": metric, "retry_after": 2}
         if metric is None:
             # Preserve the old daily URL during a rolling frontend deployment.
             try:
@@ -466,6 +632,7 @@ class IndicatorService:
             "metric": metric,
             "observed_at": data["observed_at"],
             "cache_seconds": 300,
+            **data.get("cache", {}),
         }
         for index, name in enumerate(("current", "previous")):
             start, end = periods[index]
