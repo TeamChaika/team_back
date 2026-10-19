@@ -93,6 +93,7 @@ class IndicatorQuery(BaseModel):
     previous_end: date | None = None
     day: date | None = None  # Compatibility with the first daily frontend.
     direct: bool = True
+    include_archived: bool = False
     filters: dict[str, list[Value]] = Field(default_factory=dict, max_length=len(FILTERS))
 
     @model_validator(mode="after")
@@ -335,7 +336,7 @@ class IndicatorService:
 
     def _spec(self, scope, query):
         policy = self.policy_reader()
-        ids = self._department_ids(scope, policy)
+        ids = self._department_ids(scope, policy, query.include_archived)
         stores = warehouse_ids(scope)
         filters = query.effective_filters()
         filters |= {key: [] for key in DEFAULTS if key not in filters}
@@ -461,9 +462,11 @@ class IndicatorService:
         # Cold entries are polled, never held behind the provider request.
         return future
 
-    def _department_ids(self, scope, policy):
+    def _department_ids(self, scope, policy, include_archived=False):
         """Narrow implicit all-network reads; explicit selections remain strict."""
-        ids = sorted(str(value) for value in scope.ids)
+        from app.web.sync_policy import analytics_department_ids
+
+        ids = analytics_department_ids(scope, policy, include_archived)
         if getattr(scope, "selection_ids", None) == () and policy.departments is not None:
             active = [value for value in ids if value in policy.departments]
             if not active:
@@ -501,7 +504,7 @@ class IndicatorService:
         if field not in FILTERS:
             raise HTTPException(422, "Неизвестный фильтр.")
         policy = self.policy_reader()
-        ids = self._department_ids(scope, policy)
+        ids = self._department_ids(scope, policy, query.include_archived)
         stores = warehouse_ids(scope)
         if stores is None or not ids:
             raise HTTPException(403, "Нет доступных складов.")
@@ -553,7 +556,7 @@ class IndicatorService:
 
     def _job(self, scope, query, metric):
         policy = self.policy_reader()
-        ids = self._department_ids(scope, policy)
+        ids = self._department_ids(scope, policy, query.include_archived)
         if metric is not None and metric not in METRIC_INPUTS:
             raise HTTPException(422, "Неизвестный показатель.")
         stores = warehouse_ids(scope)

@@ -2,7 +2,7 @@
 
 import json
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal, localcontext
 from uuid import UUID
@@ -108,6 +108,12 @@ class Repository:
 
         with self.connection() as db:
             return read_policy(db)
+
+    def analytics_scope(self, scope, include_archived=False):
+        from app.web.sync_policy import analytics_department_ids
+
+        ids = analytics_department_ids(scope, self.sync_policy(), include_archived)
+        return replace(scope, selected=tuple(UUID(value) for value in ids))
 
     def indicator_filters(self, scope):
         with self.connection(repeatable=True) as db:
@@ -325,11 +331,16 @@ class Repository:
             )
 
     def metadata(self, scope):
+        archived = self.sync_policy().archived_departments if scope.departments else frozenset()
+        departments = tuple(
+            {**department, "archived": str(department["id"]) in archived}
+            for department in scope.departments
+        )
         if not scope.departments or scope.warehouse_restricted:
             return serial(
                 {
                     "user": scope.user,
-                    "departments": scope.departments,
+                    "departments": departments,
                     "sales_dates": [],
                     "balance_dates": [],
                 }
@@ -347,7 +358,7 @@ class Repository:
         return serial(
             {
                 "user": scope.user,
-                "departments": scope.departments,
+                "departments": departments,
                 "sales_dates": [r["business_date"] for r in dates],
                 "balance_dates": [r["accounting_timestamp"] for r in balances],
             }

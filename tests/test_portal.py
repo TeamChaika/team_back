@@ -22,6 +22,14 @@ OTHER = UUID(int=3)
 
 
 class FakeRepository:
+    from app.web.repository import Repository
+    from app.web.sync_policy import SyncPolicy
+
+    analytics_scope = Repository.analytics_scope
+
+    def sync_policy(self):
+        return self.SyncPolicy()
+
     active = True
     password_change_required = False
 

@@ -454,7 +454,8 @@ def create_portal(
         return repo.sales(scope, kind, start, end)
 
     @app.get("/api/indicators/filters")
-    def indicator_filters(scope: Access):
+    def indicator_filters(scope: Access, include_archived: bool = False):
+        scope = repo.analytics_scope(scope, include_archived)
         return {"filters": catalog(), **repo.indicator_filters(scope)}
 
     @app.post("/api/indicators/query")
@@ -473,6 +474,7 @@ def create_portal(
         request.app.state.auth.check_origin(request)
         if scope.warehouse_restricted:
             return serial(indicators.warehouse_options(scope, payload, field))
+        scope = repo.analytics_scope(scope, payload.include_archived)
         data = repo.indicator_filters(scope)
         if field not in data["options"]:
             raise HTTPException(422, "Неизвестный фильтр.")
@@ -484,7 +486,9 @@ def create_portal(
         start: date,
         end: date,
         granularity: Literal["day", "week", "month"] = "day",
+        include_archived: bool = False,
     ):
+        scope = repo.analytics_scope(scope, include_archived)
         check_period(start, end)
         if start.toordinal() <= (end - start).days + 1:
             raise HTTPException(422, "Для выбранной даты невозможно определить предыдущий период.")

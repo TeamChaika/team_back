@@ -376,3 +376,138 @@ def test_authenticated_admin_http_roundtrip_uses_real_persistence_and_rechecks_a
         == 403
     )
     assert load_settings(database)["revision"] == 1
+
+
+def test_archives_preserve_operations_and_old_clients_preserve_archives(database):
+    from app.web.operation_settings import VenueSettingsWrite
+
+    administration = TestAdministration(database)
+    initial = save_operation_settings(
+        administration, ADMIN, payload(sync={"mode": "selected", "department_ids": []})
+    )
+    result = save_operation_settings(
+        administration, ADMIN, VenueSettingsWrite(revision=1, archived_department_ids=[DEPARTMENT])
+    )
+    assert result["revision"] == 2
+    assert result["archived_department_ids"] == [str(DEPARTMENT)]
+    saved = load_settings(database)
+    assert saved["sync"] == initial["sync"]
+    assert saved["writeoff"] == initial["writeoff"]
+    save_operation_settings(administration, ADMIN, payload(revision=2))
+    assert load_settings(database)["analytics"]["archived_department_ids"] == [str(DEPARTMENT)]
+    with pytest.raises(HTTPException) as error:
+        save_operation_settings(
+            administration, ADMIN, VenueSettingsWrite(revision=2, archived_department_ids=[])
+        )
+    assert error.value.status_code == 409
+    assert (
+        database.execute("SELECT count(*) AS n FROM chaika.operation_settings_audit").fetchone()[
+            "n"
+        ]
+        == 3
+    )
+    save_operation_settings(
+        administration, ADMIN, VenueSettingsWrite(revision=3, archived_department_ids=[])
+    )
+    assert load_settings(database)["analytics"]["archived_department_ids"] == []
+
+
+def test_old_stored_settings_default_and_invalid_archive_ids(database):
+    from app.web.operation_settings import VenueSettingsWrite
+
+    save_operation_settings(TestAdministration(database), ADMIN, payload())
+    database.execute("UPDATE chaika.operation_settings SET settings=settings-'analytics'")
+    assert load_settings(database)["analytics"] == {"archived_department_ids": []}
+    with pytest.raises(HTTPException) as error:
+        save_operation_settings(
+            TestAdministration(database),
+            ADMIN,
+            VenueSettingsWrite(revision=1, archived_department_ids=[UUID(int=999)]),
+        )
+    assert error.value.status_code == 422
+    with pytest.raises(ValidationError):
+        VenueSettingsWrite(revision=1, archived_department_ids=[DEPARTMENT, DEPARTMENT])
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_venues_http_requires_admin(restricted, method):
+    client, repo = restricted
+    repo.sections = ["sales", "transfers", "writeoffs"]
+    response = client.request(
+        method,
+        "/api/management/venue-archives",
+        json={"revision": 0, "archived_department_ids": []} if method == "POST" else None,
+    )
+    assert response.status_code == 403
+
+
+def test_venues_http_checks_origin(restricted):
+    client, repo = restricted
+    repo.admin = True
+    response = client.post(
+        "/api/management/venue-archives",
+        json={"revision": 0, "archived_department_ids": []},
+        headers={"Origin": "https://attacker.invalid"},
+    )
+    assert response.status_code == 403
+
+
+def test_archive_tenant_schema_isolation(database):
+    from app.web.operation_settings import VenueSettingsWrite
+
+    create_catalog(database, "archive_tenant")
+    for table in ("operation_settings", "operation_settings_audit"):
+        database.execute(
+            sql.SQL("CREATE TABLE archive_tenant.{} (LIKE chaika.{} INCLUDING ALL)").format(
+                sql.Identifier(table), sql.Identifier(table)
+            )
+        )
+
+    class TenantConnection:
+        tenant_runtime = SimpleNamespace(schema=lambda area: "archive_tenant")
+
+        def __getattr__(self, name):
+            return getattr(database, name)
+
+    tenant = TenantConnection()
+    save_operation_settings(
+        TestAdministration(tenant),
+        ADMIN,
+        VenueSettingsWrite(revision=0, archived_department_ids=[DEPARTMENT]),
+    )
+    assert load_settings(tenant)["analytics"]["archived_department_ids"] == [str(DEPARTMENT)]
+    assert load_settings(database)["analytics"]["archived_department_ids"] == []
+    assert load_settings(database)["revision"] == 0
+
+
+def test_archive_admin_roundtrip_and_revocation(database, restricted):
+    client, repo = restricted
+    repo.admin = True
+    repo.runtime = SimpleNamespace(mode="legacy")
+    database.execute(
+        "CREATE TABLE chaika.web_users (id uuid PRIMARY KEY,is_portal_admin boolean,active boolean)"
+    )
+    database.execute("INSERT INTO chaika.web_users VALUES(%s,true,true)", (ADMIN,))
+
+    @contextmanager
+    def connection(**kwargs):
+        yield database
+
+    repo.connection = connection
+    repo._pool = SimpleNamespace(open=lambda: None, connection=connection)
+    initial = client.get("/api/management/venue-archives")
+    assert initial.status_code == 200 and initial.json()["revision"] == 0
+    command = {"revision": 0, "archived_department_ids": [str(DEPARTMENT)]}
+    response = client.post(
+        "/api/management/venue-archives", json=command, headers={"Origin": "http://127.0.0.1:8013"}
+    )
+    assert response.status_code == 200 and response.json()["archived_department_ids"] == [
+        str(DEPARTMENT)
+    ]
+    database.execute("UPDATE chaika.web_users SET is_portal_admin=false WHERE id=%s", (ADMIN,))
+    command["revision"] = 1
+    response = client.post(
+        "/api/management/venue-archives", json=command, headers={"Origin": "http://127.0.0.1:8013"}
+    )
+    assert response.status_code == 403
+    assert load_settings(database)["revision"] == 1

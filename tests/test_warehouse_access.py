@@ -65,6 +65,9 @@ def warehouse_repo():
         yield db
 
     repo.connection = connection
+    from app.web.sync_policy import SyncPolicy
+
+    repo.sync_policy = SyncPolicy
     return repo, db
 
 
@@ -228,9 +231,11 @@ def test_native_and_commercial_sql_intersection_and_active_identity():
                 db.execute(Path("migrations/documents/0010_global_warehouse_scope.sql").read_text())
                 # This ACL fixture has no historical reporting tables: apply the
                 # real settings DDL/grants before the unrelated provenance section.
-                settings_sql = Path(
-                    "supabase/migrations/20261016123000_operation_settings.sql"
-                ).read_text().partition("-- Preserve provenance")[0]
+                settings_sql = (
+                    Path("supabase/migrations/20261016123000_operation_settings.sql")
+                    .read_text()
+                    .partition("-- Preserve provenance")[0]
+                )
                 db.execute(settings_sql)
                 db.execute(Path("migrations/documents/0011_operation_settings.sql").read_text())
                 db.execute(

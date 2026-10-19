@@ -13,7 +13,9 @@ from starlette.concurrency import run_in_threadpool
 
 from app.web.operation_settings import (
     OperationSettingsWrite,
+    VenueSettingsWrite,
     read_operation_settings,
+    read_venue_settings,
     save_operation_settings,
 )
 from app.web.permissions import ANALYTICS_SECTIONS, SECTIONS, require_admin
@@ -439,6 +441,14 @@ def create_admin_router(access, repo, web, store=None):
 
     @router.post("/operation-settings")
     def update_operation_settings(payload: OperationSettingsWrite, actor: Admin):
+        return save_operation_settings(store, actor, payload)
+
+    @router.get("/venue-archives")
+    def venue_archives(actor: Admin):
+        return read_venue_settings(store)
+
+    @router.post("/venue-archives")
+    def update_venue_archives(payload: VenueSettingsWrite, actor: Admin):
         return save_operation_settings(store, actor, payload)
 
     @router.get("/accounts")
