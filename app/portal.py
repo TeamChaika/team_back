@@ -80,8 +80,13 @@ def create_portal(
         if settings.live_sales_enabled
         else None
     )
+    from app.web.indicator_cache import PostgresIndicatorCache
+
     indicators = indicator_service or IndicatorService(
-        settings, policy_reader=getattr(repo, "sync_policy", None)
+        settings,
+        policy_reader=getattr(repo, "sync_policy", None),
+        store=PostgresIndicatorCache(settings) if repository is None else None,
+        repository=repo,
     )
     document_config = document_settings or DocumentSettings()
 
@@ -117,6 +122,8 @@ def create_portal(
         try:
             if repository is None:
                 await run_in_threadpool(repo.open)
+            if hasattr(indicators, "start"):
+                indicators.start()
             background = asyncio.create_task(start_background())
             if (
                 web.documents_enabled
