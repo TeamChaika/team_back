@@ -7,6 +7,7 @@ from decimal import ROUND_HALF_UP, Decimal, localcontext
 from fastapi import HTTPException
 
 from app.web.coverage import ZONE, partial_days
+from app.web.purchase_impact_scope import forecast_departments
 from app.web.purchase_prices import read_purchase_prices
 
 ZERO = Decimal(0)
@@ -181,12 +182,12 @@ def sales_coverage(coverage, start, end, departments):
     mismatches = []
     for row in coverage:
         for check in row["checks"]:
-            if check["report"] != "dishes" or check["exact_match"]:
+            if check.get("report") != "dishes" or check["exact_match"]:
                 continue
             differences = check.get("differences", [])
             if not differences or any(str(d["department_id"]) in visible for d in differences):
                 mismatches.append(row["business_date"])
-    partial = partial_days(coverage)
+    partial = partial_days(coverage, departments)
     return dict(
         loaded_days=len(loaded),
         days=days,
@@ -386,10 +387,15 @@ def read_purchase_impact(
         and analysis_department_id is None
         and not all_departments
     )
+    forecast_selling_ids = forecast_departments(
+        db, selling_ids, explicit=selected_group or analysis_department_id is not None
+    )
     analysis_ids = (
         list(scope.selection_ids)
         if selected_group
-        else analysis_scope(scope, department, selling_ids, analysis_department_id, all_departments)
+        else analysis_scope(
+            scope, department, forecast_selling_ids, analysis_department_id, all_departments
+        )
     )
     coverage = db.execute(
         "SELECT d.business_date,r.observed_at,s.checks FROM chaika.sales_report_days d "

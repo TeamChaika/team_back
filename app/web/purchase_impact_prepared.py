@@ -5,6 +5,7 @@ from decimal import Decimal, localcontext
 
 from app.purchase_impact_precompute import source_revision
 from app.web.purchase_impact import recent_period, sales_coverage
+from app.web.purchase_impact_scope import forecast_departments
 from app.web.warehouse_analytics import require_department_report
 
 
@@ -97,11 +98,12 @@ def add_prepared_impacts(db, scope, report):
         return report
     targets = list({price["product_id"] for price in report["rows"]})
     allowed = {str(d) for d in scope.ids}
-    departments = (
+    candidates = (
         list(scope.selection_ids)
         if scope.selection_ids
         else sorted(allowed.intersection(current["selling_department_ids"]))
     )
+    departments = forecast_departments(db, candidates, explicit=bool(scope.selection_ids))
     # Filter JSON before it leaves PostgreSQL; facts of other venues cannot be
     # accidentally returned by a later response refactor.
     facts = {
@@ -133,5 +135,7 @@ def add_prepared_impacts(db, scope, report):
         coverage=sales_coverage(coverage, start, end, departments),
         status="ready" if all(target in facts for target in targets) else "pending",
         prepared_at=current["prepared_at"],
+        analysis_department_ids=departments,
+        excluded_department_ids=[value for value in candidates if value not in departments],
     )
     return report

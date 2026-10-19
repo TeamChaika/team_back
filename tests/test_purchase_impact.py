@@ -16,6 +16,7 @@ from test_purchase_prices import data as data
 from test_reference_sync import bundle as bundle
 from test_reference_sync import db as db
 
+from app.web.coverage import partial_days
 from app.web.purchase_impact import (
     analysis_scope,
     calculate_impact,
@@ -193,6 +194,86 @@ def test_other_venue_reconciliation_does_not_leak_or_block_this_venue():
     ]
     r = calculate_impact(*s)
     assert r["coverage"]["complete"] and r["coverage"]["mismatch_dates"] == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [None, "uncovered", "intraday", "mismatch", "other_mismatch"],
+)
+def test_selected_refresh_metadata_proves_only_final_covered_venues(failure):
+    s = sample()
+    metadata = dict(
+        exact_match=True,
+        partial_scope=True,
+        sync_scope_mode="selected",
+        sync_department_ids=[str(DEPT)],
+    )
+    for report in s[4]:
+        report["checks"] = [deepcopy(metadata)]
+    if failure == "uncovered":
+        s[4][0]["checks"][0]["sync_department_ids"] = [str(uuid4())]
+    elif failure == "intraday":
+        s[4][0]["observed_at"] = datetime(2026, 8, 1, tzinfo=UTC)
+    elif failure in {"mismatch", "other_mismatch"}:
+        s[4][0]["checks"].append(
+            dict(
+                report="dishes",
+                exact_match=False,
+                differences=[dict(department_id=str(DEPT if failure == "mismatch" else uuid4()))],
+            )
+        )
+    result = calculate_impact(*s)
+    complete = failure in {None, "other_mismatch"}
+    assert result["coverage"]["complete"] is complete
+    assert (result["totals"]["weekly_delta"] is not None) is complete
+    # Other consumers without a requested venue scope retain conservative coverage.
+    assert len(partial_days(s[4])) == 31
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"sync_scope_mode": "all"},
+        {"sync_scope_mode": None},
+        {"sync_department_ids": None},
+        {"sync_department_ids": []},
+        {"sync_department_ids": str(DEPT)},
+        {"sync_department_ids": [str(DEPT), "invalid"]},
+        {"exact_match": False},
+    ],
+)
+def test_unknown_partial_scope_metadata_cannot_enable_weekly_forecast(overrides):
+    s = sample()
+    s[4][0]["checks"] = [
+        dict(
+            exact_match=True,
+            partial_scope=True,
+            sync_scope_mode="selected",
+            sync_department_ids=[str(DEPT)],
+        )
+        | overrides
+    ]
+    result = calculate_impact(*s)
+    assert result["coverage"]["partial_dates"] == [START]
+    assert result["totals"]["weekly_delta"] is None
+
+
+def test_partial_scope_requires_every_requested_venue_and_a_nonempty_scope():
+    s = sample()
+    other = uuid4()
+    s[4][0]["checks"] = [
+        dict(
+            exact_match=True,
+            partial_scope=True,
+            sync_scope_mode="selected",
+            sync_department_ids=[str(DEPT)],
+        )
+    ]
+    assert partial_days(s[4], [])
+    assert partial_days(s[4], [DEPT, other])
+    assert partial_days(s[4], ["invalid"])
+    s[4][0]["checks"][0]["sync_department_ids"].append(str(other))
+    assert partial_days(s[4], [DEPT, other]) == []
 
 
 @pytest.mark.parametrize(

@@ -10,6 +10,7 @@ import psycopg
 import pytest
 from fastapi import HTTPException
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from test_reference_sync import bundle as bundle
 from test_reference_sync import db as db
 
@@ -152,6 +153,44 @@ def test_arbitrary_department_combinations_preserve_scope_and_decimal_order():
         assert actual["included_positions"] == len(selected)
 
 
+@pytest.mark.parametrize("failure", [None, "uncovered", "intraday", "mismatch", "other_mismatch"])
+def test_selected_refresh_survives_preparation_and_scoped_summary(failure):
+    graph, sales, price, product, coverage, start, end, recipe_day = inputs()
+    for report in coverage:
+        report["checks"] = [
+            dict(
+                exact_match=True,
+                partial_scope=True,
+                sync_scope_mode="selected",
+                sync_department_ids=[str(DEPT)],
+            )
+        ]
+    if failure == "uncovered":
+        coverage[0]["checks"][0]["sync_department_ids"] = [str(uuid4())]
+    elif failure == "intraday":
+        coverage[0]["observed_at"] = datetime.combine(start, datetime.min.time(), UTC)
+    elif failure in {"mismatch", "other_mismatch"}:
+        coverage[0]["checks"].append(
+            dict(
+                report="dishes",
+                exact_match=False,
+                differences=[dict(department_id=str(DEPT if failure == "mismatch" else uuid4()))],
+            )
+        )
+    facts = prepare_product_facts(
+        [TARGET], graph, sales, {TARGET: product}, coverage, start, end, recipe_day
+    )
+    result = summarize_prepared(price, facts[0], coverage, start, end, recipe_day, [DEPT])
+    expected = calculate_impact(
+        graph, sales, price, product, coverage, start, end, recipe_day, departments=[DEPT]
+    )
+    assert result["weekly_delta"] == expected["totals"]["weekly_delta"]
+    assert result["included_positions"] == 1
+    complete = failure in {None, "other_mismatch"}
+    assert (result["weekly_delta"] is not None) is complete
+    assert bool(result["reason"]) is not complete
+
+
 def test_missing_product_is_distinct_from_unprepared_product():
     _, _, price, _, coverage, start, end, recipe_day = inputs()
     facts = prepare_product_facts([TARGET], [], [], {}, coverage, start, end, recipe_day)
@@ -197,6 +236,9 @@ def test_reader_is_scoped_and_never_queries_source_graphs_or_sales_rows(prepared
     statements = []
 
     class GuardedDB:
+        def cursor(self, **kwargs):
+            return prepared_db.cursor(**kwargs)
+
         def execute(self, query, params=None):
             assert "sales_report_rows" not in query and "assembly_chart" not in query
             statements.append((query, params))
@@ -228,6 +270,43 @@ def test_unavailable_and_stale_preparation_never_returns_old_delta(prepared_db):
     stale = add_prepared_impacts(prepared_db, scope, {"rows": [price]})
     assert stale["impact_period"]["status"] == "pending"
     assert stale["rows"][0]["impact"]["weekly_delta"] is None
+
+
+def test_reader_excludes_disabled_venue_only_for_implicit_forecast(prepared_db):
+    from dataclasses import replace
+
+    from app.operation_settings import DEFAULT_SETTINGS
+
+    prepared, scope, price = prepared_fixture(prepared_db)
+    hidden = next(UUID(value) for value in prepared["selling_department_ids"] if value != str(DEPT))
+    scope = replace(scope, departments=(*scope.departments, {"id": hidden, "name": "Frozen"}))
+    metadata = dict(
+        exact_match=True,
+        partial_scope=True,
+        sync_scope_mode="selected",
+        sync_department_ids=[str(DEPT)],
+    )
+    for day in prepared["coverage"]:
+        day["checks"].append(metadata)
+    settings = deepcopy(DEFAULT_SETTINGS)
+    settings["sync"] = dict(mode="selected", department_ids=[str(DEPT)])
+    prepared_db.execute(
+        "INSERT INTO chaika.operation_settings(singleton,revision,settings,updated_by) "
+        "VALUES(true,1,%s,%s)",
+        (Jsonb(settings), uuid4()),
+    )
+    publish_prepared(prepared_db, prepared)
+    report = add_prepared_impacts(prepared_db, scope, {"rows": [deepcopy(price)]})
+    assert report["impact_period"]["coverage"]["complete"]
+    assert report["impact_period"]["analysis_department_ids"] == [str(DEPT)]
+    assert report["impact_period"]["excluded_department_ids"] == [str(hidden)]
+    assert report["rows"][0]["impact"]["weekly_delta"] is not None
+    assert report["rows"][0]["impact"]["included_positions"] == 1
+    explicit = add_prepared_impacts(
+        prepared_db, replace(scope, selected=(DEPT, hidden)), {"rows": [deepcopy(price)]}
+    )
+    assert not explicit["impact_period"]["coverage"]["complete"]
+    assert explicit["rows"][0]["impact"]["weekly_delta"] is None
 
 
 def test_warehouse_restriction_is_checked_before_any_prepared_read():
