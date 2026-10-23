@@ -27,6 +27,7 @@
 | Архив RAW iiko в S3, backfill и восстановление | [Архив снимков](snapshot-archive.md) | `app/snapshot_archive.py`, `tools/archive_snapshots.py`; UUID/FK и бизнес-таблицы остаются в PostgreSQL |
 | История OLAP и PostgreSQL | [Сбор и данные](CODEMAPS/sync-data.md) | [app/sync_sales_history.py](../app/sync_sales_history.py) |
 | Плановые задания и ручной refresh | [Сбор и данные](CODEMAPS/sync-data.md) | [app/scheduler.py](../app/scheduler.py) |
+| Ежедневная наценка ниже 150% в Telegram | [Контракт](low-markup-reports.md) | `app/low_markup_report.py`, `app/low_markup_delivery.py`, `app/web/low_markup_reports.py`; за вчера, 09:00, явный чат каждого заведения |
 | Миграции, тесты, CI | [Сбор и данные](CODEMAPS/sync-data.md) | [.github/workflows/ci.yml](../.github/workflows/ci.yml) |
 | Runtime, выпуск, эксплуатационные проверки | [Операции](CODEMAPS/operations.md) | [app/serve.py](../app/serve.py) |
 

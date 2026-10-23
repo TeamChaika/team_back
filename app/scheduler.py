@@ -52,6 +52,7 @@ class Job:
 JOBS = (
     Job("purchase_impact", "Закупочные цены и недельное влияние", minute=0),
     Job("sales", "Продажи OLAP · вчера", 6, 0),
+    Job("low_markup", "Отчёт по наценке · вчера", 9, 0),
     Job("documents", "Накладные, списания и перемещения · вчера и сегодня", minute=10),
     Job("events", "События всех RMS · последние 7 дней", minute=20),
     Job("balances", "Остатки на складах", minute=30),
@@ -118,6 +119,10 @@ def run_job(job, slot, settings, stop, *, namespace="scheduled"):
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     if job.key == "purchase_impact":
         prepare_purchase_impact(settings, stop, strict=True)
+    elif job.key == "low_markup":
+        from app.low_markup_delivery import run_reports
+
+        run_reports(settings, yesterday, stop)
     elif job.key in {"sales", "sales_history"}:
         from app.sync_sales_history import synchronize_history
 

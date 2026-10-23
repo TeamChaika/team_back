@@ -408,6 +408,7 @@ def create_portal(
             and bool(IIKO_SECTIONS.intersection(sections_for(scope.user))),
             "sections": sections_for(scope.user),
             "can_manage": bool(scope.user.get("is_portal_admin")),
+            "low_markup_reports_enabled": bool(scope.user.get("is_portal_admin")),
             "documents_enabled": web.documents_enabled,
             "modules": (["iiko"] if IIKO_SECTIONS.intersection(sections_for(scope.user)) else [])
             + (["deposits"] if "deposits" in sections_for(scope.user) else []),

@@ -35,6 +35,7 @@ jobs:
       # Disposable runner-only PostgreSQL, never the working Supabase instance.
       CHAIKA_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:15438/postgres
       SUPPORT_TEST_DSN: postgresql://postgres:postgres@127.0.0.1:15438/postgres
+      LOW_MARKUP_TEST_DSN: postgresql://postgres:postgres@127.0.0.1:15438/postgres
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:

@@ -24,8 +24,10 @@ class Telegram:
             transport=transport,
         )
 
-    def call(self, method, *, photo=None, **payload):
-        if photo is None:
+    def call(self, method, *, photo=None, document=None, **payload):
+        if photo is not None and document is not None:
+            raise ValueError("Only one Telegram attachment is supported")
+        if photo is None and document is None:
             response = self.client.post(method, json=payload)
         else:
             fields = {
@@ -35,7 +37,11 @@ class Telegram:
                 for key, value in payload.items()
             }
             response = self.client.post(
-                method, data=fields, files={"photo": ("document.png", photo, "image/png")}
+                method,
+                data=fields,
+                files={"document": document}
+                if document is not None
+                else {"photo": ("document.png", photo, "image/png")},
             )
         try:
             data = response.json()
@@ -50,7 +56,26 @@ class Telegram:
                 details.get("description", ""),
                 parameters.get("retry_after"),
             )
-        return data.get("result")
+        result = data.get("result")
+        if method == "sendDocument":
+            chat = result.get("chat") if isinstance(result, dict) else None
+            receipt = result.get("document") if isinstance(result, dict) else None
+            if (
+                not isinstance(result, dict)
+                or type(result.get("message_id")) is not int
+                or result["message_id"] <= 0
+                or not isinstance(chat, dict)
+                or type(chat.get("id")) is not int
+                or chat["id"] != int(payload["chat_id"])
+                or not isinstance(receipt, dict)
+                or not isinstance(receipt.get("file_id"), str)
+                or not receipt["file_id"]
+                or document is None
+                or type(receipt.get("file_size")) is not int
+                or receipt["file_size"] != len(document[1])
+            ):
+                raise TelegramError(502, "Unexpected document receipt")
+        return result
 
     def close(self):
         self.client.close()
@@ -239,6 +264,18 @@ def handle_update(service, bot, update):
     message = update.get("message") or {}
     parts = (message.get("text") or "").split()
     text = parts[0].split("@")[0] if parts else ""
+    if text == "/chatid":
+        chat = message.get("chat") or {}
+        target = parts[0].partition("@")[2]
+        if target and target.casefold() != service.settings.bot_username.casefold():
+            return
+        if (
+            chat.get("type") in {"group", "supergroup"}
+            and type(chat.get("id")) is int
+            and chat["id"] < 0
+        ):
+            bot.call("sendMessage", chat_id=chat["id"], text=f"ID этого чата: {chat['id']}")
+        return
     if text not in {"/start", "/pending"}:
         return
     # Do not disclose private document previews into a group chat.

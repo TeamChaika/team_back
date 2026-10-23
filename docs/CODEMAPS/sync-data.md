@@ -1,5 +1,10 @@
 # Сбор iiko, фоновые задания и данные
 
+Ежедневный `low_markup` в 09:00 готовит XLSX по продажам до скидок за предыдущий
+учётный день и отправляет в настроенный чат заведения. Источник —
+`app/low_markup_report.py`, журнал доставки — `app/low_markup_delivery.py`.
+[Настройки, формула и выпуск](../low-markup-reports.md).
+
 Срез: 2026-10-03, Git `7c48c412d5f8c225af34c99193206507fae4f0f1`. Публичный портал — [app/serve.py](../../app/serve.py) → [app/portal.py](../../app/portal.py). Приватный сборщик — отдельный [app/main.py](../../app/main.py): [app/api/router.py](../../app/api/router.py) → `app/api/routes/*` → [app/api/dependencies.py](../../app/api/dependencies.py) → `app/services/*` → [app/integrations/iiko/client.py](../../app/integrations/iiko/client.py). Контракт ответа расположен в `app/schemas/*`.
 
 | Данные/процесс | Где начать |
