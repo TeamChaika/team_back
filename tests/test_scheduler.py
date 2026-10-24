@@ -127,7 +127,8 @@ def test_price_preparation_failure_still_attempts_weekly_impact(monkeypatch, str
 
     monkeypatch.setattr(purchase_prices_precompute, "ensure_prepared", prices)
     monkeypatch.setattr(
-        purchase_impact_precompute, "ensure_prepared",
+        purchase_impact_precompute,
+        "ensure_prepared",
         lambda *a, **kw: calls.append("impact") or {"status": "ready"},
     )
     if strict:
@@ -171,3 +172,33 @@ def test_completed_slot_not_repeated_after_restart_and_failed_slot_retried(db, m
         "succeeded",
         2,
     )
+
+
+def test_catalog_and_recipes_have_independent_schedules():
+    jobs = {job.key: job for job in scheduler.JOBS}
+    assert "inventory" not in jobs
+    assert jobs["products"].hour is None and jobs["products"].minute == 40
+    assert jobs["assembly_charts"].hour == 5 and jobs["assembly_charts"].minute == 0
+
+
+def test_recipe_job_does_not_refresh_document_catalog(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    from app import sync_inventory
+    from app.documents import catalog_sync
+    from app.services import sync_jobs
+
+    monkeypatch.setattr(sync_jobs, "ROOT", tmp_path)
+    loader, catalogs, prepare = Mock(), Mock(), Mock()
+    monkeypatch.setattr(sync_inventory, "synchronize_inventory", loader)
+    monkeypatch.setattr(catalog_sync, "refresh_after_inventory", catalogs)
+    monkeypatch.setattr(scheduler, "prepare_purchase_impact", prepare)
+    scheduler.run_job(
+        scheduler.Job("assembly_charts", "Техкарты"),
+        datetime(2026, 10, 25, 5, tzinfo=scheduler.ZONE),
+        None,
+        Event(),
+    )
+    assert loader.call_args.kwargs == {"job": "assembly_charts"}
+    catalogs.assert_not_called()
+    prepare.assert_called_once()

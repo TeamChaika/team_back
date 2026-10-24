@@ -105,3 +105,13 @@ PID/UID и SHA файлов `snapshot_archive.py`, `sync_inventory.py`, `sync_re
 ## Выбор заведений и рабочих складов
 
 До backend/worker применить analytics `20261016123000_operation_settings.sql`, затем documents `0011_operation_settings.sql`; SaaS — tenant migration из manifest. [Порядок выпуска и ограничения отката](../operation-settings.md). Настройка не запускает обмен; проверьте GET/POST и следующий запуск с выбранным scope.
+
+## Разделение номенклатуры и техкарт · 25.10.2026
+
+Перед новым scheduler/API применить `20261025010000_inventory_jobs.sql` к основной
+аналитической схеме. В статусе проверять `products` (:40 каждый час) и
+`assembly_charts` (05:00 ежедневно) отдельно. Обновление frontend не требуется:
+названия, расписание и ручные кнопки приходят из `/api/status`.
+После products проверить также каталог документов; ошибка его обновления должна
+дать ошибку задачи. Старый `inventory` остаётся допустимым для bootstrap и очереди
+до выпуска. Отдельный documents worker этим выпуском не заменяется.

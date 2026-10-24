@@ -276,3 +276,20 @@ def test_execution_uses_start_day_after_waiting_across_midnight(ready):
     started = ready.execute("SELECT started_at FROM chaika.manual_sync_requests").fetchone()[0]
     assert times == [started]
     assert datetime.now(UTC) - started < timedelta(seconds=10)
+
+
+def test_split_inventory_requests_and_legacy_pending_request(ready):
+    # Old requests remain executable, but new requests use the independent jobs.
+    ready.execute(
+        "INSERT INTO chaika.manual_sync_requests(request_id,job,requested_by) "
+        "VALUES (%s,'inventory',%s)",
+        (uuid4(), UUID(int=1)),
+    )
+    calls = []
+    assert manual_sync.run_one(ready, None, Event(), execute=lambda job, *_: calls.append(job.key))
+    assert calls == ["inventory"]
+    assert request(ready, "products")["state"] == "pending"
+    assert request(ready, "assembly_charts")["state"] == "pending"
+    with pytest.raises(HTTPException) as error:
+        request(ready, "inventory")
+    assert error.value.status_code == 404

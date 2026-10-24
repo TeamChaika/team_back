@@ -50,7 +50,8 @@ def source_revision(db, *, today=None):
     runs = db.execute(
         "SELECT job,count(*) AS count,max(finished_at) AS finished_at "
         "FROM chaika.sync_runs WHERE status='succeeded' "
-        "AND job IN ('inventory','references','dictionaries') GROUP BY job ORDER BY job"
+        "AND job IN ('inventory','products','assembly_charts','references','dictionaries') "
+        "GROUP BY job ORDER BY job"
     ).fetchall()
     days = db.execute(
         "SELECT business_date,current_set_id FROM chaika.sales_report_days "

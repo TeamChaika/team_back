@@ -59,14 +59,24 @@ JOBS = (
     Job("document_history", "Документы · открытые 60 дней", 3, 0),
     Job("references", "Структура, сотрудники, должности и справочники", 4, 30),
     Job("indicator_filters", "Фильтры показателей", 7, 30),
-    Job("inventory", "Номенклатура и техкарты", 5, 0),
+    Job("products", "Номенклатура", minute=40),
+    Job("assembly_charts", "Техкарты", 5, 0),
     Job("cash_shifts", "Кассовые смены · открытые 60 дней", 6, 30),
     Job("money_balances", "Денежные балансы", 7, 0),
     Job("sales_history", "Продажи OLAP · открытые 60 дней", 2, 0),
 )
 
 PURCHASE_IMPACT_INPUT_JOBS = frozenset(
-    ("documents", "document_history", "sales", "sales_history", "inventory", "references")
+    (
+        "documents",
+        "document_history",
+        "sales",
+        "sales_history",
+        "inventory",
+        "products",
+        "assembly_charts",
+        "references",
+    )
 )
 
 
@@ -192,12 +202,13 @@ def run_job(job, slot, settings, stop, *, namespace="scheduled"):
             settings,
             AccountingReportQuery(timestamp=datetime.now(ZONE).replace(tzinfo=None, microsecond=0)),
         )
-    elif job.key == "inventory":
+    elif job.key in {"inventory", "products", "assembly_charts"}:
         from app.documents.catalog_sync import refresh_after_inventory
         from app.sync_inventory import synchronize_inventory
 
-        synchronize_inventory(settings, API, day, root / "inventory.json")
-        refresh_after_inventory()
+        synchronize_inventory(settings, API, day, root / f"{job.key}.json", job=job.key)
+        if job.key != "assembly_charts":
+            refresh_after_inventory()
     elif job.key == "cash_shifts":
         from app.schemas.sync_jobs import CashShiftSyncQuery
         from app.sync_cash_shifts import synchronize_cash_shifts

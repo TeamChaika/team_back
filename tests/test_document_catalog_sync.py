@@ -143,10 +143,11 @@ def test_failure_has_fixed_code_and_closes(catalogs, caplog, failing):
     assert not catalogs.leader.active
 
 
+@pytest.mark.parametrize("job_key", ["inventory", "products"])
 @pytest.mark.parametrize("namespace", ["scheduled", "manual"])
 @pytest.mark.parametrize("failed", [False, True])
 def test_inventory_scheduler_requires_document_catalog_refresh(
-    monkeypatch, tmp_path, namespace, failed
+    monkeypatch, tmp_path, namespace, failed, job_key
 ):
     from app import scheduler, sync_inventory
     from app.services import sync_jobs
@@ -155,7 +156,8 @@ def test_inventory_scheduler_requires_document_catalog_refresh(
     analytics_settings = object()
     monkeypatch.setattr(sync_jobs, "ROOT", tmp_path)
 
-    def inventory(settings, *args):
+    def inventory(settings, *args, job):
+        assert job == job_key
         assert settings is analytics_settings
         calls.append("inventory")
 
@@ -170,7 +172,7 @@ def test_inventory_scheduler_requires_document_catalog_refresh(
 
     def run():
         scheduler.run_job(
-            scheduler.Job("inventory", "Inventory"),
+            scheduler.Job(job_key, "Inventory"),
             datetime(2026, 10, 19, tzinfo=UTC),
             analytics_settings,
             Event(),
