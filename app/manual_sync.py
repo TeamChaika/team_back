@@ -163,6 +163,11 @@ def run_one(db, settings, stop, *, execute):
             (row["request_id"],),
         ).fetchone()["started_at"]
     job = next((job for job in JOBS if job.key == row["job"]), None)
+    if job is None and row["job"] == "inventory":
+        # Finish already queued requests from before the catalog/recipe split.
+        from app.scheduler import Job
+
+        job = Job("inventory", "Номенклатура и техкарты")
     try:
         if job is None:
             raise ValueError("Unknown manual job")

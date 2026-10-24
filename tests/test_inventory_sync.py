@@ -203,3 +203,139 @@ def test_resume_uses_validated_raw_and_rejects_other_day(db, inventory):
     assert set(restored) == set(snapshots)
     with pytest.raises(SyncError, match="inventory_resume_scope_mismatch"):
         restore_snapshots(db, run, source, date(2026, 9, 8))
+
+
+@pytest.mark.parametrize("job", ["products", "assembly_charts"])
+def test_split_publication_preserves_other_datasets_and_resume_scope(db, inventory, job):
+    from app.sync_inventory import JOB_RESOURCES
+
+    run, source, snapshots = inventory
+    publish_inventory(db, snapshots, date(2026, 9, 9))
+    before = db.execute(
+        "SELECT count(*),sum(amount_out) FROM chaika.assembly_chart_items WHERE present_in_latest"
+    ).fetchone()
+    subset = {key: deepcopy(snapshots[key]) for key in JOB_RESOURCES[job]}
+    if job == "products":
+        subset["products"]["payload"]["items"][0]["name"] = "Fresh product"
+    else:
+        subset["assembly_charts"]["payload"]["items"] = []
+    publish_inventory(db, subset, date(2026, 9, 10), job=job)
+    if job == "products":
+        assert db.execute("SELECT name FROM chaika.products").fetchone()[0] == "Fresh product"
+        assert (
+            db.execute(
+                "SELECT count(*),sum(amount_out) FROM chaika.assembly_chart_items "
+                "WHERE present_in_latest"
+            ).fetchone()
+            == before
+        )
+        assert (
+            db.execute(
+                "SELECT count(*) FROM chaika.assembly_chart_scopes WHERE present_in_latest"
+            ).fetchone()[0]
+            == 1
+        )
+    else:
+        assert db.execute("SELECT name,present_in_latest FROM chaika.products").fetchone() == (
+            "Product",
+            True,
+        )
+    assert (
+        db.execute(
+            "SELECT count(*) FROM chaika.incoming_invoice_items WHERE present_in_latest"
+        ).fetchone()[0]
+        == 1
+    )
+    with pytest.raises(SyncError, match="inventory_incomplete"):
+        publish_inventory(db, subset, date(2026, 9, 10))
+    db.execute("UPDATE chaika.sync_runs SET status='failed',finished_at=now() WHERE id=%s", (run,))
+    with pytest.raises(SyncError, match="inventory_resume_run_invalid"):
+        restore_snapshots(db, run, source, date(2026, 9, 9), job=job)
+
+
+@pytest.mark.parametrize(
+    "job,resources",
+    [
+        ("products", ["product_groups", "products"]),
+        ("assembly_charts", ["assembly_charts"]),
+    ],
+)
+def test_split_loader_fetches_only_its_resources(
+    db, inventory, monkeypatch, tmp_path, job, resources
+):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from app import sync_inventory as sync
+
+    _, source, snapshots = inventory
+    db.execute("UPDATE chaika.sources SET server_type='CHAIN' WHERE id='primary'")
+    settings = SimpleNamespace(database_url=SimpleNamespace(get_secret_value=lambda: "test"))
+    monkeypatch.setattr(sync, "configured_sources", lambda _: [source])
+    monkeypatch.setattr(sync.psycopg, "connect", lambda *a, **kw: nullcontext(db))
+    calls = []
+
+    def handle(request):
+        path = request.url.path
+        calls.append((request.method, path))
+        if path.endswith("/connections"):
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"connection_id": "primary", "base_url": source.base_url},
+                    ]
+                },
+            )
+        if path.endswith("/logout"):
+            return httpx.Response(200, json={"state": "logged_out"})
+        return httpx.Response(200, json={})
+
+    client = httpx.Client(base_url="http://127.0.0.1:8010", transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(sync.httpx, "Client", lambda **_: client)
+    captured, pruned = [], []
+    monkeypatch.setattr(sync, "BACKEND_DIR", tmp_path)
+    for folder in ("products", "groups"):
+        directory = tmp_path / ".local" / folder
+        directory.mkdir(parents=True)
+        (directory / "current.json").write_text(json.dumps({"previous": folder}))
+
+    def prune(db, source, resource, directory, previous):
+        assert (
+            db.execute(
+                "SELECT status FROM chaika.sync_runs WHERE job=%s ORDER BY started_at DESC LIMIT 1",
+                (job,),
+            ).fetchone()[0]
+            == "succeeded"
+        )
+        pruned.append((resource, previous))
+
+    monkeypatch.setattr(sync, "prune_previous_catalog", prune)
+
+    def capture(settings, source, resource, response, day):
+        captured.append(resource)
+        assert resource in resources
+        return {**deepcopy(snapshots[resource]), "id": str(uuid4())}
+
+    monkeypatch.setattr(sync, "capture_inventory", capture)
+    result = sync.synchronize_inventory(
+        settings,
+        "http://127.0.0.1:8010",
+        date(2026, 9, 9),
+        tmp_path / "result.json",
+        job=job,
+    )
+    assert result["status"] == "succeeded"
+    assert captured == resources
+    assert pruned == (
+        [("product_groups", {"previous": "groups"}), ("products", {"previous": "products"})]
+        if job == "products"
+        else []
+    )
+    restored = restore_snapshots(db, result["run_id"], source, date(2026, 9, 9), job=job)
+    assert set(restored) == set(resources)
+    assert len(calls) == len(resources) + 2
+    assert calls[-1][1].endswith("/logout")
+    assert db.execute(
+        "SELECT job FROM chaika.sync_runs WHERE id=%s", (result["run_id"],)
+    ).fetchone() == (job,)

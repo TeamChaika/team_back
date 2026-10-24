@@ -1,4 +1,4 @@
-"""One-shot products, invoices, writeoffs and assembly charts synchronization."""
+"""Independent catalog/recipe synchronization, with the full bootstrap kept compatible."""
 
 import argparse
 import hashlib
@@ -14,6 +14,7 @@ import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from app.catalog_retention import prune_previous_catalog
 from app.core.config import BACKEND_DIR, Settings
 from app.invoice_lines import numbered_invoice_items
 from app.schemas.iiko_outgoing import OutgoingInvoicesQuery
@@ -39,6 +40,11 @@ from app.sync_references import (
 from app.sync_scope import filter_documents, load_scope, skipped
 
 RESOURCES = ("product_groups", "products", "incoming_invoices", "writeoffs", "assembly_charts")
+JOB_RESOURCES = {
+    "inventory": RESOURCES,
+    "products": ("product_groups", "products"),
+    "assembly_charts": ("assembly_charts",),
+}
 
 
 def capture_inventory(
@@ -254,10 +260,10 @@ def publish_writeoffs(db, snapshot: dict, day: date) -> None:
     )
 
 
-def publish_inventory(db, snapshots: dict, day: date) -> dict:
-    if set(snapshots) != set(RESOURCES):
+def publish_inventory(db, snapshots: dict, day: date, *, job: str = "inventory") -> dict:
+    if job not in JOB_RESOURCES or set(snapshots) != set(JOB_RESOURCES[job]):
         raise SyncError("inventory_incomplete")
-    if not snapshots["products"]["payload"]["items"]:
+    if "products" in snapshots and not snapshots["products"]["payload"]["items"]:
         raise SyncError("empty_product_catalog")
     snapshots = {
         key: {
@@ -332,6 +338,8 @@ def publish_inventory(db, snapshots: dict, day: date) -> dict:
                 ["id", "product_id", "date_from", "date_to", "assembled_amount"],
             ),
         ]:
+            if resource not in snapshots:
+                continue
             snapshot = snapshots[resource]
             catalog = resource in {"product_groups", "products"}
             if catalog:
@@ -392,6 +400,8 @@ def publish_inventory(db, snapshots: dict, day: date) -> dict:
                 "id",
             ),
         ]:
+            if resource not in snapshots:
+                continue
             parents = snapshots[resource]["payload"]["items"]
             ids = [r["id"] for r in parents]
             db.execute(
@@ -427,39 +437,42 @@ def publish_inventory(db, snapshots: dict, day: date) -> dict:
                 + (["num_occurrence"] if resource == "incoming_invoices" else []),
                 item_rows(),
             )
-        chart_snapshot = snapshots["assembly_charts"]
-        db.execute(
-            "UPDATE chaika.assembly_chart_scopes SET present_in_latest=false "
-            "WHERE source_id='primary' AND business_date=%s",
-            (day,),
-        )
-        upsert_rows(
-            db,
-            "assembly_chart_scopes",
-            ["source_id", "business_date", "chart_id", "last_snapshot_id", "present_in_latest"],
-            ["source_id", "business_date", "chart_id"],
-            (
-                {
-                    "source_id": "primary",
-                    "business_date": day,
-                    "chart_id": c["id"],
-                    "last_snapshot_id": chart_snapshot["id"],
-                    "present_in_latest": True,
-                }
-                for c in chart_snapshot["payload"]["items"]
-            ),
-        )
+        if "assembly_charts" in snapshots:
+            chart_snapshot = snapshots["assembly_charts"]
+            db.execute(
+                "UPDATE chaika.assembly_chart_scopes SET present_in_latest=false "
+                "WHERE source_id='primary' AND business_date=%s",
+                (day,),
+            )
+            upsert_rows(
+                db,
+                "assembly_chart_scopes",
+                ["source_id", "business_date", "chart_id", "last_snapshot_id", "present_in_latest"],
+                ["source_id", "business_date", "chart_id"],
+                (
+                    {
+                        "source_id": "primary",
+                        "business_date": day,
+                        "chart_id": c["id"],
+                        "last_snapshot_id": chart_snapshot["id"],
+                        "present_in_latest": True,
+                    }
+                    for c in chart_snapshot["payload"]["items"]
+                ),
+            )
     return counts
 
 
-def restore_snapshots(db, run_id: UUID, source: Source, day: date) -> dict:
-    job = db.execute(
+def restore_snapshots(
+    db, run_id: UUID, source: Source, day: date, *, job: str = "inventory"
+) -> dict:
+    previous = db.execute(
         "SELECT job,status,counts FROM chaika.sync_runs WHERE id=%s", (run_id,)
     ).fetchone()
-    if not job or job[0] != "inventory" or job[1] == "running":
+    if job not in JOB_RESOURCES or not previous or previous[0] != job or previous[1] == "running":
         raise SyncError("inventory_resume_run_invalid")
     snapshots = {}
-    manifest = job[2].get("snapshot_ids", {})
+    manifest = previous[2].get("snapshot_ids", {})
     ids = [str(UUID(value)) for value in manifest.values()]
     columns = (
         "id",
@@ -486,7 +499,7 @@ def restore_snapshots(db, run_id: UUID, source: Source, day: date) -> dict:
         resource = row["resource"]
         payload = load_snapshot_payload(row)["payload"]
         if (
-            resource not in RESOURCES
+            resource not in JOB_RESOURCES[job]
             or payload.get("source_fingerprint") != source.fingerprint
             or payload.get("sync_business_date") != day.isoformat()
         ):
@@ -500,8 +513,16 @@ def restore_snapshots(db, run_id: UUID, source: Source, day: date) -> dict:
 
 
 def synchronize_inventory(
-    settings: Settings, api_url: str, day: date, output: Path, resume_run: UUID | None = None
+    settings: Settings,
+    api_url: str,
+    day: date,
+    output: Path,
+    resume_run: UUID | None = None,
+    *,
+    job: str = "inventory",
 ) -> dict:
+    if job not in JOB_RESOURCES:
+        raise SyncError("inventory_job_invalid")
     api_url = check_local_api(api_url)
     source = configured_sources(settings)[0]
     if not settings.database_url.get_secret_value():
@@ -531,12 +552,13 @@ def synchronize_inventory(
             "UPDATE chaika.sync_runs SET status='failed',finished_at=now(),"
             "error_code='interrupted' WHERE status='running'"
         )
-        snapshots = restore_snapshots(db, resume_run, source, day) if resume_run else {}
+        snapshots = restore_snapshots(db, resume_run, source, day, job=job) if resume_run else {}
         db.execute(
-            "INSERT INTO chaika.sync_runs(id,job,status) VALUES(%s,'inventory','running')",
-            (run_id,),
+            "INSERT INTO chaika.sync_runs(id,job,status) VALUES(%s,%s,'running')",
+            (run_id, job),
         )
         touched, failure, logout_ok, counts = False, None, True, {}
+        previous_catalogs = {}
         with httpx.Client(base_url=api_url, timeout=300, trust_env=False) as client:
             try:
                 primary = client.get("/api/v1/iiko/connections")
@@ -562,8 +584,16 @@ def synchronize_inventory(
                     ("assembly_charts", "GET", "/assembly-charts/all", {"date": day.isoformat()}),
                 ]
                 for resource, method, path, params in requests:
-                    if resource in snapshots:
+                    if resource not in JOB_RESOURCES[job] or resource in snapshots:
                         continue
+                    if resource in {"products", "product_groups"}:
+                        folder = "products" if resource == "products" else "groups"
+                        directory = BACKEND_DIR / ".local" / folder
+                        try:
+                            previous = json.loads((directory / "current.json").read_text())
+                        except (OSError, ValueError):
+                            previous = None
+                        previous_catalogs[resource] = (directory, previous)
                     touched = True
                     response = client.request(method, "/api/v1/iiko" + path, params=params)
                     if response.status_code != 200:
@@ -594,7 +624,7 @@ def synchronize_inventory(
             if failure is None:
                 try:
                     with db.transaction():
-                        counts = publish_inventory(db, snapshots, day)
+                        counts = publish_inventory(db, snapshots, day, job=job)
                         counts.update(
                             business_date=day.isoformat(),
                             snapshot_ids={k: v["id"] for k, v in snapshots.items()},
@@ -628,6 +658,11 @@ def synchronize_inventory(
                     run_id,
                 ),
             )
+        if not failure:
+            # Keep the current local catalog; the replaced copy remains in verified S3.
+            snapshots.clear()
+            for resource, (directory, previous) in previous_catalogs.items():
+                prune_previous_catalog(db, source, resource, directory, previous)
         report = {
             "run_id": str(run_id),
             "status": "failed" if failure else "succeeded",
@@ -652,6 +687,7 @@ def main():
         default=datetime.now(ZoneInfo("Europe/Simferopol")).date() - timedelta(days=1),
     )
     parser.add_argument("--api-url", default="http://127.0.0.1:8010")
+    parser.add_argument("--job", choices=tuple(JOB_RESOURCES), default="inventory")
     parser.add_argument(
         "--output", type=Path, default=BACKEND_DIR / ".local/sync/inventory-latest.json"
     )
@@ -663,7 +699,7 @@ def main():
     args = parser.parse_args()
     try:
         report = synchronize_inventory(
-            Settings(), args.api_url, args.date, args.output, args.resume_run
+            Settings(), args.api_url, args.date, args.output, args.resume_run, job=args.job
         )
     except Exception as error:
         code = str(error) if isinstance(error, SyncError) else type(error).__name__

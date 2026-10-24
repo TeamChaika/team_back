@@ -12,7 +12,7 @@
 | Подключения и лицензия iiko | [app/services/iiko_auth.py](../../app/services/iiko_auth.py), [app/services/iiko_connections.py](../../app/services/iiko_connections.py); приватный маршрут [iiko_connections.py](../../app/api/routes/iiko_connections.py) |
 | Структура и RAW | [app/sync_references.py](../../app/sync_references.py): `configured_sources`, `reference_lock`, `append_snapshot`, `corporate_nodes`, `stores`, `rms_bindings` |
 | Payload RAW в S3 | [app/snapshot_archive.py](../../app/snapshot_archive.py): verified upload + envelope reader; `sync_references.append_snapshot`, `sync_inventory.restore_snapshots`; [контракт и backfill](../snapshot-archive.md) |
-| Номенклатура и техкарты | [app/sync_inventory.py](../../app/sync_inventory.py) → `products`, `assembly_charts`, `assembly_chart_items/scopes` |
+| Номенклатура (:40 каждый час) и отдельные техкарты (05:00) | [app/sync_inventory.py](../../app/sync_inventory.py) → `products`, `assembly_charts`, `assembly_chart_items/scopes` |
 | Накладные/списания/перемещения | [app/sync_invoices.py](../../app/sync_invoices.py), [app/sync_outgoing.py](../../app/sync_outgoing.py), [app/sync_transfers.py](../../app/sync_transfers.py), [app/sync_writeoffs.py](../../app/sync_writeoffs.py) → документы и позиции `chaika.*` |
 | OLAP-история | [app/sync_sales_history.py](../../app/sync_sales_history.py) → [app/import_sales_review.py](../../app/import_sales_review.py) → `sales_report_sets/days/reports/rows`; публикация дня учитывает проверку и покрытие |
 | Смены и остатки | [app/sync_cash_shifts.py](../../app/sync_cash_shifts.py), [app/sync_cash_shift_history.py](../../app/sync_cash_shift_history.py), [app/sync_store_balances.py](../../app/sync_store_balances.py), [app/sync_counteragent_balances.py](../../app/sync_counteragent_balances.py) |
@@ -72,3 +72,15 @@ lock, что и сбор, поэтому настройки не переклю�
 значений и происхождения, следующий день, внутренние перемещения, перенос документа,
 сохранение RMS-привязки; `tests/test_tenant_sync_postgres.py` в SaaS — две реальные
 изолированные схемы, одинаковые UUID и независимый выбор заведений.
+
+С 25.10.2026 `scheduler.JOBS` содержит отдельные `products` и `assembly_charts`.
+`sync_inventory.JOB_RESOURCES` ограничивает запросы, публикацию и восстановление
+ресурсами выбранной задачи. `inventory` оставлен для полного CLI/bootstrap и ранее
+принятых запросов. Миграция `20261025010000_inventory_jobs.sql` расширяет CHECK задач.
+`Repository.status` и frontend показывают независимые строки автоматически;
+`documents.catalog_sync.refresh_after_inventory` вызывается после `products`,
+а `purchase_impact_precompute.source_revision` учитывает обе публикации.
+
+`catalog_retention.prune_previous_catalog` после commit убирает только заменённый
+локальный products/groups-файл с подтверждённой S3-копией; `current.json`, текущий
+файл, история БД и S3 сохраняются. Непроверенные старые файлы остаются на месте.

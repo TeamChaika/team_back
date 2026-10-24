@@ -240,7 +240,7 @@ def test_reader_is_scoped_and_never_queries_source_graphs_or_sales_rows(prepared
             return prepared_db.cursor(**kwargs)
 
         def execute(self, query, params=None):
-            assert "sales_report_rows" not in query and "assembly_chart" not in query
+            assert "sales_report_rows" not in query and "chaika.assembly_chart" not in query
             statements.append((query, params))
             return prepared_db.execute(query, params)
 
@@ -361,17 +361,20 @@ def test_statement_timeout_retains_complete_previous_generation(prepared_db):
 
     row = prepared_db.execute("SELECT id FROM chaika.purchase_impact_prepared").fetchone()
     assert row["id"] == prepared["id"]
-    assert prepared_db.execute(
-        "SELECT generation_id FROM chaika.purchase_impact_prepared_products"
-    ).fetchone()["generation_id"] == prepared["id"]
+    assert (
+        prepared_db.execute(
+            "SELECT generation_id FROM chaika.purchase_impact_prepared_products"
+        ).fetchone()["generation_id"]
+        == prepared["id"]
+    )
 
 
-def test_revision_changes_on_successful_sync_and_local_day(prepared_db):
+@pytest.mark.parametrize("job", ["inventory", "products", "assembly_charts"])
+def test_revision_changes_on_successful_sync_and_local_day(prepared_db, job):
     before = source_revision(prepared_db)
     prepared_db.execute(
-        "INSERT INTO chaika.sync_runs (id,job,status,finished_at) "
-        "VALUES (%s,'inventory','succeeded',now())",
-        (uuid4(),),
+        "INSERT INTO chaika.sync_runs (id,job,status,finished_at) VALUES (%s,%s,'succeeded',now())",
+        (uuid4(), job),
     )
     assert source_revision(prepared_db) != before
     today = datetime.fromisoformat(before["today"]).date()
