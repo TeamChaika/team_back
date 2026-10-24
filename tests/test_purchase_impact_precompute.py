@@ -339,6 +339,33 @@ def test_failed_publication_retains_complete_previous_generation(prepared_db):
     )
 
 
+def test_statement_timeout_retains_complete_previous_generation(prepared_db):
+    prepared, _, _ = prepared_fixture(prepared_db)
+    publish_prepared(prepared_db, prepared)
+    replacement = dict(prepared, id=uuid4())
+
+    class SlowPublication:
+        def transaction(self):
+            return prepared_db.transaction()
+
+        def execute(self, query, params):
+            if query.startswith("INSERT INTO chaika.purchase_impact_prepared "):
+                # Cancel after DELETE, proving the publication transaction restores it.
+                prepared_db.execute("SELECT pg_sleep(1)")
+            return prepared_db.execute(query, params)
+
+    prepared_db.execute("SET LOCAL statement_timeout='20ms'")
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        publish_prepared(SlowPublication(), replacement)
+    prepared_db.execute("SET LOCAL statement_timeout=DEFAULT")
+
+    row = prepared_db.execute("SELECT id FROM chaika.purchase_impact_prepared").fetchone()
+    assert row["id"] == prepared["id"]
+    assert prepared_db.execute(
+        "SELECT generation_id FROM chaika.purchase_impact_prepared_products"
+    ).fetchone()["generation_id"] == prepared["id"]
+
+
 def test_revision_changes_on_successful_sync_and_local_day(prepared_db):
     before = source_revision(prepared_db)
     prepared_db.execute(
