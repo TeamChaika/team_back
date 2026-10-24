@@ -21,6 +21,7 @@ from app.web.purchase_impact import (
     analysis_scope,
     calculate_impact,
     load_graph,
+    load_graphs,
     read_purchase_impact,
     recent_period,
     recipe_paths,
@@ -387,6 +388,29 @@ def test_sql_graph_uses_latest_scope_excludes_removed_items_and_keeps_cycles(db,
     assert load_graph(db, target, date(2026, 9, 10)) == []
     db.execute("UPDATE chaika.assembly_chart_items SET present_in_latest=false")
     assert load_graph(db, target, date(2026, 9, 9)) == []
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_sql_graph_counts_charts_without_the_target_ingredient(db, inventory, compact):
+    from app.sync_inventory import publish_inventory
+
+    snapshots = deepcopy(inventory[2])
+    charts = snapshots["assembly_charts"]["payload"]["items"]
+    chart = charts[0]
+    target = uuid4()
+    chart["items"][0]["product_id"] = str(target)
+    other = deepcopy(chart)
+    other["id"] = str(uuid4())
+    other["items"][0]["product_id"] = str(uuid4())
+    charts.append(other)
+    publish_inventory(db, snapshots, date(2026, 9, 9))
+    db.row_factory = dict_row
+
+    rows = load_graphs(db, [target], date(2026, 9, 9), compact=compact)
+
+    assert len(rows) == 1
+    assert rows[0]["chart_id"] == UUID(chart["id"])
+    assert rows[0]["chart_count"] == 2
 
 
 def test_unavailable_warehouse_rejected_before_querying_any_data():

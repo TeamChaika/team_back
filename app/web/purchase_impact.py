@@ -102,11 +102,11 @@ def load_graphs(db, targets, day, *, limit=20000, compact=False):
         else "i.details"
     )
     projection = (
-        "a.product_id,a.chart_id,a.assembled_amount,a.chart_details,cc.chart_count,"
+        "a.product_id,a.chart_id,a.assembled_amount,a.chart_details,a.chart_count,"
         "u.name AS unit,jsonb_agg(jsonb_build_array(a.ingredient_id,a.amount_in::text,"
         "a.item_details) ORDER BY a.item_id) AS ingredients"
         if compact
-        else "a.*,cc.chart_count,p.name,p.main_unit_id,u.name AS unit,child.name AS ingredient,"
+        else "a.*,p.name,p.main_unit_id,u.name AS unit,child.name AS ingredient,"
         "cu.name AS ingredient_unit"
     )
     child_joins = (
@@ -120,32 +120,31 @@ def load_graphs(db, targets, day, *, limit=20000, compact=False):
         )
     )
     grouping = (
-        "GROUP BY a.product_id,a.chart_id,a.assembled_amount,a.chart_details,cc.chart_count,u.name "
+        "GROUP BY a.product_id,a.chart_id,a.assembled_amount,a.chart_details,a.chart_count,u.name "
         "ORDER BY a.product_id,a.chart_id"
         if compact
         else "ORDER BY a.product_id,a.chart_id,a.item_id"
     )
     rows = db.execute(
         f"""WITH RECURSIVE charts AS MATERIALIZED (
-            SELECT c.* FROM chaika.assembly_chart_scopes s JOIN chaika.assembly_charts c
+            SELECT c.*,count(*) OVER (PARTITION BY c.product_id) AS chart_count
+            FROM chaika.assembly_chart_scopes s JOIN chaika.assembly_charts c
                 ON (c.source_id,c.id)=(s.source_id,s.chart_id)
             WHERE s.source_id='primary' AND s.business_date=%s AND s.present_in_latest
                 AND c.date_from<=%s AND (c.date_to IS NULL OR c.date_to>%s)
         ), active AS MATERIALIZED (
-            SELECT c.id AS chart_id,c.product_id,c.date_from,c.date_to,c.assembled_amount,
-                {chart_details} AS chart_details,i.id AS item_id,i.product_id AS ingredient_id,
+            SELECT c.id AS chart_id,c.product_id,c.chart_count,c.date_from,c.date_to,
+                c.assembled_amount,{chart_details} AS chart_details,
+                i.id AS item_id,i.product_id AS ingredient_id,
                 i.amount_in,{item_details} AS item_details
             FROM charts c JOIN chaika.assembly_chart_items i
                 ON (i.source_id,i.chart_id)=(c.source_id,c.id)
             WHERE i.present_in_latest
-        ), chart_counts AS (
-            SELECT product_id,count(*) AS chart_count FROM charts GROUP BY 1
         ), ancestors(id) AS (
             SELECT unnest(%s::uuid[]) UNION SELECT a.product_id FROM active a
                 JOIN ancestors p ON p.id=a.ingredient_id
         ) SELECT {projection}
             FROM active a JOIN ancestors f ON f.id=a.ingredient_id
-            JOIN chart_counts cc ON cc.product_id=a.product_id
             LEFT JOIN chaika.products p ON p.source_id='primary' AND p.id=a.product_id
             LEFT JOIN chaika.measure_units u ON u.source_id='primary' AND u.id=p.main_unit_id
             {child_joins} {grouping} LIMIT %s""",

@@ -235,6 +235,7 @@ def ensure_prepared(settings, stop=None):
         # The read/build/publish transaction owns the lock until publication commits.
         with db.transaction():
             db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            db.execute("SET LOCAL statement_timeout='120s'")
             locked = db.execute(
                 "SELECT pg_try_advisory_xact_lock(%s) AS locked", (LOCK_ID,)
             ).fetchone()["locked"]
