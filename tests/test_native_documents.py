@@ -101,6 +101,7 @@ def database():
         db.execute(Path("migrations/documents/0004_receipt_discrepancies.sql").read_text())
         db.execute(Path("migrations/documents/0005_writeoff_cost_estimates.sql").read_text())
         db.execute(Path("migrations/documents/0007_telegram_cleanup.sql").read_text())
+        db.execute(Path("migrations/documents/0012_writeoff_reasons.sql").read_text())
         db.execute("CREATE SCHEMA IF NOT EXISTS chaika")
         db.execute(
             "CREATE TABLE IF NOT EXISTS chaika.operation_settings ("

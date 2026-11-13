@@ -96,11 +96,11 @@ def filters(db, user, kind, params):
 
 def joined(kind):
     parent, _ = table(kind)
-    extra = ", t.name AS counteragent" if kind == "waybill" else ", r.id AS reason_pk"
+    extra = ", t.name AS counteragent" if kind == "waybill" else ""
     relation = (
         "JOIN stores t ON t.id=d.counteragent_id"
         if kind == "waybill"
-        else "LEFT JOIN writeoffs_reasons r ON r.name=d.reason_id"
+        else ""
     )
     return (
         f"SELECT d.*, s.name AS store, "

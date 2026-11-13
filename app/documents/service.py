@@ -1,4 +1,4 @@
-from app.documents import administration, reads
+from app.documents import administration, reads, reasons
 from app.documents.database import DocumentDatabase
 from app.documents.policy import actor, fail, table
 from app.documents.transport import DocumentTransport
@@ -15,6 +15,16 @@ class DocumentService:
         parts = path.strip("/").split("/")
         params = params or {}
         if parts[0] == "admin":
+            if parts[1] == "writeoff-reasons":
+                if method == "POST":
+                    return reasons.save(
+                        self.database,
+                        portal_id,
+                        payload,
+                        int(parts[2]) if len(parts) > 2 else None,
+                    )
+                with self.database.connection(readonly=True) as db:
+                    return reasons.listing(db, portal_id)
             if method == "POST":
                 return administration.save_access(self.database, portal_id, int(parts[2]), payload)
             with self.database.connection(readonly=True) as db:
