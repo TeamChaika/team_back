@@ -74,7 +74,8 @@ def test_legacy_insert_snapshots_and_unrelated_update_keeps_snapshot(service):
         assert row["reason_account_id"] == old["reason_account_id"]
 
 
-def test_migration_preserves_payload_and_does_not_invent_completed_history(database):
+@pytest.mark.parametrize("deferred", [False, True])
+def test_migration_preserves_payload_and_does_not_invent_completed_history(database, deferred):
     schema = "snapshot_test_" + uuid4().hex
     with database.connection() as db:
         db.execute(f"CREATE SCHEMA {schema}")
@@ -85,7 +86,8 @@ def test_migration_preserves_payload_and_does_not_invent_completed_history(datab
                 CREATE TABLE {schema}.writeoffs (
                     id bigint PRIMARY KEY,reason_id varchar(128),status text,submission_state text,
                     CONSTRAINT writeoffs_reason_id_ca8d5b1b_fk_writeoffs_reasons_name
-                    FOREIGN KEY(reason_id) REFERENCES {schema}.writeoffs_reasons(name));
+                    FOREIGN KEY(reason_id) REFERENCES {schema}.writeoffs_reasons(name)
+                    {"DEFERRABLE INITIALLY DEFERRED" if deferred else "NOT DEFERRABLE"});
                 CREATE TABLE {schema}.native_dispatch (
                     kind text,document_id bigint,version integer,
                     created_at timestamptz,payload jsonb);
@@ -102,9 +104,14 @@ def test_migration_preserves_payload_and_does_not_invent_completed_history(datab
                 f"INSERT INTO {schema}.native_dispatch VALUES('writeoff',3,2,now(),%s)",
                 (Jsonb(payload),),
             )
+            # Existing production rows have no pending INSERT events at migration entry.
+            db.execute("SET CONSTRAINTS ALL IMMEDIATE")
+            if deferred:
+                db.execute("SET CONSTRAINTS ALL DEFERRED")
             migration = Path("migrations/documents/0012_writeoff_reasons.sql").read_text()
             migration = migration.split("-- The analytics dictionary")[0].removeprefix("BEGIN;\n")
-            db.execute(migration.replace("chaika_iiko_documents", schema))
+            with db.transaction():
+                db.execute(migration.replace("chaika_iiko_documents", schema))
             rows = db.execute(f"SELECT * FROM {schema}.writeoffs ORDER BY id").fetchall()
             assert [r["reason_pk"] for r in rows] == [1, 1, 1]
             assert [r["reason_account_id"] for r in rows] == [current, None, reserved]

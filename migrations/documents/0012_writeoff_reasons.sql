@@ -27,6 +27,8 @@ WHERE d.reason_pk=r.id AND d.reason_account_id IS NULL
     AND d.status='Created' AND d.submission_state IN ('idle','failed')
     AND NOT EXISTS (SELECT 1 FROM chaika_iiko_documents.native_dispatch j
                     WHERE j.kind='writeoff' AND j.document_id=d.id);
+-- Validate deferred legacy foreign keys before changing their table.
+SET CONSTRAINTS ALL IMMEDIATE;
 ALTER TABLE chaika_iiko_documents.writeoffs
     DROP CONSTRAINT writeoffs_reason_id_ca8d5b1b_fk_writeoffs_reasons_name;
 
