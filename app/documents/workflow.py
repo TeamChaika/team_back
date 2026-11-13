@@ -67,12 +67,18 @@ def validate(db, kind, body):
         reason, reason_id = body.get("reason"), body.get("reason_id")
         if not isinstance(reason, str) or type(reason_id) is not int or not 0 < reason_id < 2**63:
             invalid("Выберите действующую причину списания.")
-        if not db.execute(
-            "SELECT 1 FROM writeoffs_reasons WHERE id=%s AND name=%s AND account_id IS NOT NULL",
+        selected = db.execute(
+            "SELECT id,name,account_id FROM writeoffs_reasons "
+            "WHERE id=%s AND name=%s AND account_id IS NOT NULL FOR SHARE",
             (reason_id, reason),
-        ).fetchone():
+        ).fetchone()
+        if not selected:
             invalid("Выберите действующую причину списания.")
-        fields["reason_id"] = reason
+        fields.update(
+            reason_id=selected["name"],
+            reason_pk=selected["id"],
+            reason_account_id=selected["account_id"],
+        )
     return fields, validate_items(db, body.get("items"))
 
 
@@ -443,9 +449,7 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
                 else None
             )
             reason = (
-                db.execute(
-                    "SELECT account_id FROM writeoffs_reasons WHERE name=%s", (doc["reason_id"],)
-                ).fetchone()
+                {"account_id": doc["reason_account_id"]}
                 if kind == "writeoff"
                 else None
             )
@@ -460,6 +464,8 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
                 ).fetchone()
                 if receiver is None:
                     fail(409, "Не найдена история приёмки. Требуется проверка документа.")
+            if kind == "writeoff" and not reason["account_id"]:
+                fail(409, "Счёт списания не сохранён. Требуется проверка документа.")
             payload = provider.payload(kind, doc, rows, creator, receiver, source, target, reason)
             db.execute(
                 "INSERT INTO native_dispatch (operation_id,kind,document_id,version,payload) "

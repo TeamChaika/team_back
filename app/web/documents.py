@@ -139,6 +139,20 @@ def create_documents_router(access):
             request.cookies.get(ACCESS_COOKIE), request.method, path, csv=csv, **kwargs
         )
 
+    @router.get("/admin/writeoff-reasons")
+    async def writeoff_reasons(request: Request, scope: Access):
+        return await call(request, "admin/writeoff-reasons")
+
+    @router.post("/admin/writeoff-reasons", status_code=201)
+    async def create_writeoff_reason(request: Request, scope: Access):
+        return await call(request, "admin/writeoff-reasons")
+
+    @router.post("/admin/writeoff-reasons/{reason_id}")
+    async def edit_writeoff_reason(reason_id: int, request: Request, scope: Access):
+        if reason_id < 1:
+            raise HTTPException(404, "Причина списания не найдена.")
+        return await call(request, f"admin/writeoff-reasons/{reason_id}")
+
     @router.get("/admin/staff")
     async def staff(request: Request, scope: Access):
         return await call(request, "admin/staff")

@@ -141,3 +141,28 @@ def test_malformed_upstream_error_code_still_returns_safe_error(code):
             await service.client.aclose()
 
     asyncio.run(scenario())
+
+
+def test_writeoff_reason_management_routes_require_admin_and_origin(documents):
+    client, repo, calls = documents
+    login(client)
+    path = "/api/documents/admin/writeoff-reasons"
+    assert client.get(path).status_code == 403
+    assert calls == []
+    repo.admin = True
+    repo.sections = []
+    assert client.get(path).status_code == 200
+    assert calls[-1].url.path.endswith("/admin/writeoff-reasons")
+    count = len(calls)
+    assert (
+        client.post(path, json={}, headers={"Origin": "https://attacker.invalid"}).status_code
+        == 403
+    )
+    assert len(calls) == count
+    assert (
+        client.post(path, json={}, headers={"Origin": "http://127.0.0.1:8013"}).status_code == 201
+    )
+    assert (
+        client.post(path + "/1", json={}, headers={"Origin": "http://127.0.0.1:8013"}).status_code
+        == 200
+    )
