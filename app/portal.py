@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
+from functools import partial
 from time import perf_counter
 from typing import Annotated, Literal
 from uuid import UUID
@@ -35,7 +36,8 @@ from app.web.coverage import ZONE
 from app.web.deposits import DepositsClient, create_deposits_router
 from app.web.documents import DocumentsClient, create_documents_router
 from app.web.employees import EmployeeCommand, EmployeeEditor, owner
-from app.web.indicators import IndicatorQuery, IndicatorService, catalog
+from app.web.indicators import IndicatorQuery, IndicatorService, catalog, collect_reports
+from app.web.kitchen_heatmap import AccountingDate, KitchenHeatmap, heatmap_enabled, kitchen_heatmap
 from app.web.live_sales import LiveSales
 from app.web.password_policy import require_personal_password
 from app.web.password_recovery import create_recovery_router
@@ -64,6 +66,7 @@ def create_portal(
     assistant_transport=None,
     employee_editor=None,
     indicator_service=None,
+    kitchen_heatmap_fetch=None,
     deposits_transport=None,
     documents_transport=None,
     document_service=None,
@@ -392,6 +395,7 @@ def create_portal(
                 "can_manage": False,
                 "documents_enabled": False,
                 "live_sales_enabled": False,
+                "kitchen_heatmap_enabled": False,
                 "today": datetime.now(ZONE).date().isoformat(),
             }
         return {
@@ -406,6 +410,11 @@ def create_portal(
                 bool(live_sales) or (scope.warehouse_restricted and bool(scope.store_ids))
             )
             and bool(IIKO_SECTIONS.intersection(sections_for(scope.user))),
+            "kitchen_heatmap_enabled": (
+                heatmap_enabled(settings)
+                and "sales" in sections_for(scope.user)
+                and (not scope.warehouse_restricted or bool(scope.store_ids))
+            ),
             "sections": sections_for(scope.user),
             "can_manage": bool(scope.user.get("is_portal_admin")),
             "low_markup_reports_enabled": bool(scope.user.get("is_portal_admin")),
@@ -413,6 +422,16 @@ def create_portal(
             "modules": (["iiko"] if IIKO_SECTIONS.intersection(sections_for(scope.user)) else [])
             + (["deposits"] if "deposits" in sections_for(scope.user) else []),
         }
+
+    @app.get("/api/sales/kitchen/heatmap")
+    def prepared_portions(
+        scope: Access,
+        department_id: Annotated[list[UUID], Query(min_length=1, max_length=1)],
+        date_from: AccountingDate,
+        date_to: AccountingDate,
+    ) -> KitchenHeatmap:
+        fetch = partial(indicators.licensed_report, kitchen_heatmap_fetch or collect_reports)
+        return kitchen_heatmap(settings, scope, department_id[0], date_from, date_to, fetch=fetch)
 
     @app.get("/api/sales/{kind}")
     def sales(

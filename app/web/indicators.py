@@ -30,7 +30,7 @@ from pydantic import (
 from app.integrations.iiko.client import IikoClient
 from app.integrations.iiko.errors import IikoError
 from app.services.iiko_auth import IikoAuthService
-from app.sync_references import reference_lock
+from app.sync_references import SyncError, reference_lock
 from app.sync_sales_history import FixedReport, error_code
 from app.web.coverage import ZONE
 from app.web.sync_policy import SyncPolicy, guard_requests
@@ -176,7 +176,7 @@ def request_body(query, ids, fields, start, end, *, stores=None):
     }
 
 
-def collect_reports(settings, bodies):
+def collect_reports(settings, bodies, *, validate_source=None, consume=None):
     """One licensed session, sequential queries and confirmed logout on every exit."""
     with (
         psycopg.connect(
@@ -188,6 +188,8 @@ def collect_reports(settings, bodies):
         reference_lock(db),
     ):
         guard_requests(db, bodies)
+        if validate_source is not None:
+            validate_source(db, settings)
         try:
             response = httpx.post(
                 "http://127.0.0.1:8010/api/v1/iiko/connections/primary/logout",
@@ -199,7 +201,7 @@ def collect_reports(settings, bodies):
                 raise IikoError("iiko_session_unknown", "Выход из iiko не подтверждён.")
         except httpx.ConnectError:
             pass
-        with TemporaryDirectory(prefix="chaika-indicators-") as directory:
+        with TemporaryDirectory(prefix="chaika-portal-olap-") as directory:
 
             async def collect():
                 client = IikoClient(settings)
@@ -210,9 +212,17 @@ def collect_reports(settings, bodies):
                         path = Path(directory) / f"{index}.json"
                         await auth.download_daily_sales(path, query=FixedReport(body))
                         payload = json.loads(path.read_bytes(), parse_float=Decimal)
-                        if not isinstance(payload.get("data"), list):
+                        if not isinstance(payload, dict) or not isinstance(
+                            payload.get("data"), list
+                        ):
                             raise ValueError("invalid_indicator_report")
-                        results.append(payload["data"])
+                        if consume is None:
+                            results.append(payload["data"])
+                        else:
+                            if payload.get("summary") not in (None, []):
+                                raise ValueError("unexpected_sales_report_summary")
+                            consume(payload["data"], body)
+                        path.unlink()
                     return results
                 finally:
                     try:
@@ -308,6 +318,7 @@ class IndicatorService:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="indicators")
         self.cache = OrderedDict()
         self.session_unknown = False
+        self.session_lock = Lock()
         self.store, self.repository = store, repository
         self.utcnow = utcnow or (lambda: datetime.now(UTC))
         self.stop = Event()
@@ -477,27 +488,36 @@ class IndicatorService:
             raise HTTPException(403, "Нет доступных ресторанов.")
         return ids
 
+    def licensed_report(self, fetch, *args, **kwargs):
+        """Share the primary session quarantine across all portal OLAP requests."""
+        if not self.session_lock.acquire(blocking=False):
+            raise SyncError("sync_already_running")
+        try:
+            if self.session_unknown:
+                raise IikoError("iiko_session_unknown", "Выход из iiko не подтверждён.")
+            try:
+                return fetch(*args, **kwargs)
+            except Exception as error:
+                if error_code(error) == "iiko_session_unknown":
+                    self.session_unknown = True
+                raise
+        finally:
+            self.session_lock.release()
+
     def _fetch(self, query, ids, inputs, stores=None):
-        if self.session_unknown:
-            raise IikoError("iiko_session_unknown", "Выход из iiko не подтверждён.")
         try:
             options = {"stores": stores} if stores is not None else {}
-            return self.fetch(self.settings, query, ids, inputs, **options), self.clock()
+            data = self.licensed_report(self.fetch, self.settings, query, ids, inputs, **options)
+            return data, self.clock()
         except Exception as error:
-            if error_code(error) == "iiko_session_unknown":
-                self.session_unknown = True
             log.warning("Indicator unavailable: %s", error_code(error))
             raise
 
     def _fetch_options(self, query, ids, stores, field):
-        if self.session_unknown:
-            raise IikoError("iiko_session_unknown", "Выход из iiko не подтверждён.")
-        try:
-            return fetch_warehouse_options(self.settings, query, ids, stores, field), self.clock()
-        except Exception as error:
-            if error_code(error) == "iiko_session_unknown":
-                self.session_unknown = True
-            raise
+        data = self.licensed_report(
+            fetch_warehouse_options, self.settings, query, ids, stores, field
+        )
+        return data, self.clock()
 
     def warehouse_options(self, scope, query, field):
         """Bounded asynchronous cache; pending/error results never use venue options."""

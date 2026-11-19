@@ -238,6 +238,7 @@ def test_login_uses_database_role_and_safe_cookies(client):
         "low_markup_reports_enabled": False,
         "documents_enabled": False,
         "live_sales_enabled": False,
+        "kitchen_heatmap_enabled": False,
         "today": datetime.now(ZONE).date().isoformat(),
         "warehouse_scope": {"mode": "all", "warehouse_ids": [str(UUID(int=4))]},
         "warehouse_capabilities": {
@@ -340,6 +341,7 @@ def test_dashboard_login_refresh_and_logout_across_domains(split_domain_client):
         "low_markup_reports_enabled": False,
         "documents_enabled": False,
         "live_sales_enabled": False,
+        "kitchen_heatmap_enabled": False,
         "today": datetime.now(ZONE).date().isoformat(),
         "warehouse_scope": {"mode": "all", "warehouse_ids": [str(UUID(int=4))]},
         "warehouse_capabilities": {
