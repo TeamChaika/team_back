@@ -59,6 +59,11 @@ PID/UID и SHA файлов `snapshot_archive.py`, `sync_inventory.py`, `sync_re
 
 ## Конфигурация и схема
 
+- Пулы портала и документов используют [проверку SQL-сеанса](../../app/core/postgres_pool.py).
+  Перед выдачей соединения выполняется `SELECT 1`. При сбое проверки пул закрывает сеанс
+  и открывает новое соединение. При обрыве во время операции запрос получает ошибку,
+  а следующий запрос берёт исправное соединение. Для SQL-ошибок API пишет в журнал
+  класс исключения и SQLSTATE.
 - Основные настройки: [app/core/config.py](../../app/core/config.py), web/cookies/CORS: [app/web/settings.py](../../app/web/settings.py), документы: [app/documents/config.py](../../app/documents/config.py).
 - Образцы переменных: корневой `.env.example` и `.env.assistant.example`. Читать только необходимые параметры; не выводить токены, пароли и DSN в отчёты/карты.
 - Аналитические миграции: [supabase/migrations](../../supabase/migrations); документы: [migrations/documents](../../migrations/documents). Production-миграции применяются отдельно от CI и автодеплоя.
