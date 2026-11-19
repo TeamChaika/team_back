@@ -9,9 +9,9 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
 
 from app.core.config import Settings
+from app.core.postgres_pool import RecoveringConnectionPool
 from app.sync_indicator_filters import read_filters
 from app.web.balances import product_suggestions, read_balances
 from app.web.coverage import partial_days
@@ -124,7 +124,7 @@ class Repository:
         from app.web.warehouse_sales import WarehouseSales
 
         self.warehouse_sales = WarehouseSales(settings, policy_reader=self.sync_policy)
-        self._pool = ConnectionPool(
+        self._pool = RecoveringConnectionPool(
             settings.database_url.get_secret_value(),
             kwargs={
                 "row_factory": dict_row,
@@ -137,7 +137,6 @@ class Repository:
             max_size=4,
             max_waiting=20,
             timeout=10,
-            check=ConnectionPool.check_connection,
             open=False,
             name="chaika-web",
         )

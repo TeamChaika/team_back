@@ -74,6 +74,43 @@ def test_pool_replaces_closed_connection(pooled_repository):
         assert connection.execute("SELECT 1 AS ok").fetchone()["ok"] == 1
 
 
+def test_login_lookup_recovers_from_stale_sessions_without_reopening_pool(
+    pooled_repository, monkeypatch
+):
+    repo = pooled_repository
+    pool = repo._pool
+
+    def reject_sql(query, *args, **kwargs):
+        if query:
+            raise psycopg.OperationalError("stale session after upstream restart")
+
+    with pool.connection() as first, pool.connection() as second:
+        for session in (first, second):
+            monkeypatch.setattr(session, "execute", reject_sql)
+
+    candidates = ("pool-recovery@example.invalid", "pool-recovery-alt@example.invalid")
+    assert repo.resolve_login_email(candidates) == candidates[0]
+    assert repo._pool is pool
+    assert first.closed and second.closed
+
+
+def test_pool_recovers_after_postgres_terminates_its_idle_sessions(pooled_repository):
+    repo = pooled_repository
+    pool = repo._pool
+    with pool.connection() as first, pool.connection() as second:
+        old_pids = [first.info.backend_pid, second.info.backend_pid]
+
+    with psycopg.connect(os.environ["CHAIKA_TEST_DATABASE_URL"], autocommit=True) as admin:
+        results = admin.execute(
+            "SELECT pg_terminate_backend(pid, 2000) FROM unnest(%s::int[]) AS pid", (old_pids,)
+        ).fetchall()
+    assert results == [(True,), (True,)]
+
+    with repo.connection() as replacement:
+        assert replacement.info.backend_pid not in old_pids
+        assert replacement.execute("SELECT 1 AS ok").fetchone()["ok"] == 1
+
+
 def test_password_completion_writes_only_active_self_with_runtime_role(db):
     active_id, disabled_id = uuid4(), uuid4()
     db.execute("SET LOCAL ROLE postgres")

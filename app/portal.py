@@ -1,6 +1,7 @@
 """Public website API; integration routes stay on the private collector."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
@@ -53,6 +54,8 @@ from app.web.permissions import (
 from app.web.profile import create_profile_router
 from app.web.repository import Repository, Scope, serial
 from app.web.settings import WebSettings
+
+logger = logging.getLogger(__name__)
 
 
 def create_portal(
@@ -206,6 +209,9 @@ def create_portal(
 
     @app.exception_handler(psycopg.Error)
     async def database_error(request, exc):
+        logger.warning(
+            "portal_database_error type=%s sqlstate=%s", type(exc).__name__, exc.sqlstate or "-"
+        )
         return JSONResponse(
             status_code=503,
             content={"detail": "База данных временно недоступна. Повторите запрос позже."},

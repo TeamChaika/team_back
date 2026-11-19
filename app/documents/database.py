@@ -1,14 +1,15 @@
 from contextlib import contextmanager
 
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+
+from app.core.postgres_pool import RecoveringConnectionPool
 
 
 class DocumentDatabase:
     def __init__(self, url):
         if not url:
             raise ValueError("CHAIKA_DOCUMENTS_DATABASE_URL is required")
-        self.pool = ConnectionPool(
+        self.pool = RecoveringConnectionPool(
             url,
             min_size=0,
             max_size=4,
@@ -22,7 +23,6 @@ class DocumentDatabase:
                 "connect_timeout": 10,
                 "application_name": "chaika-documents-fastapi",
             },
-            check=ConnectionPool.check_connection,
         )
 
     @contextmanager
