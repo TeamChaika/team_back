@@ -176,7 +176,7 @@ def request_body(query, ids, fields, start, end, *, stores=None):
     }
 
 
-def collect_reports(settings, bodies):
+def collect_reports(settings, bodies, *, validate_source=None, consume=None):
     """One licensed session, sequential queries and confirmed logout on every exit."""
     with (
         psycopg.connect(
@@ -188,6 +188,8 @@ def collect_reports(settings, bodies):
         reference_lock(db),
     ):
         guard_requests(db, bodies)
+        if validate_source is not None:
+            validate_source(db, settings)
         try:
             response = httpx.post(
                 "http://127.0.0.1:8010/api/v1/iiko/connections/primary/logout",
@@ -199,7 +201,7 @@ def collect_reports(settings, bodies):
                 raise IikoError("iiko_session_unknown", "Выход из iiko не подтверждён.")
         except httpx.ConnectError:
             pass
-        with TemporaryDirectory(prefix="chaika-indicators-") as directory:
+        with TemporaryDirectory(prefix="chaika-portal-olap-") as directory:
 
             async def collect():
                 client = IikoClient(settings)
@@ -210,9 +212,17 @@ def collect_reports(settings, bodies):
                         path = Path(directory) / f"{index}.json"
                         await auth.download_daily_sales(path, query=FixedReport(body))
                         payload = json.loads(path.read_bytes(), parse_float=Decimal)
-                        if not isinstance(payload.get("data"), list):
+                        if not isinstance(payload, dict) or not isinstance(
+                            payload.get("data"), list
+                        ):
                             raise ValueError("invalid_indicator_report")
-                        results.append(payload["data"])
+                        if consume is None:
+                            results.append(payload["data"])
+                        else:
+                            if payload.get("summary") not in (None, []):
+                                raise ValueError("unexpected_sales_report_summary")
+                            consume(payload["data"], body)
+                        path.unlink()
                     return results
                 finally:
                     try:

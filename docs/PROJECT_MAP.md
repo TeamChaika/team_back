@@ -15,6 +15,7 @@
 | Депозиты и права заведений | [API и доступ](CODEMAPS/api-access.md) | [app/web/deposits.py](../app/web/deposits.py) |
 | Помощник и история диалогов | [API и доступ](CODEMAPS/api-access.md) | [app/web/assistant.py](../app/web/assistant.py) |
 | Продажи, обзор, сегодняшние данные | [Аналитика](CODEMAPS/analytics.md) | [app/web/live_sales.py](../app/web/live_sales.py); складская история — [app/web/warehouse_sales.py](../app/web/warehouse_sales.py) |
+| Тепловая карта кухни | [Аналитика](CODEMAPS/analytics.md#тепловая-карта-кухни) | [app/web/kitchen_heatmap.py](../app/web/kitchen_heatmap.py), `GET /api/sales/kitchen/heatmap` |
 | Показатели и их фильтры | [Аналитика](CODEMAPS/analytics.md), [фоновый кэш](indicator-cache.md) | [app/web/indicators.py](../app/web/indicators.py), [app/web/indicator_cache.py](../app/web/indicator_cache.py) |
 | Закупочная цена и недельное влияние | [Аналитика](CODEMAPS/analytics.md) | [app/web/purchase_impact.py](../app/web/purchase_impact.py) |
 | Аналитические списки документов/остатков/событий | [Аналитика](CODEMAPS/analytics.md) | [app/web/repository.py](../app/web/repository.py) |
