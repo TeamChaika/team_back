@@ -1,15 +1,19 @@
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
+from threading import Event
 from types import SimpleNamespace
 from uuid import UUID
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from test_portal import DEPARTMENT, OTHER, FakeRepository, login, provider
 
 from app.core.config import Settings
+from app.integrations.iiko.errors import IikoError
 from app.portal import create_portal
 from app.web import indicators, sync_policy
 from app.web.kitchen_heatmap import HeatmapTotals, daily_request, local_instant
@@ -46,7 +50,7 @@ class KitchenRepository(FakeRepository):
         return Scope(original.user, original.departments, selected, self.stores, original.rms_ids)
 
 
-def open_portal(settings, repo, fetch=None):
+def open_portal(settings, repo, fetch=None, *, indicator_service=None):
     return TestClient(
         create_portal(
             settings,
@@ -54,6 +58,7 @@ def open_portal(settings, repo, fetch=None):
             auth_transport=httpx.MockTransport(provider),
             repository=repo,
             kitchen_heatmap_fetch=fetch,
+            indicator_service=indicator_service,
         ),
         base_url="http://127.0.0.1:8013",
     )
@@ -507,3 +512,72 @@ def test_transport_fences_paused_or_mismatched_sources_and_logs_out_on_error(set
         ]
         * 4
     )
+
+
+@pytest.mark.parametrize("first", ["heatmap", "indicators"])
+def test_unconfirmed_native_logout_quarantines_both_reports(settings, monkeypatch, first):
+    monkeypatch.delenv("RESTCONTROL_RUNTIME_MODE", raising=False)
+    auth_calls = []
+    entered_logout = Event()
+    release_logout = Event()
+
+    class Client:
+        def __init__(self, _):
+            pass
+
+        async def aclose(self):
+            pass
+
+    class Auth:
+        def __init__(self, *_):
+            auth_calls.append("session")
+
+        async def download_daily_sales(self, path, **_):
+            path.write_text('{"data":[]}')
+
+        async def logout(self):
+            entered_logout.set()
+            assert release_logout.wait(5)
+            raise IikoError("iiko_timeout", "synthetic timeout", outcome_unknown=True)
+
+    monkeypatch.setattr(indicators.psycopg, "connect", lambda *a, **kw: nullcontext(None))
+    monkeypatch.setattr(indicators, "reference_lock", lambda _: nullcontext())
+    monkeypatch.setattr(indicators, "guard_requests", lambda *_: None)
+    monkeypatch.setattr("app.web.kitchen_heatmap.verify_primary", lambda *_: None)
+    monkeypatch.setattr(
+        indicators.httpx,
+        "post",
+        lambda *a, **kw: httpx.Response(
+            200, request=httpx.Request("POST", a[0]), json={"state": "logged_out"}
+        ),
+    )
+    monkeypatch.setattr(indicators, "IikoClient", Client)
+    monkeypatch.setattr(indicators, "IikoAuthService", Auth)
+
+    service = indicators.IndicatorService(settings)
+
+    def read_indicators():
+        scope = SimpleNamespace(ids=[DEPARTMENT])
+        with pytest.raises(HTTPException) as failure:
+            service.get(scope, indicators.IndicatorQuery(day=DAY, direct=True))
+        return failure.value.status_code
+
+    with open_portal(settings, KitchenRepository(), indicator_service=service) as client:
+
+        def read_heatmap():
+            return client.get(ENDPOINT, params=params()).status_code
+
+        assert login(client).status_code == 200
+        methods = {"heatmap": read_heatmap, "indicators": read_indicators}
+        second = "heatmap" if first == "indicators" else "indicators"
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            in_flight = executor.submit(methods[first])
+            try:
+                assert entered_logout.wait(5)
+                assert methods[second]() == 503
+            finally:
+                release_logout.set()
+            assert in_flight.result(timeout=5) == 503
+        assert service.session_unknown
+        assert read_heatmap() == read_indicators() == 503
+    assert auth_calls == ["session"]

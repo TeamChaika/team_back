@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
+from functools import partial
 from time import perf_counter
 from typing import Annotated, Literal
 from uuid import UUID
@@ -35,7 +36,7 @@ from app.web.coverage import ZONE
 from app.web.deposits import DepositsClient, create_deposits_router
 from app.web.documents import DocumentsClient, create_documents_router
 from app.web.employees import EmployeeCommand, EmployeeEditor, owner
-from app.web.indicators import IndicatorQuery, IndicatorService, catalog
+from app.web.indicators import IndicatorQuery, IndicatorService, catalog, collect_reports
 from app.web.kitchen_heatmap import AccountingDate, KitchenHeatmap, heatmap_enabled, kitchen_heatmap
 from app.web.live_sales import LiveSales
 from app.web.password_policy import require_personal_password
@@ -429,9 +430,8 @@ def create_portal(
         date_from: AccountingDate,
         date_to: AccountingDate,
     ) -> KitchenHeatmap:
-        return kitchen_heatmap(
-            settings, scope, department_id[0], date_from, date_to, fetch=kitchen_heatmap_fetch
-        )
+        fetch = partial(indicators.licensed_report, kitchen_heatmap_fetch or collect_reports)
+        return kitchen_heatmap(settings, scope, department_id[0], date_from, date_to, fetch=fetch)
 
     @app.get("/api/sales/{kind}")
     def sales(
