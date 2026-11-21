@@ -2,17 +2,20 @@
 
 import os
 from contextlib import contextmanager
+from threading import Event
 from uuid import uuid4
 
 import psycopg
 import pytest
 from fastapi import HTTPException
 from psycopg.rows import dict_row
+from psycopg_pool import PoolTimeout
 from test_reference_sync import bundle as bundle
 from test_reference_sync import db as db
 from test_reference_sync import stage
 
 from app.core.config import Settings
+from app.core.postgres_pool import RecoveringConnectionPool
 from app.sync_references import publish
 from app.web.repository import Repository
 
@@ -109,6 +112,40 @@ def test_pool_recovers_after_postgres_terminates_its_idle_sessions(pooled_reposi
     with repo.connection() as replacement:
         assert replacement.info.backend_pid not in old_pids
         assert replacement.execute("SELECT 1 AS ok").fetchone()["ok"] == 1
+
+
+def test_pool_reaches_postgres_after_retries_and_waiters_expire(pooled_repository):
+    database_available = Event()
+    retries_exhausted = Event()
+
+    class InterruptedConnection(psycopg.Connection):
+        @classmethod
+        def connect(cls, *args, **kwargs):
+            if not database_available.is_set():
+                raise psycopg.OperationalError("test database is unavailable")
+            return super().connect(*args, **kwargs)
+
+    pool = RecoveringConnectionPool(
+        pooled_repository.settings.database_url.get_secret_value(),
+        connection_class=InterruptedConnection,
+        kwargs={"autocommit": True},
+        min_size=0,
+        max_size=1,
+        max_waiting=2,
+        reconnect_timeout=0,
+        reconnect_failed=lambda _: retries_exhausted.set(),
+        open=False,
+    )
+    with pool:
+        for _ in range(2):
+            retries_exhausted.clear()
+            with pytest.raises(PoolTimeout):
+                pool.getconn(timeout=0.05)
+            assert retries_exhausted.wait(2)
+
+        database_available.set()
+        with pool.connection(timeout=3) as connection:
+            assert connection.execute("SELECT 1").fetchone() == (1,)
 
 
 def test_password_completion_writes_only_active_self_with_runtime_role(db):

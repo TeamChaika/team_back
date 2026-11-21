@@ -1,3 +1,4 @@
+from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -8,6 +9,13 @@ from psycopg_pool import ConnectionPool
 class RecoveringConnectionPool(ConnectionPool):
     def __init__(self, conninfo: str, **kwargs):
         super().__init__(conninfo, check=self.check_connection, **kwargs)
+
+    def _get_ready_connection(self, timeout: float | None) -> psycopg.Connection | None:
+        # Psycopg calls this under the pool lock. After reconnect attempts run out,
+        # expired waiters can otherwise fill the queue and prevent the next attempt.
+        if self.max_waiting and len(self._waiting) >= self.max_waiting:
+            self._waiting = deque(waiter for waiter in self._waiting if waiter.error is None)
+        return super()._get_ready_connection(timeout)
 
     @staticmethod
     def check_connection(conn: psycopg.Connection) -> None:
