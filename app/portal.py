@@ -37,6 +37,7 @@ from app.web.coverage import ZONE
 from app.web.deposits import DepositsClient, create_deposits_router
 from app.web.documents import DocumentsClient, create_documents_router
 from app.web.employees import EmployeeCommand, EmployeeEditor, owner
+from app.web.ha_bridge import create_ha_bridge_router
 from app.web.indicators import IndicatorQuery, IndicatorService, catalog, collect_reports
 from app.web.kitchen_heatmap import AccountingDate, KitchenHeatmap, heatmap_enabled, kitchen_heatmap
 from app.web.live_sales import LiveSales
@@ -306,6 +307,7 @@ def create_portal(
     app.include_router(create_admin_router(portal_access, repo, web))
     app.include_router(create_profile_router(portal_access, repo))
     app.include_router(create_recovery_router(repo, web, transport=auth_transport))
+    app.include_router(create_ha_bridge_router(repo, live_sales, web))
 
     def check_period(start, end):
         if start > end or (end - start).days > 30 or end > datetime.now(ZONE).date():
