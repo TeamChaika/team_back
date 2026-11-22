@@ -1,4 +1,5 @@
 from pathlib import Path
+from uuid import UUID
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,3 +25,7 @@ class WebSettings(BaseSettings):
     deposits_api_url: str = "https://pay.chaika.team/api/v1"
     documents_api_url: str = "https://iiko.chaika.team/api/portal-documents"
     documents_enabled: bool = False
+    ha_bridge_enabled: bool = False
+    ha_bridge_token_sha256: SecretStr = SecretStr("")
+    ha_bridge_user_id: UUID | None = None
+    ha_bridge_department_id: UUID | None = None

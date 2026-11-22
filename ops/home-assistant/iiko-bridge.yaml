@@ -1,0 +1,76 @@
+# Review skeleton. Configure both secrets only after the backend release is approved.
+# livadia_iiko_feed_url: HTTPS URL ending /api/integrations/home-assistant/today
+# livadia_iiko_authorization: full "Bearer <separate-token>"; no ERP/bot password.
+# HA timezone: Europe/Moscow or Europe/Simferopol.
+rest:
+  - resource: !secret livadia_iiko_feed_url
+    method: GET
+    scan_interval: 300
+    timeout: 60
+    verify_ssl: true
+    headers:
+      Authorization: !secret livadia_iiko_authorization
+      Accept: application/json
+    sensor:
+      - name: Livadia iiko source
+        unique_id: livadia_iiko_source
+        value_template: >-
+          {% if value_json.is_fresh and value_json.completeness == 'complete' %}
+            fresh
+          {% elif value_json.completeness == 'complete' %}
+            stale
+          {% else %}
+            incomplete
+          {% endif %}
+        json_attributes:
+          - restaurant
+          - period
+          - source
+          - revenue
+          - checks
+          - average_check
+          - hourly
+          - fetched_at
+          - last_good
+          - cache_age_seconds
+          - cache_seconds
+          - is_fresh
+          - completeness
+          - coverage
+
+template:
+  - sensor:
+      - name: "Ливадия выручка сегодня"
+        unique_id: livadia_iiko_revenue_today
+        device_class: monetary
+        unit_of_measurement: RUB
+        availability: >-
+          {% set s = 'sensor.livadia_iiko_source' %}
+          {% set p = state_attr(s, 'period') or {} %}
+          {% set t = as_timestamp(state_attr(s, 'last_good'), 0) %}
+          {{ is_state(s, 'fresh') and p.get('business_date') == now().strftime('%Y-%m-%d')
+             and t > 0 and 0 <= as_timestamp(now()) - t < state_attr(s, 'cache_seconds') | int(300)
+             and is_number(state_attr(s, 'revenue')) }}
+        state: "{{ state_attr('sensor.livadia_iiko_source', 'revenue') | float(none) }}"
+      - name: "Ливадия чеки сегодня"
+        unique_id: livadia_iiko_checks_today
+        availability: >-
+          {% set s = 'sensor.livadia_iiko_source' %}
+          {% set p = state_attr(s, 'period') or {} %}
+          {% set t = as_timestamp(state_attr(s, 'last_good'), 0) %}
+          {{ is_state(s, 'fresh') and p.get('business_date') == now().strftime('%Y-%m-%d')
+             and t > 0 and 0 <= as_timestamp(now()) - t < state_attr(s, 'cache_seconds') | int(300)
+             and is_number(state_attr(s, 'checks')) }}
+        state: "{{ state_attr('sensor.livadia_iiko_source', 'checks') | int(none) }}"
+      - name: "Ливадия средний чек сегодня"
+        unique_id: livadia_iiko_average_check_today
+        device_class: monetary
+        unit_of_measurement: RUB
+        availability: >-
+          {% set s = 'sensor.livadia_iiko_source' %}
+          {% set p = state_attr(s, 'period') or {} %}
+          {% set t = as_timestamp(state_attr(s, 'last_good'), 0) %}
+          {{ is_state(s, 'fresh') and p.get('business_date') == now().strftime('%Y-%m-%d')
+             and t > 0 and 0 <= as_timestamp(now()) - t < state_attr(s, 'cache_seconds') | int(300)
+             and is_number(state_attr(s, 'average_check')) }}
+        state: "{{ state_attr('sensor.livadia_iiko_source', 'average_check') | float(none) }}"
