@@ -3,8 +3,9 @@
 import asyncio
 import logging
 from copy import deepcopy
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Lock
@@ -25,8 +26,8 @@ from app.web.warehouse_analytics import require_department_report
 log = logging.getLogger(__name__)
 
 
-def fetch_today(settings):
-    day = datetime.now(ZONE).date()
+def fetch_day(settings, day: date):
+    """Capture one immutable accounting date under the existing source mutex."""
     source = configured_sources(settings)[0]
     with (
         psycopg.connect(
@@ -79,8 +80,14 @@ def fetch_today(settings):
             return bundle
 
 
+def fetch_today(settings):
+    return fetch_day(settings, datetime.now(ZONE).date())
+
+
 class LiveSales:
-    def __init__(self, settings, *, fetch=fetch_today, clock=monotonic, policy_reader=None):
+    def __init__(
+        self, settings, *, fetch=fetch_today, clock=monotonic, policy_reader=None, report_day=None
+    ):
         self.policy_reader = policy_reader or SyncPolicy
         self.policy_key = None
         self.settings, self.fetch, self.clock = settings, fetch, clock
@@ -89,6 +96,31 @@ class LiveSales:
         self.expires = 0.0
         self.last_success = 0.0
         self.stale = False
+        self.report_day = report_day
+        self.date_lock = Lock()
+        self.previous = None
+
+    def for_day(self, day: date):
+        """A single dated cache never replaces the dashboard's ordinary today cache."""
+        if self.report_day is not None:
+            if day != self.report_day:
+                raise HTTPException(422, "Дата снимка не может изменяться.")
+            return self
+        today = datetime.now(ZONE).date()
+        if day == today:
+            return self
+        if day != today - timedelta(days=1):
+            raise HTTPException(422, "Доступен только текущий или вчерашний календарный день.")
+        with self.date_lock:
+            if self.previous is None or self.previous.report_day != day:
+                self.previous = LiveSales(
+                    self.settings,
+                    fetch=partial(fetch_day, day=day),
+                    clock=self.clock,
+                    policy_reader=self.policy_reader,
+                    report_day=day,
+                )
+            return self.previous
 
     def get(self, scope=None):
         policy = self.policy_reader()
@@ -97,7 +129,7 @@ class LiveSales:
         ):
             return None, {"source": "stored", "status": "sync_paused", "stale": True}
         policy.require(policy.departments or [])
-        today = datetime.now(ZONE).date().isoformat()
+        today = (self.report_day or datetime.now(ZONE).date()).isoformat()
         with self.lock:
             valid_day = (
                 self.bundle

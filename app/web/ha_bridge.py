@@ -34,8 +34,12 @@ def check_count(value):
     return int(number)
 
 
-def envelope(scope, now, cache_seconds):
-    day = now.astimezone(ZONE).date()
+def display_day(now):
+    return (now.astimezone(ZONE) - timedelta(hours=9)).date()
+
+
+def envelope(scope, now, cache_seconds, day=None):
+    day = day or display_day(now)
     selected = scope.ids[0]
     name = next((d.get("name") for d in scope.departments if d["id"] == selected), None)
     return {
@@ -45,7 +49,7 @@ def envelope(scope, now, cache_seconds):
             "start": datetime.combine(day, time.min, ZONE).isoformat(),
             "end_exclusive": datetime.combine(day + timedelta(days=1), time.min, ZONE).isoformat(),
             "timezone": str(ZONE),
-            "partial": True,
+            "partial": day == now.astimezone(ZONE).date(),
         },
         "source": {
             "provider": "iiko_api",
@@ -104,20 +108,20 @@ def create_ha_bridge_router(repo, live_sales, settings):
             raise HTTPException(422, "Этот маршрут не принимает параметры.")
         scope = permitted_scope()
         cache_seconds = live_sales.settings.live_sales_cache_seconds if live_sales else 300
-        result = envelope(scope, datetime.now(UTC), cache_seconds)
+        day = display_day(datetime.now(UTC))
+        result = envelope(scope, datetime.now(UTC), cache_seconds, day)
         try:
             if live_sales is None:
                 raise ValueError("live_sales_disabled")
-            bundle, metadata = live_sales.get(scope)
+            bundle, metadata = live_sales.for_day(day).get(scope)
             now = datetime.now(UTC)
-            result = envelope(scope, now, cache_seconds)
-            day = now.astimezone(ZONE).date()
+            result = envelope(scope, now, cache_seconds, day)
             if (
                 bundle is None
                 or metadata.get("source") != "iiko_api"
                 or bundle["manifest"]["business_date"] != day.isoformat()
             ):
-                raise ValueError("today_unavailable")
+                raise ValueError("selected_day_unavailable")
             observed = [
                 datetime.fromisoformat(bundle["reports"][kind]["info"]["received_at"])
                 for kind in ("daily", "hours")
@@ -128,6 +132,10 @@ def create_ha_bridge_router(repo, live_sales, settings):
             age = (now - last_good).total_seconds()
             if not -30 <= age < 1200:
                 raise ValueError("observation_expired")
+            if day < now.astimezone(ZONE).date() and last_good < datetime.combine(
+                day + timedelta(days=1), time.min, ZONE
+            ):
+                raise ValueError("previous_day_not_final")
             daily = repo.sales(scope, "daily", day, day, live_bundle=bundle)
             hours = repo.sales(scope, "hours", day, day, live_bundle=bundle)
             result.update(
@@ -179,7 +187,7 @@ def create_ha_bridge_router(repo, live_sales, settings):
             )
             if not complete:
                 # Consumers must not chart a partially reconciled day as real sales.
-                empty = envelope(scope, now, cache_seconds)
+                empty = envelope(scope, now, cache_seconds, day)
                 for key in ("revenue", "checks", "average_check", "hourly"):
                     result[key] = empty[key]
         except HTTPException as error:
@@ -189,15 +197,23 @@ def create_ha_bridge_router(repo, live_sales, settings):
             pass
         # A refresh can take time: revoked grants must also prevent cached output now.
         permitted_scope()
-        # SQL and permission reads can cross midnight or a cache deadline.
+        # SQL and permission reads can cross a display cutoff or cache deadline.
         final_now = datetime.now(UTC)
         result["fetched_at"] = final_now.isoformat()
-        if result["period"]["business_date"] != final_now.astimezone(ZONE).date().isoformat():
+        result["period"]["partial"] = day == final_now.astimezone(ZONE).date()
+        if day != display_day(final_now):
             result["completeness"] = "unavailable"
-        if result["last_good"] is not None:
-            final_age = (final_now - datetime.fromisoformat(result["last_good"])).total_seconds()
-            result["cache_age_seconds"] = max(0, int(final_age))
+        observed_at = result["last_good"] or result["coverage"].get("observed_at")
+        if observed_at is not None:
+            observed = datetime.fromisoformat(observed_at)
+            final_age = (final_now - observed).total_seconds()
+            if result["last_good"] is not None:
+                result["cache_age_seconds"] = max(0, int(final_age))
             if not -30 <= final_age < 1200:
+                result["completeness"] = "unavailable"
+            if day < final_now.astimezone(ZONE).date() and observed < datetime.combine(
+                day + timedelta(days=1), time.min, ZONE
+            ):
                 result["completeness"] = "unavailable"
             if final_age >= cache_seconds:
                 result["is_fresh"] = False

@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import app.portal as portal
+import app.web.ha_bridge as bridge
 from app.core.config import Settings
 from app.web.auth import ACCESS_COOKIE
 from app.web.coverage import ZONE
@@ -141,9 +142,19 @@ def sample():
 
 @pytest.fixture
 def setup(monkeypatch):
+    wall = [datetime.now(UTC).astimezone(ZONE).replace(hour=12, minute=0, second=0).astimezone(UTC)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return wall[0].astimezone(tz)
+
+    monkeypatch.setattr(bridge, "datetime", Clock)
     settings = Settings(_env_file=None, live_sales_enabled=True)
     repo = MemoryRepository(settings)
     data, ticks = sample(), [0.0]
+    for report in data["reports"].values():
+        report["info"]["received_at"] = (wall[0] - timedelta(seconds=2)).isoformat()
     state = SimpleNamespace(failing=False, after_fetch=None, fetches=0)
 
     def fetch(_):
@@ -179,7 +190,9 @@ def setup(monkeypatch):
         )
         return TestClient(app)
 
-    return SimpleNamespace(make=make, repo=repo, data=data, ticks=ticks, state=state, live=live)
+    return SimpleNamespace(
+        make=make, repo=repo, data=data, ticks=ticks, state=state, live=live, wall=wall, now=wall[0]
+    )
 
 
 def test_disabled_by_default_is_not_a_new_public_route(setup):
@@ -394,7 +407,7 @@ def test_malformed_hour_does_not_claim_a_successful_scoped_observation(setup):
 def test_date_and_age_rechecked_after_final_permission_read(setup, monkeypatch, advance):
     import app.web.ha_bridge as bridge
 
-    wall = [datetime.now(UTC)]
+    wall = [setup.now]
 
     class Clock(datetime):
         @classmethod

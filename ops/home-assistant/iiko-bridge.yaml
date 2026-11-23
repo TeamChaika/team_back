@@ -40,37 +40,40 @@ rest:
 
 template:
   - sensor:
-      - name: "Ливадия выручка сегодня"
+      - name: "Ливадия выручка"
         unique_id: livadia_iiko_revenue_today
+        default_entity_id: sensor.livadia_iiko_revenue_today
         device_class: monetary
         unit_of_measurement: RUB
         availability: >-
           {% set s = 'sensor.livadia_iiko_source' %}
           {% set p = state_attr(s, 'period') or {} %}
           {% set t = as_timestamp(state_attr(s, 'last_good'), 0) %}
-          {{ is_state(s, 'fresh') and p.get('business_date') == now().strftime('%Y-%m-%d')
+          {{ is_state(s, 'fresh') and p.get('business_date') == (now() - timedelta(hours=9)).strftime('%Y-%m-%d')
              and t > 0 and 0 <= as_timestamp(now()) - t < state_attr(s, 'cache_seconds') | int(300)
              and is_number(state_attr(s, 'revenue')) }}
         state: "{{ state_attr('sensor.livadia_iiko_source', 'revenue') | float(none) }}"
-      - name: "Ливадия чеки сегодня"
+      - name: "Ливадия чеки"
         unique_id: livadia_iiko_checks_today
+        default_entity_id: sensor.livadia_iiko_checks_today
         availability: >-
           {% set s = 'sensor.livadia_iiko_source' %}
           {% set p = state_attr(s, 'period') or {} %}
           {% set t = as_timestamp(state_attr(s, 'last_good'), 0) %}
-          {{ is_state(s, 'fresh') and p.get('business_date') == now().strftime('%Y-%m-%d')
+          {{ is_state(s, 'fresh') and p.get('business_date') == (now() - timedelta(hours=9)).strftime('%Y-%m-%d')
              and t > 0 and 0 <= as_timestamp(now()) - t < state_attr(s, 'cache_seconds') | int(300)
              and is_number(state_attr(s, 'checks')) }}
         state: "{{ state_attr('sensor.livadia_iiko_source', 'checks') | int(none) }}"
-      - name: "Ливадия средний чек сегодня"
+      - name: "Ливадия средний чек"
         unique_id: livadia_iiko_average_check_today
+        default_entity_id: sensor.livadia_iiko_average_check_today
         device_class: monetary
         unit_of_measurement: RUB
         availability: >-
           {% set s = 'sensor.livadia_iiko_source' %}
           {% set p = state_attr(s, 'period') or {} %}
           {% set t = as_timestamp(state_attr(s, 'last_good'), 0) %}
-          {{ is_state(s, 'fresh') and p.get('business_date') == now().strftime('%Y-%m-%d')
+          {{ is_state(s, 'fresh') and p.get('business_date') == (now() - timedelta(hours=9)).strftime('%Y-%m-%d')
              and t > 0 and 0 <= as_timestamp(now()) - t < state_attr(s, 'cache_seconds') | int(300)
              and is_number(state_attr(s, 'average_check')) }}
         state: "{{ state_attr('sensor.livadia_iiko_source', 'average_check') | float(none) }}"
