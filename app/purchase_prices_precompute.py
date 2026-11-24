@@ -12,7 +12,6 @@ from psycopg.types.json import Jsonb
 from app.core.config import Settings
 
 ALGORITHM_VERSION = 1
-LOCK_ID = 7623011071900
 
 
 def check_stop(stop):
@@ -107,11 +106,12 @@ def ensure_prepared(settings, stop=None):
     ) as db:
         with db.transaction():
             db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            locked = db.execute(
-                "SELECT pg_try_advisory_xact_lock(%s) AS locked", (LOCK_ID,)
-            ).fetchone()["locked"]
-            if not locked:
-                return dict(status="busy")
+            try:
+                db.execute(
+                    "LOCK TABLE chaika.purchase_prices_prepared IN SHARE ROW EXCLUSIVE MODE NOWAIT"
+                )
+            except psycopg.errors.LockNotAvailable:
+                raise psycopg.Rollback() from None
             revision = source_revision(db)
             current = db.execute(
                 "SELECT id,revision,prepared_at FROM chaika.purchase_prices_prepared "
@@ -124,6 +124,7 @@ def ensure_prepared(settings, stop=None):
                     prepared_at=current["prepared_at"],
                 )
             return publish_prepared(db, revision, stop=stop)
+        return dict(status="busy")
 
 
 def main():

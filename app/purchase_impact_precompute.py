@@ -16,7 +16,6 @@ from app.web.coverage import ZONE
 from app.web.purchase_impact import calculate_impact, load_graphs, published_sales_period
 
 ALGORITHM_VERSION = 2
-LOCK_ID = 7623011071800
 
 
 def check_stop(stop):
@@ -247,16 +246,15 @@ def ensure_prepared(settings, stop=None):
         row_factory=dict_row,
         prepare_threshold=None,
     ) as db:
-        # Transaction locks also work with the deployment's transaction pooler.
-        # The read/build/publish transaction owns the lock until publication commits.
         with db.transaction():
             db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             db.execute("SET LOCAL statement_timeout='120s'")
-            locked = db.execute(
-                "SELECT pg_try_advisory_xact_lock(%s) AS locked", (LOCK_ID,)
-            ).fetchone()["locked"]
-            if not locked:
-                return dict(status="busy")
+            try:
+                db.execute(
+                    "LOCK TABLE chaika.purchase_impact_prepared IN SHARE ROW EXCLUSIVE MODE NOWAIT"
+                )
+            except psycopg.errors.LockNotAvailable:
+                raise psycopg.Rollback() from None
             revision = source_revision(db)
             current = db.execute(
                 "SELECT id,revision,prepared_at FROM chaika.purchase_impact_prepared "
@@ -276,6 +274,7 @@ def ensure_prepared(settings, stop=None):
                 generation_id=str(prepared["id"]),
                 prepared_at=prepared["prepared_at"],
             )
+        return dict(status="busy")
 
 
 def main():
