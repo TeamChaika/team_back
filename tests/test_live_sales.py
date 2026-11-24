@@ -142,3 +142,15 @@ def test_overview_replaces_saved_today_merges_history_and_scopes_top_dishes(db):
     assert result["top_dishes"][0]["dish_name"] == "Блюдо"
     assert len(result["restaurants"]) == 1
     assert result["current"]["partial_days"][0]["date"].isoformat() == "2026-09-15"
+    live_daily = bundle("2026-09-15")
+    del live_daily["reports"]["dishes"]
+    compact = read_overview(
+        db,
+        scope(A),
+        datetime(2026, 9, 14).date(),
+        datetime(2026, 9, 15).date(),
+        "day",
+        live_bundle=live_daily,
+        trend_only=True,
+    )
+    assert compact == {k: result[k] for k in ("current", "previous", "granularity", "trend")}

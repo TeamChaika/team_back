@@ -70,8 +70,12 @@ class FakeRepository:
     def sales(self, scope, kind, start, end):
         return {}
 
-    def overview(self, scope, start, end, granularity):
-        return {"ids": [str(i) for i in scope.ids], "granularity": granularity}
+    def overview(self, scope, start, end, granularity, *, live_bundle=None, trend_only=False):
+        return {
+            "ids": [str(i) for i in scope.ids],
+            "granularity": granularity,
+            "trend_only": trend_only,
+        }
 
     def purchase_prices(
         self,
@@ -82,6 +86,7 @@ class FakeRepository:
         *,
         recent_only=True,
         include_impact=False,
+        top_increases=False,
     ):
         if selection:
             assert recent_only is False
@@ -92,6 +97,7 @@ class FakeRepository:
             "exclude_household": exclude_household,
             "recent_only": recent_only,
             "include_impact": include_impact,
+            "top_increases": top_increases,
         }
 
     def purchase_impact(self, scope, selection, analysis_department_id=None, all_departments=False):
@@ -174,6 +180,7 @@ def test_latest_purchase_prices_require_scope_but_no_period(client):
         "exclude_household": True,
         "recent_only": True,
         "include_impact": False,
+        "top_increases": False,
     }
     assert client.get(url + "?exclude_household=false").json()["exclude_household"] is False
     assert client.get(url + "?exclude_household=invalid").status_code == 422
@@ -183,6 +190,9 @@ def test_latest_purchase_prices_require_scope_but_no_period(client):
     assert client.get(url + "?kind=arbitrary").status_code == 422
     assert client.get(url + "?include_impact=true").json()["include_impact"] is True
     assert client.get(url + "?include_impact=invalid").status_code == 422
+    assert client.get(url + "?view=top_increases").json()["top_increases"] is True
+    assert client.get(url + "?view=invalid").status_code == 422
+    assert client.get(f"{url}?view=top_increases&department_id={OTHER}").status_code == 403
     # A previous global date selection cannot narrow the latest product list.
     assert client.get(url + "?start=2026-08-01&end=2026-09-10").json() == client.get(url).json()
 
@@ -424,7 +434,15 @@ def test_overview_is_scoped_and_validates_period_and_granularity(client):
     assert client.get(query + "&granularity=week").json() == {
         "ids": [str(DEPARTMENT)],
         "granularity": "week",
+        "trend_only": False,
     }
+    assert client.get(query + "&view=trend&granularity=month").json() == {
+        "ids": [str(DEPARTMENT)],
+        "granularity": "month",
+        "trend_only": True,
+    }
+    assert client.get(query + f"&view=trend&department_id={OTHER}").status_code == 403
+    assert client.get(query + "&view=invalid").status_code == 422
     assert client.get(query + "&granularity=year").status_code == 422
     for start, end in [
         ("2026-09-10", "2026-09-01"),
@@ -556,7 +574,7 @@ def test_stock_suggestions_and_selection_use_authenticated_scope(client):
 
 def test_unhandled_error_retains_exact_cors_security_and_request_id():
     class BrokenRepository(FakeRepository):
-        def overview(self, *args):
+        def overview(self, *args, **kwargs):
             raise ValueError("secret internal failure")
 
     origin = "https://dashboard.chaika.team"

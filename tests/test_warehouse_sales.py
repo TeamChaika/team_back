@@ -167,6 +167,18 @@ def test_overview_previous_period_trends_and_ranking_are_scoped(provider):
     assert result["trend"][0]["current"]["totals"]["checks"] == "1"
     assert len(calls) == 2
     assert all(body["filters"]["OpenDate.Typed"]["from"] == "2026-09-09T00:00:00" for body in calls)
+    for grain in ("day", "week", "month"):
+        trend = repo.overview(scope(A, B), DAY, DAY, grain, trend_only=True)
+        assert trend == {
+            "granularity": grain,
+            "current": result["current"],
+            "previous": result["previous"],
+            "trend": result["trends"][grain],
+        }
+        # Only the first grain requests an additional daily-only capture.
+        assert len(calls) == 3
+        assert "DishId" not in calls[-1]["groupByRowFields"]
+        assert calls[-1]["filters"]["Store.Id"]["values"] == [str(A), str(B)]
 
 
 def test_existing_template_filters_cannot_override_permissions(provider):

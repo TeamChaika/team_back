@@ -9,6 +9,7 @@
 
 | Данные/процесс | Где начать |
 | --- | --- |
+| Опрос расписания в «Статусе данных» | `GET /api/status?view=schedule` возвращает `scheduled` с теми же правами и состояниями ручного запуска, что и полный `GET /api/status`. Запрос пропускает историю RMS, кассовых смен, заданий и исходных снимков. [Обработчик](../../app/portal.py) и [запросы статуса](../../app/web/repository.py). |
 | Подключения и лицензия iiko | [app/services/iiko_auth.py](../../app/services/iiko_auth.py), [app/services/iiko_connections.py](../../app/services/iiko_connections.py); приватный маршрут [iiko_connections.py](../../app/api/routes/iiko_connections.py) |
 | Структура и RAW | [app/sync_references.py](../../app/sync_references.py): `configured_sources`, `reference_lock`, `append_snapshot`, `corporate_nodes`, `stores`, `rms_bindings` |
 | Payload RAW в S3 | [app/snapshot_archive.py](../../app/snapshot_archive.py): verified upload + envelope reader; `sync_references.append_snapshot`, `sync_inventory.restore_snapshots`; [контракт и backfill](../snapshot-archive.md) |

@@ -10,7 +10,7 @@ from psycopg.types.json import Jsonb
 from test_reference_sync import db as db
 
 from app.sync_references import Source, register_sources
-from app.web.overview import buckets, change, read_overview, totals
+from app.web.overview import buckets, change, period, read_overview, totals
 from app.web.repository import Scope
 
 A, B, HIDDEN = UUID(int=1), UUID(int=2), UUID(int=3)
@@ -73,6 +73,41 @@ def read(db, start, end, grain="day", ids=(A, B)):
         )
     finally:
         db.row_factory = original
+
+
+@pytest.mark.parametrize(
+    ("ids", "observed_day", "scope_metadata", "preliminary"),
+    [
+        ((A,), 11, {"sync_scope_mode": "selected", "sync_department_ids": [str(A)]}, False),
+        ((A, B), 11, {"sync_scope_mode": "selected", "sync_department_ids": [str(A)]}, True),
+        ((A,), 10, {"sync_scope_mode": "selected", "sync_department_ids": [str(A)]}, True),
+        ((A,), 11, {}, True),
+    ],
+)
+def test_partial_days_respect_selected_coverage(ids, observed_day, scope_metadata, preliminary):
+    from contextlib import nullcontext
+
+    from app.web.repository import Repository
+    from tests.test_restaurant_selection import Rows
+
+    day = date(2026, 9, 10)
+    report = {
+        "business_date": day,
+        "kind": "daily",
+        "observed_at": datetime(2026, 9, observed_day, 12, tzinfo=UTC),
+        "reviewed": True,
+        "checks": [{"partial_scope": True, "exact_match": True, **scope_metadata}],
+    }
+    selection = scope(*ids)
+    assert bool(period([report], [], selection, day, day)["partial_days"]) is preliminary
+
+    class SalesDatabase:
+        def execute(self, sql, params):
+            return Rows([report] if "SELECT d.business_date,s.checks,r.observed_at" in sql else [])
+
+    repo = object.__new__(Repository)
+    repo.connection = lambda: nullcontext(SalesDatabase())
+    assert bool(repo.sales(selection, "daily", day, day)["partial_days"]) is preliminary
 
 
 def test_weighted_averages_and_precise_changes():
@@ -243,6 +278,47 @@ def test_calendar_buckets_clipped_at_period_edges(grain, lengths):
     assert [len(group) for group in result] == lengths
     assert result[0][0] == date(2026, 8, 29)
     assert result[-1][-1] == date(2026, 9, 7)
+
+
+def test_trend_query_skips_dishes_and_matches_full_response_for_each_grain(db):
+    for day in ("2026-08-27", "2026-08-31", "2026-09-01", "2026-09-02"):
+        seed_day(db, day, [{"revenue": 100}, {"department_id": HIDDEN, "revenue": 999}])
+    db.row_factory = dict_row
+    start, end = date(2026, 8, 30), date(2026, 9, 2)
+    queries = []
+    operations = []
+
+    class Trace:
+        def execute(self, query, params):
+            queries.append((query, params))
+            operations.append("execute")
+            cursor = db.execute(query, params)
+
+            class Result:
+                def fetchall(self):
+                    operations.append("fetch")
+                    return cursor.fetchall()
+
+            return Result()
+
+    full = read_overview(Trace(), scope(A), start, end, "day")
+    assert full["current"]["missing_dates"] == [start]
+    assert operations == ["execute"] * 3 + ["fetch"] * 3
+
+    for grain in ("day", "week", "month"):
+        queries.clear()
+        operations.clear()
+        result = read_overview(Trace(), scope(A), start, end, grain, trend_only=True)
+        assert result == {
+            "current": full["current"],
+            "previous": full["previous"],
+            "granularity": grain,
+            "trend": full["trends"][grain],
+        }
+        assert len(queries) == 2
+        assert operations == ["execute"] * 2 + ["fetch"] * 2
+        assert queries[0][1][-1] == ["daily"]
+        assert all("dishes" not in sql for sql, _ in queries)
 
 
 def test_dish_drilldown_keeps_exact_filter_and_restaurant_scope(db):

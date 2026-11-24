@@ -166,92 +166,98 @@ class Repository:
             db.execute("COMMIT")
 
     def scope(self, user_id: UUID, selected: UUID | tuple[UUID, ...] | None = None) -> Scope:
+        with self.connection() as db:
+            return self._read_scope(db, user_id, selected)
+
+    @staticmethod
+    def _active_profile(db, user_id):
+        return db.execute(
+            "SELECT id,display_name,role,sections,is_portal_admin,all_departments,"
+            "password_change_required,warehouse_scope_mode FROM "
+            "chaika.web_users WHERE id=%s AND active",
+            (user_id,),
+        )
+
+    def _read_scope(self, db, user_id, selected=None, *, user=None) -> Scope:
         selection = tuple(
             sorted(set((selected,) if isinstance(selected, UUID) else selected or ()), key=str)
         )
-        with self.connection() as db:
-            # Queue independent reads before fetching: one network round trip, fresh permissions.
-            users = db.execute(
-                "SELECT id,display_name,role,sections,is_portal_admin,all_departments,"
-                "password_change_required,warehouse_scope_mode FROM "
-                "chaika.web_users WHERE id=%s AND active",
-                (user_id,),
-            )
-            node_rows = db.execute(
-                "SELECT id,parent_id,name,code,type FROM chaika.corporate_nodes WHERE "
-                "source_id='primary'"
-            )
-            grants = db.execute(
-                "SELECT department_id FROM chaika.web_department_access WHERE user_id=%s "
-                "AND source_id='primary'",
-                (user_id,),
-            )
-            store_rows = db.execute(
-                "SELECT id,parent_id,name FROM chaika.stores WHERE source_id='primary'"
-            )
-            rms_rows = db.execute(
-                "SELECT source_id,department_id FROM chaika.rms_bindings WHERE "
-                "state='matched' AND chain_source_id='primary'"
-            )
+        # On analytics requests the active profile and topology share a pipeline.
+        users = self._active_profile(db, user_id) if user is None else None
+        node_rows = db.execute(
+            "SELECT id,parent_id,name,code,type FROM chaika.corporate_nodes WHERE "
+            "source_id='primary'"
+        )
+        grants = db.execute(
+            "SELECT department_id FROM chaika.web_department_access WHERE user_id=%s "
+            "AND source_id='primary'",
+            (user_id,),
+        )
+        store_rows = db.execute(
+            "SELECT id,parent_id,name FROM chaika.stores WHERE source_id='primary'"
+        )
+        rms_rows = db.execute(
+            "SELECT source_id,department_id FROM chaika.rms_bindings WHERE "
+            "state='matched' AND chain_source_id='primary'"
+        )
+        if users is not None:
             user = users.fetchone()
-            if not user:
-                raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
-            if user.get("password_change_required"):
-                return Scope(user, (), None, (), ())
-            if not IIKO_SECTIONS.intersection(sections_for(user)):
-                raise HTTPException(403, "Этой учётной записи доступны только депозиты.")
-            nodes = node_rows.fetchall()
-            stores = store_rows.fetchall()
-            parents = {n["id"]: n["parent_id"] for n in nodes + stores}
-            department_grants = {r["department_id"] for r in grants.fetchall()}
-            all_departments = user.get("all_departments", user["role"] == "owner")
-            department_nodes = {
-                n["id"] for n in nodes if n["type"] in {"DEPARTMENT", "CENTRALSTORE", "MANUFACTURE"}
+        if not user:
+            raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
+        if user.get("password_change_required"):
+            return Scope(user, (), None, (), ())
+        if not IIKO_SECTIONS.intersection(sections_for(user)):
+            raise HTTPException(403, "Этой учётной записи доступны только депозиты.")
+        nodes = node_rows.fetchall()
+        stores = store_rows.fetchall()
+        parents = {n["id"]: n["parent_id"] for n in nodes + stores}
+        department_grants = {r["department_id"] for r in grants.fetchall()}
+        all_departments = user.get("all_departments", user["role"] == "owner")
+        department_nodes = {
+            n["id"] for n in nodes if n["type"] in {"DEPARTMENT", "CENTRALSTORE", "MANUFACTURE"}
+        }
+        allowed = department_nodes if all_departments else department_grants
+        restricted = user.get("warehouse_scope_mode", "all") == "selected"
+        warehouse_ids = set()
+        if restricted:
+            warehouse_ids = {
+                r["store_id"]
+                for r in db.execute(
+                    "SELECT store_id FROM chaika.web_warehouse_access WHERE user_id=%s "
+                    "AND source_id='primary'",
+                    (user_id,),
+                ).fetchall()
             }
-            allowed = department_nodes if all_departments else department_grants
-            restricted = user.get("warehouse_scope_mode", "all") == "selected"
-            warehouse_ids = set()
-            if restricted:
-                warehouse_ids = {
-                    r["store_id"]
-                    for r in db.execute(
-                        "SELECT store_id FROM chaika.web_warehouse_access WHERE user_id=%s "
-                        "AND source_id='primary'",
-                        (user_id,),
-                    ).fetchall()
-                }
-                # Warehouse grants provide parent names for navigation only. Existing
-                # explicit department grants remain an upper bound when present.
-                containing = {
-                    department
-                    for department in department_nodes
-                    if any(has_store_scope(store, parents, {department}) for store in warehouse_ids)
-                }
-                allowed = (
-                    containing & allowed if (all_departments or department_grants) else containing
-                )
-                user["warehouse_ids"] = sorted(warehouse_ids, key=str)
-            if (not allowed and not restricted) or not set(selection).issubset(allowed):
-                raise HTTPException(403, "Нет доступа к выбранному ресторану.")
-            departments = tuple(
-                sorted((n for n in nodes if n["id"] in allowed), key=lambda n: n["name"] or "")
-            )
-            visible = set(selection) if selection else allowed
-            store_ids = tuple(
-                s["id"]
-                for s in stores
-                if has_store_scope(s["id"], parents, visible)
-                and (not restricted or s["id"] in warehouse_ids)
-            )
-            rms = rms_rows.fetchall()
-            rms_ids = tuple(r["source_id"] for r in rms if r["department_id"] in visible)
-            return Scope(
-                user,
-                departments,
-                selection[0] if len(selection) == 1 else selection or None,
-                store_ids,
-                rms_ids,
-            )
+            # Warehouse grants provide parent names for navigation only. Existing
+            # explicit department grants remain an upper bound when present.
+            containing = {
+                department
+                for department in department_nodes
+                if any(has_store_scope(store, parents, {department}) for store in warehouse_ids)
+            }
+            allowed = containing & allowed if (all_departments or department_grants) else containing
+            user["warehouse_ids"] = sorted(warehouse_ids, key=str)
+        if (not allowed and not restricted) or not set(selection).issubset(allowed):
+            raise HTTPException(403, "Нет доступа к выбранному ресторану.")
+        departments = tuple(
+            sorted((n for n in nodes if n["id"] in allowed), key=lambda n: n["name"] or "")
+        )
+        visible = set(selection) if selection else allowed
+        store_ids = tuple(
+            s["id"]
+            for s in stores
+            if has_store_scope(s["id"], parents, visible)
+            and (not restricted or s["id"] in warehouse_ids)
+        )
+        rms = rms_rows.fetchall()
+        rms_ids = tuple(r["source_id"] for r in rms if r["department_id"] in visible)
+        return Scope(
+            user,
+            departments,
+            selection[0] if len(selection) == 1 else selection or None,
+            store_ids,
+            rms_ids,
+        )
 
     def resolve_login_email(self, candidates: tuple[str, ...]) -> str:
         # Never merge accounts or choose one silently when phone aliases collide.
@@ -280,32 +286,27 @@ class Repository:
     def portal_scope(self, user_id: UUID) -> Scope:
         """Document store permissions are independent of restaurant analytics."""
         with self.connection() as db:
-            user = db.execute(
-                "SELECT id,display_name,role,sections,is_portal_admin,all_departments,"
-                "password_change_required,warehouse_scope_mode FROM "
-                "chaika.web_users WHERE id=%s AND active",
-                (user_id,),
-            ).fetchone()
-        if not user:
-            raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
-        if user.get("password_change_required"):
-            return Scope(user, (), None, (), ())
-        if not IIKO_SECTIONS.intersection(sections_for(user)):
-            return Scope(user, (), None, (), ())
-        if user.get("warehouse_scope_mode", "all") == "selected":
-            return self.scope(user_id)
-        if not (ANALYTICS_SECTIONS - {"invoices", "outgoing"}).intersection(
-            sections_for(user)
-        ) and not user.get("all_departments", user["role"] == "owner"):
-            with self.connection() as db:
+            user = self._active_profile(db, user_id).fetchone()
+            if not user:
+                raise HTTPException(403, "Доступ к Chaika Team не назначен или отключён.")
+            if user.get("password_change_required"):
+                return Scope(user, (), None, (), ())
+            sections = sections_for(user)
+            if not IIKO_SECTIONS.intersection(sections):
+                return Scope(user, (), None, (), ())
+            if (
+                user.get("warehouse_scope_mode", "all") != "selected"
+                and not (ANALYTICS_SECTIONS - {"invoices", "outgoing"}).intersection(sections)
+                and not user.get("all_departments", user["role"] == "owner")
+            ):
                 analytics_grant = db.execute(
                     "SELECT department_id FROM chaika.web_department_access WHERE user_id=%s "
                     "AND source_id='primary' LIMIT 1",
                     (user_id,),
                 ).fetchone()
-            if not analytics_grant:
-                return Scope(user, (), None, (), ())
-        return self.scope(user_id)
+                if not analytics_grant:
+                    return Scope(user, (), None, (), ())
+            return self._read_scope(db, user_id, user=user)
 
     def complete_password_change(self, user_id: UUID) -> None:
         """Called only after Auth confirms a new password for this authenticated account."""
@@ -363,14 +364,19 @@ class Repository:
             }
         )
 
-    def overview(self, scope, start: date, end: date, granularity: str, *, live_bundle=None):
+    def overview(
+        self, scope, start: date, end: date, granularity: str, *, live_bundle=None, trend_only=False
+    ):
         require_warehouse_section(scope, "overview")
         if scope.warehouse_restricted:
-            return serial(self.warehouse_sales.overview(scope, start, end, granularity))
-        with self.connection(repeatable=True) as db:
             return serial(
-                read_overview(db, scope, start, end, granularity, live_bundle=live_bundle)
+                self.warehouse_sales.overview(scope, start, end, granularity, trend_only=trend_only)
             )
+        with self.connection(repeatable=True) as db:
+            result = read_overview(
+                db, scope, start, end, granularity, live_bundle=live_bundle, trend_only=trend_only
+            )
+        return serial(result)
 
     def sales(
         self,
@@ -544,7 +550,7 @@ class Repository:
                 "payment_groups": payment_groups,
                 "discount_groups": discount_groups,
                 "loaded_dates": loaded_dates,
-                "partial_days": partial_days(coverage),
+                "partial_days": partial_days(coverage, scope.ids),
                 "missing_dates": missing_dates,
                 "complete": complete,
                 "start": start,
@@ -561,6 +567,7 @@ class Repository:
         *,
         recent_only=True,
         include_impact=False,
+        top_increases=False,
     ):
         with self.connection(repeatable=True) as db:
             report = read_purchase_prices(
@@ -571,10 +578,11 @@ class Repository:
                 exclude_household,
                 selection,
                 recent_only=recent_only,
+                top_increases=top_increases,
             )
             if selection is None and include_impact:
                 add_prepared_impacts(db, scope, report)
-            return serial(report)
+        return serial(report)
 
     def purchase_impact(self, scope, selection, analysis_department_id=None, all_departments=False):
         with self.connection(repeatable=True) as db:
@@ -1030,9 +1038,56 @@ class Repository:
                 )
             )
 
-    def status(self, scope):
+    def status(self, scope, *, schedule_only=False):
         require_warehouse_section(scope, "status")
+        show_schedule = scope.unrestricted and self.settings.sync_enabled
+        if schedule_only and not show_schedule:
+            return {"scheduled": []}
         with self.connection() as db:
+            scheduled = []
+            if show_schedule:
+                from app.scheduler import JOBS
+
+                latest = db.execute(
+                    "SELECT DISTINCT ON (job) job,status,slot,started_at,finished_at,"
+                    "error_code,"
+                    "next_retry_at,attempts FROM chaika.scheduled_sync_runs "
+                    "ORDER BY job,slot DESC"
+                ).fetchall()
+                by_key = {r["job"]: r for r in latest}
+                from app.manual_sync import available, manual_state
+                from app.manual_sync import latest as manual_latest
+
+                ready = available(db)
+                requests = manual_latest(db)
+                now = db.execute("SELECT clock_timestamp() AS now").fetchone()["now"]
+                active = {
+                    row["job"]
+                    for row in db.execute(
+                        "SELECT DISTINCT job FROM chaika.scheduled_sync_runs "
+                        "WHERE status='running'"
+                    ).fetchall()
+                }
+                scheduled = [
+                    {
+                        "job": j.key,
+                        "label": j.label,
+                        "schedule": j.schedule,
+                        **by_key.get(j.key, {"status": "waiting"}),
+                        "scheduler_available": ready,
+                        "manual": manual_state(
+                            requests.get(j.key),
+                            now,
+                            ready=ready,
+                            authorized=bool(scope.user.get("is_portal_admin")),
+                            automatic_running=j.key in active,
+                        ),
+                    }
+                    for j in JOBS
+                ]
+            if schedule_only:
+                return serial({"scheduled": scheduled})
+
             coverage = db.execute(
                 "SELECT d.source_id,n.name AS restaurant,min(d.event_date) AS date_from,"
                 "max(d.event_date) AS date_to,count(*) AS days,max(d.observed_at) AS "
@@ -1043,53 +1098,12 @@ class Repository:
                 (list(scope.rms_ids),),
             ).fetchall()
             runs = []
-            scheduled = []
             if scope.unrestricted:
                 runs = db.execute(
                     "SELECT job,status,started_at,finished_at,error_code,counts->>'resource' "
                     "AS resource,counts->>'completed_through' AS completed_through FROM "
                     "chaika.sync_runs ORDER BY started_at DESC LIMIT 20"
                 ).fetchall()
-                if self.settings.sync_enabled:
-                    from app.scheduler import JOBS
-
-                    latest = db.execute(
-                        "SELECT DISTINCT ON (job) job,status,slot,started_at,finished_at,"
-                        "error_code,"
-                        "next_retry_at,attempts FROM chaika.scheduled_sync_runs "
-                        "ORDER BY job,slot DESC"
-                    ).fetchall()
-                    by_key = {r["job"]: r for r in latest}
-                    from app.manual_sync import available, manual_state
-                    from app.manual_sync import latest as manual_latest
-
-                    ready = available(db)
-                    requests = manual_latest(db)
-                    now = db.execute("SELECT clock_timestamp() AS now").fetchone()["now"]
-                    active = {
-                        row["job"]
-                        for row in db.execute(
-                            "SELECT DISTINCT job FROM chaika.scheduled_sync_runs "
-                            "WHERE status='running'"
-                        ).fetchall()
-                    }
-                    scheduled = [
-                        {
-                            "job": j.key,
-                            "label": j.label,
-                            "schedule": j.schedule,
-                            **by_key.get(j.key, {"status": "waiting"}),
-                            "scheduler_available": ready,
-                            "manual": manual_state(
-                                requests.get(j.key),
-                                now,
-                                ready=ready,
-                                authorized=bool(scope.user.get("is_portal_admin")),
-                                automatic_running=j.key in active,
-                            ),
-                        }
-                        for j in JOBS
-                    ]
             observations = (
                 db.execute(
                     "SELECT resource,max(observed_at) AS observed_at FROM "
