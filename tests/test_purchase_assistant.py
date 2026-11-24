@@ -358,13 +358,15 @@ def test_scope_filters_nulls_and_permission_change_between_tools():
     async def run():
         repo = Reports()
         scope = repo.scope(USER)
-        tools = DataTools(repo, scope, Context(product=Selection(**SELECTION)))
+        context = Context(product=Selection(**SELECTION), recent_period="month")
+        tools = DataTools(repo, scope, context)
         result = await tools.call("product_impact", json.dumps(SELECTION))
         assert result["totals"]["weekly_delta"] is None
         assert result["blockers"] == ["Нет продаж за 2 дня"]
         await tools.call("search_products", json.dumps({"query": "бедро", "sort": "percent_desc"}))
         assert repo.calls[0][1:3] == ("unlinked", True)
         assert repo.calls[0][-1]["recent_only"] is True
+        assert repo.calls[0][-1]["recent_period"] == "month"
         repo.active = False
         with pytest.raises(HTTPException) as error:
             await tools.call("product_impact", json.dumps(SELECTION))

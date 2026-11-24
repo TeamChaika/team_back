@@ -11,6 +11,7 @@ import pytest
 from fastapi import HTTPException
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from test_overview import seed_day
 from test_reference_sync import bundle as bundle
 from test_reference_sync import db as db
 
@@ -22,7 +23,7 @@ from app.purchase_impact_precompute import (
     source_revision,
 )
 from app.sync_references import register_sources
-from app.web.purchase_impact import calculate_impact, recent_period
+from app.web.purchase_impact import calculate_impact, published_sales_period, recent_period
 from app.web.purchase_impact_prepared import add_prepared_impacts, summarize_prepared
 from app.web.repository import Scope
 
@@ -240,7 +241,9 @@ def test_reader_is_scoped_and_never_queries_source_graphs_or_sales_rows(prepared
             return prepared_db.cursor(**kwargs)
 
         def execute(self, query, params=None):
-            assert "sales_report_rows" not in query and "chaika.assembly_chart" not in query
+            assert "sales_report_rows" not in query and "chaika.assembly_charts" not in query
+            if "chaika.assembly_chart_scopes" in query:
+                assert query.startswith("SELECT max(business_date)")
             statements.append((query, params))
             return prepared_db.execute(query, params)
 
@@ -370,15 +373,107 @@ def test_statement_timeout_retains_complete_previous_generation(prepared_db):
 
 
 @pytest.mark.parametrize("job", ["inventory", "products", "assembly_charts"])
-def test_revision_changes_on_successful_sync_and_local_day(prepared_db, job):
+def test_revision_changes_on_successful_sync(prepared_db, job):
     before = source_revision(prepared_db)
     prepared_db.execute(
         "INSERT INTO chaika.sync_runs (id,job,status,finished_at) VALUES (%s,%s,'succeeded',now())",
         (uuid4(), job),
     )
     assert source_revision(prepared_db) != before
-    today = datetime.fromisoformat(before["today"]).date()
-    assert source_revision(prepared_db, today=today + timedelta(days=1))["today"] != before["today"]
+
+
+def test_previous_window_survives_midnight_until_latest_day_is_final(prepared_db, monkeypatch):
+    monkeypatch.setattr("test_overview.register_sources", lambda *_: None)
+    start, yesterday = recent_period()
+    day = timedelta(days=1)
+    for offset in range(30):
+        seed_day(prepared_db, start - day + offset * day, [], kinds=("dishes",))
+    old = build_prepared(prepared_db, today=yesterday)
+    publish_prepared(prepared_db, old)
+    scope = Scope({"role": "owner"}, ({"id": DEPT},), None, (), ())
+    for intraday in [False, True]:
+        if intraday:
+            observed = datetime.combine(yesterday, datetime.min.time(), UTC)
+            seed_day(prepared_db, yesterday, [], kinds=("dishes",), observed=observed)
+        period = add_prepared_impacts(prepared_db, scope, {"rows": []})["impact_period"]
+        assert (period["start"], period["end"], period["target_end"]) == (
+            start - day,
+            yesterday - day,
+            yesterday,
+        )
+        assert period["coverage"]["complete"] and period["status"] == "ready"
+        assert source_revision(prepared_db) == old["revision"]
+    # Publish a final report set as synchronization does, then prepare/refresh.
+    next_set = uuid4()
+    prepared_db.execute(
+        "INSERT INTO chaika.sales_report_sets(id,source_id,business_date,observed_at,checks) "
+        "VALUES (%s,'primary',%s,now(),'[]'::jsonb)",
+        (next_set, yesterday),
+    )
+    prepared_db.execute(
+        "INSERT INTO chaika.sales_reports(id,set_id,kind,request,observed_at,raw,sha256,row_count) "
+        "VALUES (%s,%s,'dishes','{}',now(),''::bytea,encode(sha256(''::bytea),'hex'),0)",
+        (uuid4(), next_set),
+    )
+    prepared_db.execute(
+        "UPDATE chaika.sales_report_days SET current_set_id=%s "
+        "WHERE source_id='primary' AND business_date=%s",
+        (next_set, yesterday),
+    )
+    rollover = add_prepared_impacts(prepared_db, scope, {"rows": []})["impact_period"]
+    assert rollover["end"] == yesterday - day and rollover["status"] == "ready"
+    assert rollover["target_end"] == yesterday and rollover["coverage"]["complete"]
+    # Replacing even the first date of the older window invalidates it, though
+    # that date is already outside the incoming 30-day period.
+    with prepared_db.transaction(force_rollback=True):
+        replacement = uuid4()
+        prepared_db.execute(
+            "INSERT INTO chaika.sales_report_sets(id,source_id,business_date,observed_at,checks) "
+            "VALUES (%s,'primary',%s,now(),'[]'::jsonb)",
+            (replacement, start - day),
+        )
+        prepared_db.execute(
+            "UPDATE chaika.sales_report_days SET current_set_id=%s "
+            "WHERE source_id='primary' AND business_date=%s",
+            (replacement, start - day),
+        )
+        outdated = add_prepared_impacts(prepared_db, scope, {"rows": []})["impact_period"]
+        assert outdated["end"] == yesterday and outdated["status"] == "pending"
+    publish_prepared(prepared_db, build_prepared(prepared_db))
+    current = add_prepared_impacts(prepared_db, scope, {"rows": []})["impact_period"]
+    assert (current["start"], current["end"], current["target_end"]) == (
+        start,
+        yesterday,
+        yesterday,
+    )
+    assert current["status"] == "ready" and current["coverage"]["complete"]
+
+
+@pytest.mark.parametrize("problem", ["gap", "mismatch", "intraday"])
+def test_window_never_crosses_a_bad_day_and_requires_thirty_days(prepared_db, monkeypatch, problem):
+    monkeypatch.setattr("test_overview.register_sources", lambda *_: None)
+    start, end = recent_period()
+    day = timedelta(days=1)
+    for offset in range(31):
+        current = end - offset * day
+        observed, checks = None, []
+        if offset == 1:
+            if problem == "gap":
+                continue
+            if problem == "mismatch":
+                checks = [
+                    dict(
+                        report="dishes",
+                        exact_match=False,
+                        differences=[dict(department_id=str(DEPT))],
+                    )
+                ]
+            else:
+                observed = datetime.combine(current, datetime.min.time(), UTC)
+        seed_day(prepared_db, current, [], kinds=("dishes",), observed=observed, checks=checks)
+    assert published_sales_period(prepared_db) == (start, end, end)
+    seed_day(prepared_db, start - 2 * day, [], kinds=("dishes",))
+    assert published_sales_period(prepared_db) == (start - 2 * day, end - 2 * day, end)
 
 
 def test_revision_changes_when_existing_sales_day_is_republished(prepared_db):

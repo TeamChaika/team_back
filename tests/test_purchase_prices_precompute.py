@@ -58,6 +58,9 @@ def test_exact_parity_across_overlapping_scopes_units_linkage_and_recency(prepar
     receipt("2026-09-01", "2", "500", store=a)
     receipt("2026-09-01T00:00:00", "3", "1000", store=b)
     receipt("2026-09-01", "1", "700", unit=other_unit)
+    recent_boundary, just_outside = uuid4(), uuid4()
+    receipt("2026-08-13", product=recent_boundary)
+    receipt("2026-08-12T23:59:59", product=just_outside)
     receipt("2023-01-01", product=uuid4())
     future = uuid4()
     receipt("2026-09-12", product=future)
@@ -74,7 +77,10 @@ def test_exact_parity_across_overlapping_scopes_units_linkage_and_recency(prepar
         ]
         for kind, recent in product(("all", "linked", "unlinked"), (False, True))
     ]
+    options.append(dict(stores=(a,), recent_period="month"))
     expected = [read(prepared_db, **option) for option in options]
+    monthly_ids = {row["product_id"] for row in expected[-1]["rows"]}
+    assert recent_boundary in monthly_ids and just_outside not in monthly_ids
     publish(prepared_db)
     assert [read(prepared_db, **option) for option in options] == expected
     largest = prepared_db.execute(
@@ -85,7 +91,13 @@ def test_exact_parity_across_overlapping_scopes_units_linkage_and_recency(prepar
     assert largest == 7
     # Details still contain original documents, with an identical latest price.
     current = read(prepared_db, (a, b), kind="all")["rows"]
-    selected = next(row for row in current if row["unit_id"] == unit and not row["linked"])
+    (selected,) = [
+        row
+        for row in current
+        if row["unit_id"] == unit
+        and not row["linked"]
+        and row["current"]["date"] == "2026-09-01T00:00:00"
+    ]
     detail = read(prepared_db, (a, b), selection=(selected["product_id"], None, unit, False))
     assert detail["rows"][0]["current"]["price"] == selected["current"]["price"]
     assert len(detail["rows"][0]["current"]["lines"]) == 2

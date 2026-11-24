@@ -85,6 +85,7 @@ class FakeRepository:
         selection=None,
         *,
         recent_only=True,
+        recent_period=None,
         include_impact=False,
         top_increases=False,
     ):
@@ -96,6 +97,7 @@ class FakeRepository:
             "kind": kind,
             "exclude_household": exclude_household,
             "recent_only": recent_only,
+            "recent_period": recent_period,
             "include_impact": include_impact,
             "top_increases": top_increases,
         }
@@ -179,6 +181,7 @@ def test_latest_purchase_prices_require_scope_but_no_period(client):
         "kind": "unlinked",
         "exclude_household": True,
         "recent_only": True,
+        "recent_period": None,
         "include_impact": False,
         "top_increases": False,
     }
@@ -186,6 +189,8 @@ def test_latest_purchase_prices_require_scope_but_no_period(client):
     assert client.get(url + "?exclude_household=invalid").status_code == 422
     assert client.get(url + "?recent_only=false").json()["recent_only"] is False
     assert client.get(url + "?recent_only=invalid").status_code == 422
+    assert client.get(url + "?recent_period=month").json()["recent_period"] == "month"
+    assert client.get(url + "?recent_period=invalid").status_code == 422
     assert client.get(url + "?department_id=" + str(OTHER)).status_code == 403
     assert client.get(url + "?kind=arbitrary").status_code == 422
     assert client.get(url + "?include_impact=true").json()["include_impact"] is True

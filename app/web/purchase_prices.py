@@ -133,6 +133,13 @@ def empty_baseline():
     )
 
 
+def recent_start(today: date, period: str | None) -> date:
+    if period == "month":
+        last_month_end = today.replace(day=1) - timedelta(days=1)
+        return last_month_end.replace(day=min(today.day, last_month_end.day))
+    return today - timedelta(days=RECENT_DAYS - 1)
+
+
 def read_purchase_prices(
     db,
     scope,
@@ -142,6 +149,7 @@ def read_purchase_prices(
     selection=None,
     *,
     recent_only=True,
+    recent_period=None,
     as_of: date | None = None,
     top_increases=False,
 ):
@@ -152,7 +160,7 @@ def read_purchase_prices(
     Recency limits the list's latest receipts, never the comparison history.
     """
     today = as_of or datetime.now(ZONE).date()
-    recent_since = today - timedelta(days=RECENT_DAYS - 1)
+    recent_since = recent_start(today, recent_period)
     clauses = [ELIGIBLE, "(" + spec["guard"] + ")"]
     params = list(spec["params"])
     if kind != "all":
@@ -280,7 +288,7 @@ def read_purchase_prices(
         kind=kind,
         exclude_household=exclude_household,
         recent_only=recent_only and selection is None,
-        recent_days=RECENT_DAYS,
+        recent_days=(today - recent_since).days + 1,
         recent_since=recent_since.isoformat(),
         history_size=HISTORY_SIZE,
         comparison_method="weighted_previous_receipts",
