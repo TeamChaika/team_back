@@ -112,23 +112,32 @@ class Repository:
     def analytics_scope(self, scope, include_archived=False):
         from app.web.sync_policy import analytics_department_ids
 
-        ids = analytics_department_ids(scope, self.sync_policy(), include_archived)
-        return replace(scope, selected=tuple(UUID(value) for value in ids))
+        ids = tuple(
+            UUID(value)
+            for value in analytics_department_ids(scope, self.sync_policy(), include_archived)
+        )
+        if scope.warehouse_restricted and len(ids) != len(scope.ids):
+            return self.scope(scope.user["id"], ids)
+        return replace(scope, selected=ids)
 
-    def sales_sync_scope(self, scope, include_archived=True):
+    def implicit_report_scope(self, scope, *, sync_only, include_archived):
         if scope.selection_ids:
             raise HTTPException(422, "Выберите заведения вручную или по настройкам синхронизации.")
         policy = self.sync_policy()
         ids = tuple(
             venue
             for venue in scope.ids
-            if policy.permits([venue])
+            if (not sync_only or policy.permits([venue]))
             and (include_archived or str(venue) not in policy.archived_departments)
         )
         if not ids:
-            raise HTTPException(423, "Нет доступных заведений с включённой синхронизацией.")
+            if sync_only:
+                raise HTTPException(423, "Нет доступных заведений с включённой синхронизацией.")
+            raise HTTPException(
+                403, "Нет действующих доступных заведений. Включите «Показать архивные»."
+            )
         if len(ids) == len(scope.ids):
-            return scope
+            return replace(scope, selected=ids)
         # Rebuild store and RMS grants for exactly the selected departments.
         return self.scope(scope.user["id"], ids)
 

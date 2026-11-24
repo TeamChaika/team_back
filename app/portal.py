@@ -260,6 +260,18 @@ def create_portal(
 
     Access = Annotated[Scope, Depends(access)]
 
+    async def report_access(scope: Access, sync_only: bool = False, include_archived: bool = True):
+        if sync_only or (not include_archived and not scope.selection_ids):
+            return await run_in_threadpool(
+                repo.implicit_report_scope,
+                scope,
+                sync_only=sync_only,
+                include_archived=include_archived,
+            )
+        return scope
+
+    ReportAccess = Annotated[Scope, Depends(report_access)]
+
     async def portal_access(request: Request):
         started = perf_counter()
         user_id = await request.app.state.auth.user(request.cookies.get(ACCESS_COOKIE))
@@ -444,13 +456,11 @@ def create_portal(
     @app.get("/api/sales/{kind}")
     def sales(
         kind: str,
-        scope: Access,
+        scope: ReportAccess,
         start: date,
         end: date,
         dish_id: Annotated[str | None, Query(max_length=200)] = None,
         dish_name: Annotated[str | None, Query(max_length=500)] = None,
-        sync_only: bool = False,
-        include_archived: bool = True,
     ):
         check_period(start, end)
         if kind not in {"daily", "dishes", "payments", "discounts", "returns", "waiters", "hours"}:
@@ -459,8 +469,6 @@ def create_portal(
             kind != "dishes" or (dish_id is not None and dish_name is not None)
         ):
             raise HTTPException(422, "Фильтр блюда доступен только в отчёте по блюдам.")
-        if sync_only:
-            scope = repo.sales_sync_scope(scope, include_archived)
         if (
             live_sales
             and not scope.warehouse_restricted
@@ -520,8 +528,14 @@ def create_portal(
         granularity: Literal["day", "week", "month"] = "day",
         include_archived: bool = False,
         view: Literal["full", "trend"] = "full",
+        sync_only: bool = False,
     ):
-        scope = repo.analytics_scope(scope, include_archived)
+        if sync_only:
+            scope = repo.implicit_report_scope(
+                scope, sync_only=True, include_archived=include_archived
+            )
+        else:
+            scope = repo.analytics_scope(scope, include_archived)
         check_period(start, end)
         if start.toordinal() <= (end - start).days + 1:
             raise HTTPException(422, "Для выбранной даты невозможно определить предыдущий период.")
@@ -539,7 +553,7 @@ def create_portal(
 
     @app.get("/api/purchase-prices")
     def purchase_prices(
-        scope: Access,
+        scope: ReportAccess,
         kind: Literal["unlinked", "linked", "all"] = "unlinked",
         exclude_household: bool = True,
         recent_only: bool = True,
@@ -557,7 +571,7 @@ def create_portal(
 
     @app.get("/api/purchase-prices/history")
     def purchase_price_history(
-        scope: Access,
+        scope: ReportAccess,
         product_id: UUID,
         unit_id: UUID,
         linked: bool = False,

@@ -123,7 +123,7 @@ def test_sales_sync_only_filters_grants_and_preserves_normal_selections(permissi
     repo.sync_policy = lambda: SyncPolicy(1, frozenset([str(A), str(C)]), frozenset([str(A)]))
     endpoints = FakeRepository()
     endpoints.scope = repo.scope
-    endpoints.sales_sync_scope = repo.sales_sync_scope
+    endpoints.implicit_report_scope = repo.implicit_report_scope
     endpoints.sales = lambda scope, *args: {
         "ids": [str(i) for i in scope.ids],
         "stores": sorted(str(i) for i in scope.store_ids),
@@ -173,7 +173,59 @@ def test_sales_sync_only_resolves_more_than_100_granted_venues(permission_repo, 
     monkeypatch.setattr(db, "execute", large_network)
     enabled = departments[:125]
     repo.sync_policy = lambda: SyncPolicy(1, frozenset(map(str, enabled)))
-    assert repo.sales_sync_scope(repo.scope(USER)).ids == enabled
+    assert (
+        repo.implicit_report_scope(repo.scope(USER), sync_only=True, include_archived=True).ids
+        == enabled
+    )
+
+
+def test_overview_and_price_history_keep_the_same_permitted_scope(permission_repo):
+    repo, _ = permission_repo
+    repo.sync_policy = lambda: SyncPolicy(1, frozenset([str(A), str(C)]), frozenset([str(B)]))
+    endpoints = FakeRepository()
+    endpoints.scope = repo.scope
+    endpoints.implicit_report_scope = repo.implicit_report_scope
+    endpoints.sync_policy = repo.sync_policy
+
+    def echo_prices(scope, kind, exclude_household, selection=None, **kwargs):
+        report = {"ids": scope.ids, "stores": scope.store_ids}
+        return {"rows": [report]} if selection else report
+
+    endpoints.purchase_prices = echo_prices
+    endpoints.sales = lambda scope, *args: {"ids": scope.ids}
+    app = create_portal(
+        Settings(),
+        WebSettings(_env_file=None, anon_key="test"),
+        auth_transport=httpx.MockTransport(provider),
+        repository=endpoints,
+    )
+    with TestClient(app, base_url="http://127.0.0.1:8013") as client:
+        assert login(client).status_code == 200
+        overview = "/api/overview?start=2026-08-01&end=2026-08-01"
+        for view in ("full", "trend"):
+            assert client.get(
+                overview + f"&view={view}&sync_only=true&include_archived=true"
+            ).json()["ids"] == [str(A)]
+        assert client.get(overview + f"&department_id={A}&sync_only=true").status_code == 422
+        assert client.get(overview + "&include_archived=true").json()["ids"] == [str(A), str(B)]
+        prices = "/api/purchase-prices?view=top_increases"
+        history = f"/api/purchase-prices/history?product_id={A}&unit_id={B}"
+        for query in ("&sync_only=true", "&include_archived=false"):
+            for path in (prices, history):
+                result = client.get(path + query).json()
+                assert result["ids"] == [str(A)]
+                assert set(result["stores"]) == {str(SA), str(NESTED)}
+        assert client.get(prices).json()["ids"] == [str(A), str(B)]
+        sales = "/api/sales/daily?start=2026-08-01&end=2026-08-01"
+        assert client.get(sales + "&include_archived=false").json()["ids"] == [str(A)]
+        assert client.get(sales + f"&department_id={B}").json()["ids"] == [str(B)]
+        repo.sync_policy = lambda: SyncPolicy(2, frozenset([str(A), str(B)]))
+        endpoints.sync_policy = repo.sync_policy
+        selected = f"&department_id={A}&department_id={B}&include_archived=false"
+        for path in (overview, prices, history):
+            response = client.get(path + selected)
+            assert response.status_code == 200
+            assert response.json()["ids"] == [str(A), str(B)]
 
 
 def test_repeated_query_parameters_apply_group_and_validate_each_value(permission_repo):
