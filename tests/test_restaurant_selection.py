@@ -12,6 +12,7 @@ from app.core.config import Settings
 from app.portal import create_portal
 from app.web.repository import Repository
 from app.web.settings import WebSettings
+from app.web.sync_policy import SyncPolicy
 from tests.test_portal import USER, FakeRepository, login, provider
 
 A, B, C, CHILD = (UUID(int=i) for i in (10, 20, 30, 40))
@@ -115,6 +116,64 @@ def test_owner_filter_is_not_unrestricted_even_when_all_listed_are_selected(perm
     assert repo.scope(USER).unrestricted
     assert not repo.scope(USER, (A, B, C)).unrestricted
     assert set(repo.scope(USER, (A, B)).store_ids) == {SA, SB, NESTED}
+
+
+def test_sales_sync_only_filters_grants_and_preserves_normal_selections(permission_repo):
+    repo, _ = permission_repo
+    repo.sync_policy = lambda: SyncPolicy(1, frozenset([str(A), str(C)]), frozenset([str(A)]))
+    endpoints = FakeRepository()
+    endpoints.scope = repo.scope
+    endpoints.sales_sync_scope = repo.sales_sync_scope
+    endpoints.sales = lambda scope, *args: {
+        "ids": [str(i) for i in scope.ids],
+        "stores": sorted(str(i) for i in scope.store_ids),
+    }
+    app = create_portal(
+        Settings(),
+        WebSettings(_env_file=None, anon_key="test"),
+        auth_transport=httpx.MockTransport(provider),
+        repository=endpoints,
+    )
+    with TestClient(app, base_url="http://127.0.0.1:8013") as client:
+        assert login(client).status_code == 200
+        url = "/api/sales/daily?start=2026-08-01&end=2026-08-01"
+        assert client.get(url).json()["ids"] == [str(A), str(B)]
+        assert client.get(url + f"&department_id={B}").json()["ids"] == [str(B)]
+        assert client.get(url + "&sync_only=true").json() == {
+            "ids": [str(A)],
+            "stores": sorted([str(SA), str(NESTED)]),
+        }
+        assert client.get(url + "&sync_only=true&include_archived=false").status_code == 423
+        assert client.get(url + f"&sync_only=true&department_id={B}").status_code == 422
+
+
+def test_sales_sync_only_resolves_more_than_100_granted_venues(permission_repo, monkeypatch):
+    repo, db = permission_repo
+    departments = [UUID(int=n) for n in range(1000, 1151)]
+    execute = db.execute
+
+    def large_network(sql, params=None):
+        if "chaika.corporate_nodes" in sql:
+            return Rows(
+                [
+                    {
+                        "id": venue,
+                        "parent_id": None,
+                        "name": str(venue),
+                        "code": None,
+                        "type": "DEPARTMENT",
+                    }
+                    for venue in departments
+                ]
+            )
+        if "chaika.web_department_access" in sql:
+            return Rows([{"department_id": venue} for venue in departments])
+        return execute(sql, params)
+
+    monkeypatch.setattr(db, "execute", large_network)
+    enabled = departments[:125]
+    repo.sync_policy = lambda: SyncPolicy(1, frozenset(map(str, enabled)))
+    assert repo.sales_sync_scope(repo.scope(USER)).ids == enabled
 
 
 def test_repeated_query_parameters_apply_group_and_validate_each_value(permission_repo):

@@ -77,8 +77,19 @@ def test_indicators_archives_never_override_sync_policy():
         service.close()
 
 
-def test_metadata_marks_archives_without_removing_granted_departments():
+@pytest.mark.parametrize(
+    ("enabled", "flags"),
+    [
+        (None, [True, True]),
+        (frozenset([str(A), str(HIDDEN)]), [True, False]),
+        (frozenset(), [False, False]),
+    ],
+)
+def test_metadata_marks_sync_and_archive_only_on_granted_departments(enabled, flags):
     original = replace(scope(A, B), user={"role": "manager", "warehouse_scope_mode": "selected"})
-    metadata = repository().metadata(original)
+    repo = repository()
+    repo.sync_policy = lambda: SyncPolicy(7, enabled, frozenset([str(B)]))
+    metadata = repo.metadata(original)
     assert [item["id"] for item in metadata["departments"]] == [str(A), str(B)]
     assert [item["archived"] for item in metadata["departments"]] == [False, True]
+    assert [item["sync_enabled"] for item in metadata["departments"]] == flags

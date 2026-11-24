@@ -115,6 +115,23 @@ class Repository:
         ids = analytics_department_ids(scope, self.sync_policy(), include_archived)
         return replace(scope, selected=tuple(UUID(value) for value in ids))
 
+    def sales_sync_scope(self, scope, include_archived=True):
+        if scope.selection_ids:
+            raise HTTPException(422, "Выберите заведения вручную или по настройкам синхронизации.")
+        policy = self.sync_policy()
+        ids = tuple(
+            venue
+            for venue in scope.ids
+            if policy.permits([venue])
+            and (include_archived or str(venue) not in policy.archived_departments)
+        )
+        if not ids:
+            raise HTTPException(423, "Нет доступных заведений с включённой синхронизацией.")
+        if len(ids) == len(scope.ids):
+            return scope
+        # Rebuild store and RMS grants for exactly the selected departments.
+        return self.scope(scope.user["id"], ids)
+
     def indicator_filters(self, scope):
         with self.connection(repeatable=True) as db:
             return serial(read_filters(db, scope))
@@ -331,12 +348,18 @@ class Repository:
             )
 
     def metadata(self, scope):
-        archived = self.sync_policy().archived_departments if scope.departments else frozenset()
-        departments = tuple(
-            {**department, "archived": str(department["id"]) in archived}
-            for department in scope.departments
-        )
-        if not scope.departments or scope.warehouse_restricted:
+        departments = []
+        if scope.departments:
+            policy = self.sync_policy()
+            departments = [
+                {
+                    **department,
+                    "archived": str(department["id"]) in policy.archived_departments,
+                    "sync_enabled": policy.permits([department["id"]]),
+                }
+                for department in scope.departments
+            ]
+        if not departments or scope.warehouse_restricted:
             return serial(
                 {
                     "user": scope.user,

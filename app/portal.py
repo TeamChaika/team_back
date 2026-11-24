@@ -449,6 +449,8 @@ def create_portal(
         end: date,
         dish_id: Annotated[str | None, Query(max_length=200)] = None,
         dish_name: Annotated[str | None, Query(max_length=500)] = None,
+        sync_only: bool = False,
+        include_archived: bool = True,
     ):
         check_period(start, end)
         if kind not in {"daily", "dishes", "payments", "discounts", "returns", "waiters", "hours"}:
@@ -457,6 +459,8 @@ def create_portal(
             kind != "dishes" or (dish_id is not None and dish_name is not None)
         ):
             raise HTTPException(422, "Фильтр блюда доступен только в отчёте по блюдам.")
+        if sync_only:
+            scope = repo.sales_sync_scope(scope, include_archived)
         if (
             live_sales
             and not scope.warehouse_restricted
