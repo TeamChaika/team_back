@@ -91,7 +91,13 @@ def test_exact_parity_across_overlapping_scopes_units_linkage_and_recency(prepar
     assert largest == 7
     # Details still contain original documents, with an identical latest price.
     current = read(prepared_db, (a, b), kind="all")["rows"]
-    selected = next(row for row in current if row["unit_id"] == unit and not row["linked"])
+    (selected,) = [
+        row
+        for row in current
+        if row["unit_id"] == unit
+        and not row["linked"]
+        and row["current"]["date"] == "2026-09-01T00:00:00"
+    ]
     detail = read(prepared_db, (a, b), selection=(selected["product_id"], None, unit, False))
     assert detail["rows"][0]["current"]["price"] == selected["current"]["price"]
     assert len(detail["rows"][0]["current"]["lines"]) == 2

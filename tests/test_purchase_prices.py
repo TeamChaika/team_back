@@ -263,6 +263,7 @@ def test_network_combines_warehouses_before_weighting_and_preserves_access(data)
     first = receipt("2026-09-01", "2", "240", store=a)
     second = receipt("2026-09-01", "8", "1280", store=b)
     receipt("2026-09-12", "100", "90000", store=hidden)
+
     def read_network(**kw):
         return read(allowed=[a, b], **kw)
 
