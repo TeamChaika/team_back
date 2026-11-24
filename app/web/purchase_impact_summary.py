@@ -4,7 +4,12 @@ from collections import defaultdict
 from datetime import datetime
 
 from app.web.coverage import ZONE
-from app.web.purchase_impact import calculate_impact, load_graphs, recent_period, sales_coverage
+from app.web.purchase_impact import (
+    calculate_impact,
+    load_graphs,
+    published_sales_period,
+    sales_coverage,
+)
 
 
 def ingredient_graph(reverse, target):
@@ -74,10 +79,10 @@ def add_weekly_impacts(db, scope, report):
 
     require_department_report(scope)
     """Enrich authorized price rows without per-product database or iiko requests."""
-    start, end = recent_period()
+    start, end, target_end = published_sales_period(db)
     prices = report["rows"]
     if not prices:
-        report["impact_period"] = dict(start=start, end=end, recipe_day=None)
+        report["impact_period"] = dict(start=start, end=end, target_end=target_end, recipe_day=None)
         return report
     targets = {p["product_id"] for p in prices}
     recipe_day = db.execute(
@@ -129,6 +134,7 @@ def add_weekly_impacts(db, scope, report):
     report["impact_period"] = dict(
         start=start,
         end=end,
+        target_end=target_end,
         recipe_day=recipe_day,
         coverage=sales_coverage(coverage, start, end, departments),
     )

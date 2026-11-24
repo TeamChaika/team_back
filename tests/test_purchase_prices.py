@@ -16,6 +16,21 @@ from app.web.purchase_prices import HOUSEHOLD_GROUP_ID, read_purchase_prices
 from app.web.repository import Repository, Scope
 
 
+@pytest.mark.parametrize(
+    ("today", "since"),
+    [
+        (date(2026, 11, 25), date(2026, 10, 25)),
+        (date(2026, 3, 31), date(2026, 2, 28)),
+        (date(2024, 3, 31), date(2024, 2, 29)),
+        (date(2026, 1, 1), date(2025, 12, 1)),
+    ],
+)
+def test_calendar_month_cutoff(today, since):
+    from app.web.purchase_prices import recent_start
+
+    assert recent_start(today, "month") == since
+
+
 @pytest.fixture
 def data(db, inventory):
     publish_inventory(db, inventory[2], date(2026, 9, 9))
@@ -69,6 +84,8 @@ def data(db, inventory):
         exclude_household=True,
         selection=None,
         recent_only=False,
+        recent_period=None,
+        as_of=date(2026, 9, 13),
         top_increases=False,
     ):
         scope = Scope({"role": "manager"}, (), None, tuple(allowed or [store]), ())
@@ -84,7 +101,8 @@ def data(db, inventory):
                 exclude_household,
                 selection,
                 recent_only=recent_only,
-                as_of=date(2026, 9, 13),
+                recent_period=recent_period,
+                as_of=as_of,
                 top_increases=top_increases,
             )
         finally:
@@ -277,6 +295,27 @@ def test_recency_includes_sixty_calendar_days_and_excludes_future_receipts(data)
     }
     assert recent["stats"]["no_previous"] == 2
     assert len(read(recent_only=False)["rows"]) == 4
+
+
+def test_month_filters_latest_receipts_and_keeps_reference_prices(data):
+    receipt, read, *_ = data
+    boundary, old = uuid4(), uuid4()
+    for day in range(1, 7):
+        receipt(f"2026-09-{day:02d}", value="100", product=boundary)
+    receipt("2026-10-25", value="120", product=boundary)
+    receipt("2026-10-24T23:59:59", product=old)
+    options = dict(recent_period="month", as_of=date(2026, 11, 25))
+    report = read(recent_only=True, **options)
+    assert report["recent_since"] == "2026-10-25"
+    assert report["recent_days"] == 32
+    assert report["stats"]["observations"] == 1
+    (row,) = report["rows"]
+    assert row["product_id"] == boundary
+    assert row["previous"]["count"] == 6 and row["percent"] == 20
+    assert {row["product_id"] for row in read(recent_only=False, **options)["rows"]} == {
+        boundary,
+        old,
+    }
 
 
 def test_same_time_groups_preserve_duplicate_lines_and_all_documents(data):

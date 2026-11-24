@@ -557,6 +557,7 @@ def create_portal(
         kind: Literal["unlinked", "linked", "all"] = "unlinked",
         exclude_household: bool = True,
         recent_only: bool = True,
+        recent_period: Literal["month"] | None = None,
         include_impact: bool = False,
         view: Literal["full", "top_increases"] = "full",
     ):
@@ -565,6 +566,7 @@ def create_portal(
             kind,
             exclude_household,
             recent_only=recent_only,
+            recent_period=recent_period,
             include_impact=include_impact,
             top_increases=view == "top_increases",
         )

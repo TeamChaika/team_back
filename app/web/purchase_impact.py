@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from app.web.coverage import ZONE, partial_days
 from app.web.purchase_impact_scope import forecast_departments
 from app.web.purchase_prices import read_purchase_prices
+from app.web.sync_policy import read_policy
 
 ZERO = Decimal(0)
 
@@ -17,6 +18,42 @@ def recent_period(*, today=None):
     """Thirty completed local days, independent of calendar months and page filters."""
     today = today or datetime.now(ZONE).date()
     return today - timedelta(days=30), today - timedelta(days=1)
+
+
+def published_sales_period(db, *, today=None):
+    """Find the latest contiguous complete window for the synchronized network."""
+    target_start, target_end = recent_period(today=today)
+    departments = read_policy(db).departments
+    day = timedelta(days=1)
+    before = target_end + day
+    last_day = end = None
+    while True:
+        # Read publication metadata only. Normally the first page has the entire
+        # window; keyset pagination also handles extended outages without a date cap.
+        batch = db.execute(
+            "SELECT d.business_date,r.observed_at,s.checks FROM chaika.sales_report_days d "
+            "JOIN chaika.sales_report_sets s ON s.id=d.current_set_id "
+            "JOIN chaika.sales_reports r ON r.set_id=s.id AND r.kind='dishes' "
+            "WHERE d.source_id='primary' AND d.business_date<%s "
+            "ORDER BY d.business_date DESC LIMIT 64",
+            (before,),
+        ).fetchall()
+        for row in batch:
+            current = row["business_date"]
+            if last_day != current + day:
+                end = None
+            last_day = current
+            if partial_days([row], departments) or dishes_mismatch(row, departments):
+                end = None
+                continue
+            if end is None:
+                end = current
+            if end - current == target_end - target_start:
+                return current, end, target_end
+        if len(batch) < 64:
+            # Keep nominal dates so request-scoped coverage explains the failure.
+            return target_start, target_end, target_end
+        before = last_day
 
 
 def applies(spec, department):
@@ -171,6 +208,20 @@ def load_graphs(db, targets, day, *, limit=20000, compact=False):
     return rows
 
 
+def dishes_mismatch(row, visible):
+    for check in row["checks"]:
+        if check.get("report") != "dishes" or check["exact_match"]:
+            continue
+        differences = check.get("differences", [])
+        if (
+            visible is None
+            or not differences
+            or any(str(d["department_id"]) in visible for d in differences)
+        ):
+            return True
+    return False
+
+
 def sales_coverage(coverage, start, end, departments):
     visible = {str(d) for d in departments}
     days = (end - start).days + 1
@@ -178,21 +229,14 @@ def sales_coverage(coverage, start, end, departments):
     missing = [
         start + timedelta(days=i) for i in range(days) if start + timedelta(days=i) not in loaded
     ]
-    mismatches = []
-    for row in coverage:
-        for check in row["checks"]:
-            if check.get("report") != "dishes" or check["exact_match"]:
-                continue
-            differences = check.get("differences", [])
-            if not differences or any(str(d["department_id"]) in visible for d in differences):
-                mismatches.append(row["business_date"])
+    mismatches = {row["business_date"] for row in coverage if dishes_mismatch(row, visible)}
     partial = partial_days(coverage, departments)
     return dict(
         loaded_days=len(loaded),
         days=days,
         missing_dates=missing,
         partial_dates=[r["date"] for r in partial],
-        mismatch_dates=sorted(set(mismatches)),
+        mismatch_dates=sorted(mismatches),
         complete=not (missing or partial or mismatches),
     )
 
@@ -339,10 +383,10 @@ def analysis_scope(scope, price_department, selling_ids, selected=None, all_depa
 def read_purchase_impact(
     db, scope, spec, selection, analysis_department_id=None, all_departments=False
 ):
+    from app.web.purchase_impact_prepared import prepared_window
     from app.web.warehouse_analytics import require_department_report
 
     require_department_report(scope)
-    start, end = recent_period()
     product_id, store_id, _, _ = selection
     if store_id is not None and store_id not in scope.store_ids:
         raise HTTPException(404, "Товар или склад недоступен.")
@@ -355,6 +399,8 @@ def read_purchase_impact(
     department = price["department_id"]
     if store_id is not None and department not in scope.ids:
         raise HTTPException(422, "Склад не сопоставлен с доступным заведением.")
+    _, period = prepared_window(db, scope)
+    start, end, recipe_day = period["start"], period["end"], period["recipe_day"]
     product = db.execute(
         "SELECT p.id,p.main_unit_id,u.name AS unit FROM chaika.products p "
         "LEFT JOIN chaika.measure_units u ON u.source_id=p.source_id AND u.id=p.main_unit_id "
@@ -363,11 +409,6 @@ def read_purchase_impact(
     ).fetchone()
     if not product:
         raise HTTPException(422, "Товар отсутствует в номенклатуре.")
-    recipe_day = db.execute(
-        "SELECT max(business_date) AS day FROM chaika.assembly_chart_scopes "
-        "WHERE source_id='primary' AND business_date<=%s",
-        (datetime.now(ZONE).date(),),
-    ).fetchone()["day"]
     graph = load_graph(db, product_id, recipe_day) if recipe_day else []
     selling_ids = [
         r["department_id"]
@@ -423,6 +464,7 @@ def read_purchase_impact(
     report = calculate_impact(
         graph, sales, price, product, coverage, start, end, recipe_day, departments=analysis_ids
     )
+    report["target_end"] = period["target_end"]
     report["analysis_departments"] = [dict(id=d, name=labels[d]) for d in analysis_ids]
     report["available_departments"] = [
         dict(id=d["id"], name=d["name"])

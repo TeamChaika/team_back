@@ -3,7 +3,8 @@
 from datetime import date, datetime
 from decimal import Decimal, localcontext
 
-from app.purchase_impact_precompute import source_revision
+from app.purchase_impact_precompute import sales_revision, source_revision
+from app.web.coverage import ZONE
 from app.web.purchase_impact import recent_period, sales_coverage
 from app.web.purchase_impact_scope import forecast_departments
 from app.web.warehouse_analytics import require_department_report
@@ -20,7 +21,7 @@ def restored_coverage(rows):
     ]
 
 
-def summarize_prepared(price, fact, coverage, start, end, recipe_day, departments):
+def summarize_prepared(price, fact, coverage, start, end, recipe_day, departments, *, quality=None):
     if fact is None:
         return dict(
             weekly_delta=None,
@@ -35,7 +36,8 @@ def summarize_prepared(price, fact, coverage, start, end, recipe_day, department
             excluded_positions=0,
             reason="Товар отсутствует в номенклатуре.",
         )
-    quality = sales_coverage(coverage, start, end, departments)
+    if quality is None:
+        quality = sales_coverage(coverage, start, end, departments)
     blockers = []
     if fact["main_unit_id"] != price["unit_id"]:
         blockers.append("Единица в накладной отличается от основной единицы товара")
@@ -73,37 +75,66 @@ def summarize_prepared(price, fact, coverage, start, end, recipe_day, department
     )
 
 
-def add_prepared_impacts(db, scope, report):
-    require_department_report(scope)
-    start, end = recent_period()
-    current = db.execute(
-        "SELECT * FROM chaika.purchase_impact_prepared WHERE source_id='primary'"
-    ).fetchone()
-    valid = (
-        current is not None
-        and current["period_start"] == start
-        and current["period_end"] == end
-        and current["revision"] == source_revision(db)
-    )
-    if not valid:
-        for price in report["rows"]:
-            price["impact"] = summarize_prepared(price, None, [], start, end, None, [])
-        report["impact_period"] = dict(
-            start=start,
-            end=end,
-            recipe_day=None,
-            status="pending",
-            prepared_at=current["prepared_at"] if current else None,
-        )
-        return report
-    targets = list({price["product_id"] for price in report["rows"]})
+def prepared_departments(db, scope, current):
     allowed = {str(d) for d in scope.ids}
     candidates = (
         list(scope.selection_ids)
         if scope.selection_ids
         else sorted(allowed.intersection(current["selling_department_ids"]))
     )
-    departments = forecast_departments(db, candidates, explicit=bool(scope.selection_ids))
+    return candidates, forecast_departments(db, candidates, explicit=bool(scope.selection_ids))
+
+
+def prepared_window(db, scope):
+    """Use an older complete generation during rollover only if all its inputs still match."""
+    today = datetime.now(ZONE).date()
+    _, target_end = recent_period(today=today)
+    revision = source_revision(db, today=today)
+    start, end = date.fromisoformat(revision["start"]), date.fromisoformat(revision["end"])
+    current = db.execute(
+        "SELECT * FROM chaika.purchase_impact_prepared WHERE source_id='primary'"
+    ).fetchone()
+    period = dict(
+        start=start,
+        end=end,
+        target_end=target_end,
+        recipe_day=date.fromisoformat(revision["recipe_day"]) if revision["recipe_day"] else None,
+        status="pending",
+        prepared_at=current["prepared_at"] if current else None,
+    )
+    if current is None:
+        return None, period
+    old_start, old_end = current["period_start"], current["period_end"]
+    if (old_start, old_end) == (start, end) and current["revision"] == revision:
+        return current, dict(period, status="ready")
+    if old_end < end and old_end - old_start == end - start:
+        previous_inputs = dict(
+            revision,
+            start=old_start.isoformat(),
+            end=old_end.isoformat(),
+            sales=sales_revision(db, old_start, old_end),
+        )
+        if previous_inputs == current["revision"]:
+            _, departments = prepared_departments(db, scope, current)
+            quality = sales_coverage(
+                restored_coverage(current["coverage"]), old_start, old_end, departments
+            )
+            if quality["complete"]:
+                return current, dict(period, status="ready", start=old_start, end=old_end)
+    return None, period
+
+
+def add_prepared_impacts(db, scope, report):
+    require_department_report(scope)
+    current, period = prepared_window(db, scope)
+    report["impact_period"] = period
+    start, end = period["start"], period["end"]
+    if current is None:
+        for price in report["rows"]:
+            price["impact"] = summarize_prepared(price, None, [], start, end, None, [])
+        return report
+    targets = list({price["product_id"] for price in report["rows"]})
+    candidates, departments = prepared_departments(db, scope, current)
     # Filter JSON before it leaves PostgreSQL; facts of other venues cannot be
     # accidentally returned by a later response refactor.
     facts = {
@@ -114,10 +145,11 @@ def add_prepared_impacts(db, scope, report):
             "WHERE key=ANY(%s::text[])), '{}'::jsonb) AS departments "
             "FROM chaika.purchase_impact_prepared_products p "
             "WHERE generation_id=%s AND product_id=ANY(%s::uuid[])",
-            (sorted(allowed), current["id"], targets),
+            (sorted(str(d) for d in scope.ids), current["id"], targets),
         ).fetchall()
     }
     coverage = restored_coverage(current["coverage"])
+    quality = sales_coverage(coverage, start, end, departments)
     for price in report["rows"]:
         price["impact"] = summarize_prepared(
             price,
@@ -127,14 +159,12 @@ def add_prepared_impacts(db, scope, report):
             end,
             current["recipe_day"],
             departments,
+            quality=quality,
         )
-    report["impact_period"] = dict(
-        start=start,
-        end=end,
+    period.update(
         recipe_day=current["recipe_day"],
-        coverage=sales_coverage(coverage, start, end, departments),
+        coverage=quality,
         status="ready" if all(target in facts for target in targets) else "pending",
-        prepared_at=current["prepared_at"],
         analysis_department_ids=departments,
         excluded_department_ids=[value for value in candidates if value not in departments],
     )

@@ -58,6 +58,9 @@ def test_exact_parity_across_overlapping_scopes_units_linkage_and_recency(prepar
     receipt("2026-09-01", "2", "500", store=a)
     receipt("2026-09-01T00:00:00", "3", "1000", store=b)
     receipt("2026-09-01", "1", "700", unit=other_unit)
+    recent_boundary, just_outside = uuid4(), uuid4()
+    receipt("2026-08-13", product=recent_boundary)
+    receipt("2026-08-12T23:59:59", product=just_outside)
     receipt("2023-01-01", product=uuid4())
     future = uuid4()
     receipt("2026-09-12", product=future)
@@ -74,7 +77,10 @@ def test_exact_parity_across_overlapping_scopes_units_linkage_and_recency(prepar
         ]
         for kind, recent in product(("all", "linked", "unlinked"), (False, True))
     ]
+    options.append(dict(stores=(a,), recent_period="month"))
     expected = [read(prepared_db, **option) for option in options]
+    monthly_ids = {row["product_id"] for row in expected[-1]["rows"]}
+    assert recent_boundary in monthly_ids and just_outside not in monthly_ids
     publish(prepared_db)
     assert [read(prepared_db, **option) for option in options] == expected
     largest = prepared_db.execute(

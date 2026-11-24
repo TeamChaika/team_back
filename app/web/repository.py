@@ -598,6 +598,7 @@ class Repository:
         selection=None,
         *,
         recent_only=True,
+        recent_period=None,
         include_impact=False,
         top_increases=False,
     ):
@@ -610,6 +611,7 @@ class Repository:
                 exclude_household,
                 selection,
                 recent_only=recent_only,
+                recent_period=recent_period,
                 top_increases=top_increases,
             )
             if selection is None and include_impact:

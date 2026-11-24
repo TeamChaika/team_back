@@ -16,6 +16,7 @@ from test_purchase_prices import data as data
 from test_reference_sync import bundle as bundle
 from test_reference_sync import db as db
 
+from app.purchase_impact_precompute import build_prepared, publish_prepared
 from app.web.coverage import partial_days
 from app.web.purchase_impact import (
     analysis_scope,
@@ -26,6 +27,7 @@ from app.web.purchase_impact import (
     recent_period,
     recipe_paths,
 )
+from app.web.purchase_impact_prepared import add_prepared_impacts
 from app.web.purchase_impact_summary import add_weekly_impacts, summarize_prices
 from app.web.repository import Repository, Scope
 
@@ -452,8 +454,9 @@ def test_real_reader_scopes_prices_and_sales(db, data):
     assert exc.value.status_code == 404
 
 
+@pytest.mark.parametrize("lag_days", [0, 1])
 def test_central_warehouse_reader_finds_restaurant_dishes_without_leaking_sales(
-    db, data, monkeypatch
+    db, data, monkeypatch, lag_days
 ):
     receipt, read, store, unit, _ = data
     receipt("2026-08-01", "1", "100")
@@ -487,7 +490,9 @@ def test_central_warehouse_reader_finds_restaurant_dishes_without_leaking_sales(
         (dish, Jsonb(edge(dish, product, ".2")["chart_details"])),
     )
     db.execute("UPDATE chaika.assembly_chart_items SET product_id=%s,amount_in=.2", (product,))
-    start, end = recent_period()
+    start, target_end = recent_period()
+    start -= timedelta(days=lag_days)
+    end = target_end - timedelta(days=lag_days)
     # The inventory fixture already registered this source with its original URL.
     monkeypatch.setattr("test_overview.register_sources", lambda *_: None)
     for i in range(30):
@@ -520,7 +525,7 @@ def test_central_warehouse_reader_finds_restaurant_dishes_without_leaking_sales(
     spec = repo.resource_query(scope, "invoices")
     result = read_purchase_impact(db, scope, spec, (product, store, unit, False))
     assert result["price_department_has_sales"] is False
-    assert result["start"] == start and result["end"] == end
+    assert (result["start"], result["end"], result["target_end"]) == (start, end, target_end)
     assert len(result["rows"]) == 2 and result["sold_dishes"] == 2
     assert result["totals"]["quantity"] == 900 and result["totals"]["weekly_delta"] == 840
     assert {r["department_id"] for r in result["rows"]} == {a, b}
@@ -556,6 +561,27 @@ def test_central_warehouse_reader_finds_restaurant_dishes_without_leaking_sales(
         db, replace(network_scope, selected=b), {"rows": [deepcopy(network["price"])]}
     )
     assert selected["rows"][0]["impact"]["weekly_delta"] == 560
+    if lag_days:
+        publish_prepared(db, build_prepared(db))
+        seed_day(db, target_end, [])  # Newly closed day with zero sales.
+        for updated, expected_end, expected_delta in (
+            (False, end, 840),
+            (True, target_end, 812),
+        ):
+            if updated:
+                publish_prepared(db, build_prepared(db))
+            visible = add_prepared_impacts(
+                db, network_scope, {"rows": [deepcopy(network["price"])]}
+            )
+            detail = read_purchase_impact(
+                db,
+                network_scope,
+                repo.resource_query(network_scope, "invoices"),
+                (product, None, unit, False),
+            )
+            assert visible["impact_period"]["end"] == detail["end"] == expected_end
+            assert visible["rows"][0]["impact"]["weekly_delta"] == expected_delta
+            assert detail["totals"]["weekly_delta"] == expected_delta
     with pytest.raises(HTTPException) as exc:
         read_purchase_impact(
             db, scope, spec, (product, store, unit, False), analysis_department_id=hidden

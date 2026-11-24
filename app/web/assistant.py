@@ -64,6 +64,7 @@ class Context(BaseModel):
     kind: Literal["all", "unlinked", "linked"] = "unlinked"
     exclude_household: bool = True
     recent_only: bool = True
+    recent_period: Literal["month"] | None = None
 
 
 class Message(BaseModel):
@@ -214,6 +215,7 @@ class DataTools:
             self.context.kind,
             self.context.exclude_household,
             recent_only=self.context.recent_only,
+            recent_period=self.context.recent_period,
             include_impact=weekly,
         )
         words = args.query.casefold().split()

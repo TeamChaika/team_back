@@ -3,7 +3,7 @@
 import argparse
 import json
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import uuid4
 
@@ -13,9 +13,9 @@ from psycopg.types.json import Jsonb
 
 from app.core.config import Settings
 from app.web.coverage import ZONE
-from app.web.purchase_impact import calculate_impact, load_graphs, recent_period
+from app.web.purchase_impact import calculate_impact, load_graphs, published_sales_period
 
-ALGORITHM_VERSION = 1
+ALGORITHM_VERSION = 2
 LOCK_ID = 7623011071800
 
 
@@ -43,22 +43,41 @@ def json_value(value):
     return json.loads(json.dumps(value, default=str))
 
 
+def sales_revision(db, start, end):
+    return json_value(
+        db.execute(
+            "SELECT business_date,current_set_id FROM chaika.sales_report_days "
+            "WHERE source_id='primary' AND business_date BETWEEN %s AND %s ORDER BY business_date",
+            (start, end),
+        ).fetchall()
+    )
+
+
 def source_revision(db, *, today=None):
     """Small publication metadata only; no invoice, recipe or sales-row scans."""
     today = today or datetime.now(ZONE).date()
-    start, end = recent_period(today=today)
+    start, end, _ = published_sales_period(db, today=today)
+    recipe_day = db.execute(
+        "SELECT max(business_date) AS day FROM chaika.assembly_chart_scopes "
+        "WHERE source_id='primary' AND business_date<=%s",
+        (today,),
+    ).fetchone()["day"]
     runs = db.execute(
         "SELECT job,count(*) AS count,max(finished_at) AS finished_at "
         "FROM chaika.sync_runs WHERE status='succeeded' "
         "AND job IN ('inventory','products','assembly_charts','references','dictionaries') "
         "GROUP BY job ORDER BY job"
     ).fetchall()
-    days = db.execute(
-        "SELECT business_date,current_set_id FROM chaika.sales_report_days "
-        "WHERE source_id='primary' AND business_date BETWEEN %s AND %s ORDER BY business_date",
-        (start, end),
-    ).fetchall()
-    return json_value(dict(version=ALGORITHM_VERSION, today=today, runs=runs, sales=days))
+    return json_value(
+        dict(
+            version=ALGORITHM_VERSION,
+            start=start,
+            end=end,
+            recipe_day=recipe_day,
+            runs=runs,
+            sales=sales_revision(db, start, end),
+        )
+    )
 
 
 def prepare_product_facts(
@@ -113,12 +132,13 @@ def prepare_product_facts(
     return result
 
 
-def build_prepared(db, *, today=None, stop=None):
+def build_prepared(db, *, today=None, stop=None, revision=None):
     """Read a coherent source snapshot; the caller supplies REPEATABLE READ."""
-    today = today or datetime.now(ZONE).date()
     check_stop(stop)
-    start, end = recent_period(today=today)
-    revision = source_revision(db, today=today)
+    if revision is None:
+        revision = source_revision(db, today=today)
+    start, end = date.fromisoformat(revision["start"]), date.fromisoformat(revision["end"])
+    recipe_day = date.fromisoformat(revision["recipe_day"]) if revision["recipe_day"] else None
     targets = [
         r["product_id"]
         for r in db.execute(
@@ -126,11 +146,6 @@ def build_prepared(db, *, today=None, stop=None):
             "WHERE source_id='primary' AND present_in_latest AND product_id IS NOT NULL"
         ).fetchall()
     ]
-    recipe_day = db.execute(
-        "SELECT max(business_date) AS day FROM chaika.assembly_chart_scopes "
-        "WHERE source_id='primary' AND business_date<=%s",
-        (today,),
-    ).fetchone()["day"]
     products = {
         row["id"]: row
         for row in db.execute(
@@ -253,7 +268,7 @@ def ensure_prepared(settings, stop=None):
                     generation_id=str(current["id"]),
                     prepared_at=current["prepared_at"],
                 )
-            prepared = build_prepared(db, stop=stop)
+            prepared = build_prepared(db, stop=stop, revision=revision)
             check_stop(stop)
             publish_prepared(db, prepared)
             return dict(
