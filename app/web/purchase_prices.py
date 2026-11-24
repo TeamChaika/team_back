@@ -3,6 +3,8 @@
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
+from heapq import nlargest
+from operator import itemgetter
 from uuid import UUID
 
 from app.web.coverage import ZONE
@@ -13,6 +15,7 @@ from app.web.purchase_prices_prepared import prepared_receipts_query
 HOUSEHOLD_GROUP_ID = UUID("caf4e221-3d55-400e-b932-961ba139542d")
 HISTORY_SIZE = 6
 RECENT_DAYS = 60
+TOP_INCREASES = 5
 
 
 def household_product_ids(db):
@@ -140,6 +143,7 @@ def read_purchase_prices(
     *,
     recent_only=True,
     as_of: date | None = None,
+    top_increases=False,
 ):
     """Latest price per product/unit/link across all accessible warehouses.
 
@@ -259,10 +263,19 @@ def read_purchase_prices(
                 item = change(key(row), now, before, stats)
                 if item:
                     changes.append(item)
-    enrich(db, scope, changes)
+    if top_increases:
+        changes = [r for r in changes if r["percent"] is not None and r["percent"] > 0]
+        if len(changes) > TOP_INCREASES:
+            # Product names break ties in the full list. Keep every candidate tied at the cutoff.
+            cutoff = nlargest(TOP_INCREASES, (r["percent"] for r in changes))[-1]
+            changes = [r for r in changes if r["percent"] >= cutoff]
+    if changes:
+        enrich(db, scope, changes)
     changes.sort(
         key=lambda r: (r["current"]["date"], r["product"], str(r["store_id"])), reverse=True
     )
+    if top_increases:
+        changes = nlargest(TOP_INCREASES, changes, key=itemgetter("percent"))
     return dict(
         kind=kind,
         exclude_household=exclude_household,

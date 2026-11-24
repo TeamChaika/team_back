@@ -69,6 +69,7 @@ def data(db, inventory):
         exclude_household=True,
         selection=None,
         recent_only=False,
+        top_increases=False,
     ):
         scope = Scope({"role": "manager"}, (), None, tuple(allowed or [store]), ())
         repo = object.__new__(Repository)
@@ -84,6 +85,7 @@ def data(db, inventory):
                 selection,
                 recent_only=recent_only,
                 as_of=date(2026, 9, 13),
+                top_increases=top_increases,
             )
         finally:
             db.row_factory = original
@@ -95,6 +97,52 @@ def detail(read, row):
     return read(selection=(row["product_id"], row["store_id"], row["unit_id"], row["linked"]))[
         "rows"
     ][0]
+
+
+def test_top_increases_preserve_full_list_ties_and_access(data, monkeypatch):
+    from app.web import purchase_prices
+
+    receipt, read, _, _, hidden_store = data
+    assert read(top_increases=True)["rows"] == []
+    for index, value in enumerate((105, 110, 120, 120, 120, 130, 140, 150, 100, 90)):
+        product = uuid4()
+        receipt("2026-08-01", value="100", product=product)
+        latest = "2026-09-03" if value == 120 else f"2026-09-{index + 1:02}"
+        receipt(latest, value=str(value), product=product)
+    receipt("2026-09-01", product=uuid4())  # No baseline.
+    hidden = uuid4()
+    receipt("2026-08-01", value="1", product=hidden, store=hidden_store)
+    receipt("2026-09-12", value="999", product=hidden, store=hidden_store)
+
+    full = read()
+    expected = sorted(
+        (r for r in full["rows"] if r["percent"] is not None and r["percent"] > 0),
+        key=lambda r: r["percent"],
+        reverse=True,
+    )[:5]
+    enriched = []
+    enrich = purchase_prices.enrich
+
+    def record_enrichment(db, scope, rows):
+        enriched.extend(rows)
+        return enrich(db, scope, rows)
+
+    monkeypatch.setattr(purchase_prices, "enrich", record_enrichment)
+    compact = read(top_increases=True)
+    assert compact == {**full, "rows": expected}
+    assert [r["percent"] for r in compact["rows"]] == [50, 40, 30, 20, 20]
+    assert hidden not in {r["product_id"] for r in compact["rows"]}
+    assert len(enriched) == 6  # Includes all three products tied across the five-row cutoff.
+
+
+def test_top_increases_do_not_fill_empty_places_with_zero_or_negative_changes(data):
+    receipt, read, *_ = data
+    for latest in ("110", "100", "90"):
+        product = uuid4()
+        receipt("2026-09-01", value="100", product=product)
+        receipt("2026-09-02", value=latest, product=product)
+    receipt("2026-09-01", product=uuid4())
+    assert [r["percent"] for r in read(top_increases=True)["rows"]] == [10]
 
 
 def test_latest_receipt_only_with_weighted_six_prior_receipts_and_sources(data):

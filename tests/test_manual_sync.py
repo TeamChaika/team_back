@@ -209,6 +209,9 @@ def test_public_endpoint_requires_admin_section_and_csrf():
             self.calls.append(job)
             return {"state": "pending", "job": job, "request_id": str(request_id)}
 
+        def status(self, scope, *, schedule_only=False):
+            return {"scheduled": []} if schedule_only else {"events": [], "scheduled": []}
+
     repo = Repo()
     app = create_portal(
         Settings(_env_file=None),
@@ -220,13 +223,17 @@ def test_public_endpoint_requires_admin_section_and_csrf():
         path = "/api/status/sync/balances/run"
         payload = {"request_id": str(uuid4())}
         assert client.post(path, json=payload).status_code == 401
+        assert client.get("/api/status?view=schedule").status_code == 401
         login(client)
+        assert client.get("/api/status?view=schedule").json() == {"scheduled": []}
+        assert client.get("/api/status").json() == {"events": [], "scheduled": []}
         assert client.post(path, json=payload).status_code == 403
         headers = {"Origin": "http://127.0.0.1:8013"}
         repo.admin = False
         assert client.post(path, json=payload, headers=headers).status_code == 403
         repo.admin = True
         repo.sections = []
+        assert client.get("/api/status?view=schedule").status_code == 403
         assert client.post(path, json=payload, headers=headers).status_code == 403
         repo.sections = ["status"]
         assert client.post(path, json={"request_id": "bad"}, headers=headers).status_code == 422
@@ -258,6 +265,13 @@ def test_status_exposes_every_job_with_manual_result(ready):
 
     scope = Scope({"id": UUID(int=1), "role": "owner", "is_portal_admin": True}, (), None, (), ())
     status = Repository.status(Repo(), scope)
+    compact = Repository.status(Repo(), scope, schedule_only=True)
+    assert set(compact) == {"scheduled"}
+    assert [task["job"] for task in compact["scheduled"]] == [
+        task["job"] for task in status["scheduled"]
+    ]
+    compact_balance = next(row for row in compact["scheduled"] if row["job"] == "balances")
+    assert compact_balance["manual"]["request_id"] == str(doc["request_id"])
     assert len(status["scheduled"]) == len(scheduler.JOBS)
     balances = next(row for row in status["scheduled"] if row["job"] == "balances")
     assert balances["status"] == "waiting"
@@ -266,6 +280,18 @@ def test_status_exposes_every_job_with_manual_result(ready):
     assert balances["manual"]["state"] == "failed"
     assert balances["manual"]["error_code"] == "interrupted"
     assert balances["manual"]["blocked_reason"] == "cooldown"
+
+
+def test_schedule_only_skips_history_queries_for_restricted_or_disabled_schedule():
+    from types import SimpleNamespace
+
+    from app.web.repository import Repository, Scope
+
+    owner = Scope({"id": UUID(int=1), "role": "owner"}, (), None, (), ())
+    selected = replace(owner, selected=UUID(int=2))
+    for scope, enabled in [(owner, False), (selected, True)]:
+        repo = SimpleNamespace(settings=SimpleNamespace(sync_enabled=enabled))
+        assert Repository.status(repo, scope, schedule_only=True) == {"scheduled": []}
 
 
 def test_execution_uses_start_day_after_waiting_across_midnight(ready):

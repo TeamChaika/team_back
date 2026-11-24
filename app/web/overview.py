@@ -84,7 +84,7 @@ def period(coverage, rows, scope, start, end, kind="daily"):
         "days": len(expected),
         "loaded_dates": sorted(loaded),
         "missing_dates": missing,
-        "partial_days": partial_days(reports),
+        "partial_days": partial_days(reports, scope.ids),
         "complete": not missing,
         "reviewed": bool(reports) and all(r["reviewed"] for r in reports),
         "reconciliation_issues": issues,
@@ -106,7 +106,7 @@ def buckets(start, end, grain):
     return [days for _, days in groups]
 
 
-def build_overview(scope, start, end, grain, coverage, daily, dishes):
+def build_overview(scope, start, end, grain, coverage, daily, dishes, *, trend_only=False):
     days = (end - start).days + 1
     previous_start, previous_end = start - timedelta(days=days), start - timedelta(days=1)
     current_rows = [r for r in daily if r["business_date"] >= start]
@@ -114,7 +114,7 @@ def build_overview(scope, start, end, grain, coverage, daily, dishes):
     current = period(coverage, current_rows, scope, start, end)
     previous = period(coverage, previous_rows, scope, previous_start, previous_end)
     trends = {}
-    for option in ("day", "week", "month"):
+    for option in (grain,) if trend_only else ("day", "week", "month"):
         trend = []
         for group in buckets(start, end, option):
             a, b = group[0], group[-1]
@@ -125,6 +125,15 @@ def build_overview(scope, start, end, grain, coverage, daily, dishes):
             )
             trend.append({"current": now, "previous": before})
         trends[option] = trend
+
+    summary = {
+        "current": current,
+        "previous": previous,
+        "granularity": grain,
+        "trend": trends[grain],
+    }
+    if trend_only:
+        return summary
 
     by_department = defaultdict(lambda: {"current": [], "previous": []})
     for row in daily:
@@ -176,11 +185,8 @@ def build_overview(scope, start, end, grain, coverage, daily, dishes):
                 }
             )
     return {
-        "current": current,
-        "previous": previous,
+        **summary,
         "changes": changes(current["totals"], previous["totals"]),
-        "granularity": grain,
-        "trend": trends[grain],
         "trends": trends,
         "restaurants": restaurants,
         "top_dishes": top_dishes,
@@ -189,7 +195,9 @@ def build_overview(scope, start, end, grain, coverage, daily, dishes):
     }
 
 
-def read_overview(db, scope, start: date, end: date, grain: str, *, live_bundle=None):
+def read_overview(
+    db, scope, start: date, end: date, grain: str, *, live_bundle=None, trend_only=False
+):
     from app.web.warehouse_analytics import require_department_report
 
     require_department_report(scope)
@@ -202,15 +210,16 @@ def read_overview(db, scope, start: date, end: date, grain: str, *, live_bundle=
     bounds = "d.source_id='primary' AND d.business_date BETWEEN %s AND %s"
     live_day = date.fromisoformat(live_bundle["manifest"]["business_date"]) if live_bundle else None
     bounds += " AND (%s::date IS NULL OR d.business_date<>%s)"
-    coverage = db.execute(
+    kinds = ["daily"] if trend_only else ["daily", "dishes"]
+    coverage_query = db.execute(
         "SELECT d.business_date,r.kind,s.reviewed,s.checks,r.observed_at"
         + base
         + "WHERE "
         + bounds
-        + " AND r.kind IN ('daily','dishes') ORDER BY d.business_date",
-        (previous_start, end, live_day, live_day),
+        + " AND r.kind=ANY(%s) ORDER BY d.business_date",
+        (previous_start, end, live_day, live_day, kinds),
     )
-    daily = db.execute(
+    daily_query = db.execute(
         "SELECT d.business_date,x.department_id,x.revenue,x.cost,x.checks,x.guests"
         + base
         + "JOIN chaika.sales_report_rows x ON x.report_id=r.id WHERE "
@@ -218,39 +227,47 @@ def read_overview(db, scope, start: date, end: date, grain: str, *, live_bundle=
         + " AND r.kind='daily' AND x.department_id=ANY(%s::uuid[]) ORDER BY d.business_date",
         (previous_start, end, live_day, live_day, scope.ids),
     )
-    # Group in PostgreSQL: a monthly dish report can exceed the ordinary row endpoint limit.
-    # Dish UUID is stable across renames; a missing UUID is grouped only by its exact source name.
-    top_filter = (
-        " SELECT * FROM grouped"
-        if live_bundle is not None
-        else ", top AS (SELECT dish_id,fallback_name FROM grouped WHERE is_current "
-        "ORDER BY revenue DESC,dish_name,dish_id LIMIT 5) "
-        "SELECT g.* FROM grouped g JOIN top t ON g.dish_id IS NOT DISTINCT FROM t.dish_id "
-        "AND g.fallback_name IS NOT DISTINCT FROM t.fallback_name"
-    )
-    dishes = db.execute(
-        "WITH scoped AS (SELECT d.business_date >= %s AS is_current,d.business_date,x.ordinal,"
-        "NULLIF(x.dimensions->>'DishId','') AS dish_id,x.dimensions->>'DishName' AS dish_name,"
-        "x.revenue,x.quantity"
-        + base
-        + "JOIN chaika.sales_report_rows x ON x.report_id=r.id WHERE "
-        + bounds
-        + " AND r.kind='dishes' AND x.department_id=ANY(%s::uuid[])), grouped AS ("
-        "SELECT is_current,dish_id,"
-        "CASE WHEN dish_id IS NULL THEN COALESCE(dish_name,'') END AS fallback_name,"
-        "(array_agg(dish_name ORDER BY business_date DESC,ordinal DESC))[1] AS dish_name,"
-        "SUM(revenue) AS revenue,"
-        "CASE WHEN COUNT(quantity)=COUNT(*) THEN SUM(quantity) END AS quantity "
-        "FROM scoped GROUP BY is_current,dish_id,"
-        "CASE WHEN dish_id IS NULL THEN COALESCE(dish_name,'') END) " + top_filter,
-        (start, previous_start, end, live_day, live_day, scope.ids),
-    )
-    coverage, daily, dishes = coverage.fetchall(), daily.fetchall(), dishes.fetchall()
+    dishes_query = None
+    if not trend_only:
+        # Group in PostgreSQL: a monthly dish report can exceed the ordinary row endpoint limit.
+        # Group by UUID across renames, or by exact source name if the UUID is missing.
+        top_filter = (
+            " SELECT * FROM grouped"
+            if live_bundle is not None
+            else ", top AS (SELECT dish_id,fallback_name FROM grouped WHERE is_current "
+            "ORDER BY revenue DESC,dish_name,dish_id LIMIT 5) "
+            "SELECT g.* FROM grouped g JOIN top t ON g.dish_id IS NOT DISTINCT FROM t.dish_id "
+            "AND g.fallback_name IS NOT DISTINCT FROM t.fallback_name"
+        )
+        dishes_query = db.execute(
+            "WITH scoped AS (SELECT d.business_date >= %s AS is_current,d.business_date,x.ordinal,"
+            "NULLIF(x.dimensions->>'DishId','') AS dish_id,x.dimensions->>'DishName' AS dish_name,"
+            "x.revenue,x.quantity"
+            + base
+            + "JOIN chaika.sales_report_rows x ON x.report_id=r.id WHERE "
+            + bounds
+            + " AND r.kind='dishes' AND x.department_id=ANY(%s::uuid[])), grouped AS ("
+            "SELECT is_current,dish_id,"
+            "CASE WHEN dish_id IS NULL THEN COALESCE(dish_name,'') END AS fallback_name,"
+            "(array_agg(dish_name ORDER BY business_date DESC,ordinal DESC))[1] AS dish_name,"
+            "SUM(revenue) AS revenue,"
+            "CASE WHEN COUNT(quantity)=COUNT(*) THEN SUM(quantity) END AS quantity "
+            "FROM scoped GROUP BY is_current,dish_id,"
+            "CASE WHEN dish_id IS NULL THEN COALESCE(dish_name,'') END) " + top_filter,
+            (start, previous_start, end, live_day, live_day, scope.ids),
+        )
+    # Submit all independent queries to the pipeline before waiting for any rows.
+    coverage = coverage_query.fetchall()
+    daily = daily_query.fetchall()
     if live_bundle is not None:
         from app.web.live_sales import report_coverage, report_rows
 
-        coverage += report_coverage(live_bundle, ("daily", "dishes"))
+        coverage += report_coverage(live_bundle, kinds)
         daily += report_rows(live_bundle, "daily", scope)
+    if dishes_query is None:
+        return build_overview(scope, start, end, grain, coverage, daily, (), trend_only=True)
+    dishes = dishes_query.fetchall()
+    if live_bundle is not None:
         grouped = {(r["is_current"], r["dish_id"], r["fallback_name"]): r for r in dishes}
         with localcontext() as ctx:
             ctx.prec = 70

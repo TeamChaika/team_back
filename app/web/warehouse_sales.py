@@ -213,9 +213,21 @@ class WarehouseSales:
             )
         return capture["coverage"], rows
 
-    def overview(self, scope, start, end, grain):
+    def overview(self, scope, start, end, grain, *, trend_only=False):
         previous_start = start - timedelta(days=(end - start).days + 1)
-        capture = self.get(scope, previous_start, end, ("daily", "dishes"))
+        kinds = ("daily",) if trend_only else ("daily", "dishes")
+        capture = self.get(scope, previous_start, end, kinds)
+        if trend_only:
+            return build_overview(
+                scope,
+                start,
+                end,
+                grain,
+                capture["coverage"],
+                capture["rows"]["daily"],
+                (),
+                trend_only=True,
+            )
         grouped = {}
         with localcontext() as ctx:
             ctx.prec = 70

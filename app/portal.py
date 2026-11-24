@@ -515,22 +515,23 @@ def create_portal(
         end: date,
         granularity: Literal["day", "week", "month"] = "day",
         include_archived: bool = False,
+        view: Literal["full", "trend"] = "full",
     ):
         scope = repo.analytics_scope(scope, include_archived)
         check_period(start, end)
         if start.toordinal() <= (end - start).days + 1:
             raise HTTPException(422, "Для выбранной даты невозможно определить предыдущий период.")
+        bundle, metadata = None, None
         if (
             live_sales
             and not scope.warehouse_restricted
             and start <= datetime.now(ZONE).date() <= end
         ):
             bundle, metadata = live_sales.get(scope)
-            return {
-                **repo.overview(scope, start, end, granularity, live_bundle=bundle),
-                "live": metadata,
-            }
-        return repo.overview(scope, start, end, granularity)
+        result = repo.overview(
+            scope, start, end, granularity, live_bundle=bundle, trend_only=view == "trend"
+        )
+        return {**result, "live": metadata} if metadata is not None and view == "full" else result
 
     @app.get("/api/purchase-prices")
     def purchase_prices(
@@ -539,9 +540,15 @@ def create_portal(
         exclude_household: bool = True,
         recent_only: bool = True,
         include_impact: bool = False,
+        view: Literal["full", "top_increases"] = "full",
     ):
         return repo.purchase_prices(
-            scope, kind, exclude_household, recent_only=recent_only, include_impact=include_impact
+            scope,
+            kind,
+            exclude_household,
+            recent_only=recent_only,
+            include_impact=include_impact,
+            top_increases=view == "top_increases",
         )
 
     @app.get("/api/purchase-prices/history")
@@ -732,8 +739,8 @@ def create_portal(
         return repo.manual_sync(scope, job, body.request_id)
 
     @app.get("/api/status")
-    def status(scope: Access):
-        return repo.status(scope)
+    def status(scope: Access, view: Literal["full", "schedule"] = "full"):
+        return repo.status(scope, schedule_only=view == "schedule")
 
     @app.get("/{path:path}", include_in_schema=False)
     def frontend(path: str):

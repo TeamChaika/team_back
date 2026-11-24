@@ -18,9 +18,11 @@ class DocumentDatabase(PermissionDatabase):
     analytics = False
     all_departments = False
     password_change_required = False
+    profile_reads = 0
 
     def execute(self, sql, params=None):
         if "chaika.web_users" in sql:
+            self.profile_reads += 1
             return Rows(
                 [
                     dict(
@@ -81,6 +83,19 @@ def test_existing_document_analytics_grants_are_preserved():
     db.analytics = False
     db.all_departments = True
     assert repo.portal_scope(USER).unrestricted
+
+
+def test_portal_scope_reads_active_profile_once_per_request():
+    repo, db = repository()
+    db.sections = ["sales"]
+    db.analytics = True
+    assert A in repo.portal_scope(USER).ids
+    assert db.profile_reads == 1
+    db.active = False
+    with pytest.raises(HTTPException) as denied:
+        repo.portal_scope(USER)
+    assert denied.value.status_code == 403
+    assert db.profile_reads == 2
 
 
 def test_other_analytics_sections_still_require_restaurants():
