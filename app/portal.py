@@ -126,12 +126,24 @@ def create_portal(
 
         background = None
         document_worker = None
+        auto_receipts = None
+        stop_receipts = asyncio.Event()
         try:
             if repository is None:
                 await run_in_threadpool(repo.open)
             if hasattr(indicators, "start"):
                 indicators.start()
             background = asyncio.create_task(start_background())
+            if (
+                document_service is None
+                and document_config.native_enabled
+                and web.documents_enabled
+            ):
+                from app.documents.runtime import schedule_auto_receipts
+
+                auto_receipts = asyncio.create_task(
+                    schedule_auto_receipts(app.state.documents, stop_receipts)
+                )
             if (
                 web.documents_enabled
                 and document_config.native_enabled
@@ -142,6 +154,9 @@ def create_portal(
                 document_worker = asyncio.create_task(supervise())
             yield
         finally:
+            if auto_receipts is not None:
+                stop_receipts.set()
+                await auto_receipts
             if document_worker is not None:
                 document_worker.cancel()
                 await asyncio.gather(document_worker, return_exceptions=True)

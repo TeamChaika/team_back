@@ -78,14 +78,18 @@ class DocumentTransport:
         # Retain the existing outgoingInvoice operation; do not silently replace it
         # with internalTransfer or add an unsupported recipient field.
         root = Element("document")
+        receipt = (
+            f"Автоприёмка через 72 часа на склад {target}"
+            if processor is None
+            else f"Принял: {full_name(processor)} [{processor['username']}] на склад {target}"
+        )
         values = {
             "documentNumber": number,
             "dateIncoming": local_time.isoformat(timespec="seconds"),
             "useDefaultDocumentTime": "true",
             "defaultStoreId": str(doc["store_id"]),
             "comment": f"Отправил: {full_name(creator)} [{creator['username']}] "
-            f"со склада {source}\n"
-            f"Принял: {full_name(processor)} [{processor['username']}] на склад {target}",
+            f"со склада {source}\n{receipt}",
         }
         for key, value in values.items():
             SubElement(root, key).text = value

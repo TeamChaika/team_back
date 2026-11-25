@@ -35,7 +35,7 @@ def reconcile(
             fail(404, "Документ не найден.")
         operations = db.execute(
             "SELECT * FROM portal_documents_operation WHERE kind=%s AND document_id=%s "
-            "AND action IN ('confirm','receive','confirm_receipt') "
+            "AND action IN ('confirm','receive','confirm_receipt','auto_receive') "
             "AND state IN ('pending','unknown') FOR "
             "UPDATE",
             (kind, document_id),
