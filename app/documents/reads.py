@@ -250,8 +250,9 @@ def detail(db, user, kind, document_id, params):
         fail(404, "Документ не найден.")
     history = db.execute(
         "SELECT e.action,e.version,e.created_at,e.data, "
-        "coalesce(nullif(trim(u.first_name || ' ' || u.last_name),''),u.username) AS actor "
-        "FROM portal_documents_event e JOIN authentication_user u ON u.id=e.actor_id "
+        "coalesce(nullif(trim(u.first_name || ' ' || u.last_name),''),"
+        "u.username,'Система') AS actor "
+        "FROM portal_documents_event e LEFT JOIN authentication_user u ON u.id=e.actor_id "
         "WHERE kind=%s AND document_id=%s ORDER BY e.id DESC LIMIT 100",
         (kind, document_id),
     ).fetchall()

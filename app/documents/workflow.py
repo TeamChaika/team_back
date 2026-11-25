@@ -310,17 +310,15 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
                     [(doc["id"], r["product_id"], r["amount"]) for r in rows],
                 )
             enqueue(db, kind, doc)
-            event(
-                db,
-                kind,
-                doc,
-                user["id"],
-                action,
-                {
-                    "items": [{**r, "product_id": str(r["product_id"])} for r in rows],
-                    "comment": doc["comment"],
-                },
-            )
+            event_data = {
+                "items": [{**r, "product_id": str(r["product_id"])} for r in rows],
+                "comment": doc["comment"],
+            }
+            if action == "edit":
+                event_data["items_changed"] = {r["product_id"]: r["amount"] for r in rows} != {
+                    r["product_id"]: r["amount"] for r in previous_items
+                }
+            event(db, kind, doc, user["id"], action, event_data)
         elif action in {"receive", "confirm_receipt", "reject_receipt"}:
             if receipt_rows is not None:
                 with db.cursor() as cursor:
@@ -416,67 +414,73 @@ def mutate(database, provider, identity, kind, action, body, document_id=None, *
             result["cost_estimate"] = displayed_estimate(doc.get("cost_estimate"))
         finish(db, key, result, "queued" if queue else "done")
         if queue:
-            approved(db, kind, doc)
-            rows = db.execute(
-                f"SELECT product_id,amount FROM {child} WHERE {kind}_id=%s ORDER BY id",
-                (doc["id"],),
-            ).fetchall()
-            if kind == "waybill" and doc.get("receipt_state") == "accepted":
-                rows = db.execute(
-                    f"SELECT product_id,received_amount AS amount FROM {child} "
-                    "WHERE waybill_id=%s AND received_amount>0 ORDER BY id",
-                    (doc["id"],),
-                ).fetchall()
-            # Capture all submitted values inside the reservation transaction.
-            source = db.execute(
-                "SELECT name FROM stores WHERE id=%s", (doc["store_id"],)
-            ).fetchone()["name"]
-            creator = db.execute(
-                "SELECT first_name,last_name,username FROM authentication_user WHERE id=%s",
-                (doc["created_by_id"],),
-            ).fetchone()
-            target = (
-                db.execute(
-                    "SELECT name FROM stores WHERE id=%s", (doc["counteragent_id"],)
-                ).fetchone()["name"]
-                if kind == "waybill"
-                else None
-            )
-            reason = (
-                db.execute(
-                    "SELECT account_id FROM writeoffs_reasons WHERE name=%s", (doc["reason_id"],)
-                ).fetchone()
-                if kind == "writeoff"
-                else None
-            )
-            receiver = user
-            if kind == "waybill" and doc.get("receipt_state") == "accepted":
-                receiver = db.execute(
-                    "SELECT u.* FROM portal_documents_event e "
-                    "JOIN authentication_user u ON u.id=e.actor_id "
-                    "WHERE e.kind='waybill' AND e.document_id=%s AND e.action='receive' "
-                    "ORDER BY e.id DESC LIMIT 1",
-                    (doc["id"],),
-                ).fetchone()
-                if receiver is None:
-                    fail(409, "Не найдена история приёмки. Требуется проверка документа.")
-            payload = provider.payload(kind, doc, rows, creator, receiver, source, target, reason)
-            db.execute(
-                "INSERT INTO native_dispatch (operation_id,kind,document_id,version,payload) "
-                "VALUES (%s,%s,%s,%s,%s)",
-                (
-                    key,
-                    kind,
-                    doc["id"],
-                    doc["version"],
-                    Jsonb(
-                        {"xml": payload.decode()}
-                        if isinstance(payload, bytes)
-                        else {"json": payload}
-                    ),
-                ),
-            )
+            queue_submission(db, provider, key, kind, doc, user)
     return result
+
+
+def queue_submission(db, provider, key, kind, doc, receiver):
+    """Freeze the approved quantities and enqueue exactly once under the document lock."""
+    _, child = table(kind)
+    approved(db, kind, doc)
+    if kind == "waybill" and doc.get("receipt_state") == "accepted":
+        rows = db.execute(
+            f"SELECT product_id,received_amount AS amount FROM {child} "
+            "WHERE waybill_id=%s AND received_amount>0 ORDER BY id",
+            (doc["id"],),
+        ).fetchall()
+        receipt = db.execute(
+            "SELECT e.action,u.first_name,u.last_name,u.username FROM portal_documents_event e "
+            "LEFT JOIN authentication_user u ON u.id=e.actor_id "
+            "WHERE e.kind='waybill' AND e.document_id=%s "
+            "AND e.action IN ('receive','auto_receive') ORDER BY e.id DESC LIMIT 1",
+            (doc["id"],),
+        ).fetchone()
+        if receipt is None:
+            fail(409, "Не найдена история приёмки. Требуется проверка документа.")
+        receiver = None if receipt["action"] == "auto_receive" else receipt
+    else:
+        rows = db.execute(
+            f"SELECT product_id,amount FROM {child} WHERE {kind}_id=%s ORDER BY id",
+            (doc["id"],),
+        ).fetchall()
+    # Capture all submitted values inside the reservation transaction.
+    source = db.execute(
+        "SELECT name FROM stores WHERE id=%s", (doc["store_id"],)
+    ).fetchone()["name"]
+    creator = db.execute(
+        "SELECT first_name,last_name,username FROM authentication_user WHERE id=%s",
+        (doc["created_by_id"],),
+    ).fetchone()
+    target = (
+        db.execute(
+            "SELECT name FROM stores WHERE id=%s", (doc["counteragent_id"],)
+        ).fetchone()["name"]
+        if kind == "waybill"
+        else None
+    )
+    reason = (
+        db.execute(
+            "SELECT account_id FROM writeoffs_reasons WHERE name=%s", (doc["reason_id"],)
+        ).fetchone()
+        if kind == "writeoff"
+        else None
+    )
+    payload = provider.payload(kind, doc, rows, creator, receiver, source, target, reason)
+    db.execute(
+        "INSERT INTO native_dispatch (operation_id,kind,document_id,version,payload) "
+        "VALUES (%s,%s,%s,%s,%s)",
+        (
+            key,
+            kind,
+            doc["id"],
+            doc["version"],
+            Jsonb(
+                {"xml": payload.decode()}
+                if isinstance(payload, bytes)
+                else {"json": payload}
+            ),
+        ),
+    )
 
 
 def validate_receipt(rows, original):
