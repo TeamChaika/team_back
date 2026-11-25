@@ -20,7 +20,7 @@ class DocumentTransport:
         self.transport = transport
 
     @contextmanager
-    def session(self):
+    def session(self, *, timeout=None):
         base = self.settings.iiko_url.rstrip("/")
         if (
             not base.startswith("https://")
@@ -32,7 +32,7 @@ class DocumentTransport:
             base += "/resto/api"
         with httpx.Client(
             base_url=base + "/",
-            timeout=httpx.Timeout(60, connect=10),
+            timeout=timeout if timeout is not None else httpx.Timeout(60, connect=10),
             trust_env=False,
             follow_redirects=False,
             transport=self.transport,
@@ -55,7 +55,7 @@ class DocumentTransport:
             finally:
                 if token:
                     try:
-                        client.get("logout", params={"key": token}, timeout=10)
+                        client.get("logout", params={"key": token}, timeout=timeout or 10)
                     except httpx.HTTPError:
                         log.warning("Document iiko logout unavailable")
 
