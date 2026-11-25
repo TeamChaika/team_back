@@ -24,6 +24,7 @@ Docker-сборка: `Dockerfile` → `requirements-linux.lock` (Linux amd64 / P
 | Публичный HTTP-процесс | [app/serve.py](../../app/serve.py) → `app.portal:app`; `PORT`, по умолчанию 8000, один worker |
 | Инициализация БД, Auth, фоновых задач | [app/portal.py](../../app/portal.py), `create_portal` / `lifespan` |
 | Синхронизации по расписанию | [app/scheduler.py](../../app/scheduler.py), `JOBS`, `run_job`; включаются через `CHAIKA_SYNC_ENABLED` |
+| Закупки в Telegram к 09:00 МСК | [app/purchase_digest_delivery.py](../../app/purchase_digest_delivery.py) запускается отдельным потоком серверного планировщика. Назначения и квитанции хранятся в `chaika.purchase_digest_destinations` и `chaika.purchase_digest_deliveries`. После простоя обрабатываются закрытые интервалы с даты включения назначения. При неопределённой доставке проверьте канал перед повторной отправкой. |
 | Технический API iiko | [app/main.py](../../app/main.py); планировщик использует `127.0.0.1:8010`, не публиковать вместо портала |
 | Документы, Telegram и справочники документов | [app/documents/worker.py](../../app/documents/worker.py); запуск `python -m app.documents.worker` |
 | Контроль дочернего worker | [app/documents/runtime.py](../../app/documents/runtime.py); флаги `CHAIKA_WEB_DOCUMENTS_ENABLED`, `CHAIKA_DOCUMENTS_NATIVE_ENABLED`, `CHAIKA_DOCUMENTS_WORKER_ENABLED` |
