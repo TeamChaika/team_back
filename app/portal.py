@@ -37,6 +37,7 @@ from app.web.coverage import ZONE
 from app.web.deposits import DepositsClient, create_deposits_router
 from app.web.documents import DocumentsClient, create_documents_router
 from app.web.employees import EmployeeCommand, EmployeeEditor, owner
+from app.web.finance_routes import create_finance_router
 from app.web.ha_bridge import create_ha_bridge_router
 from app.web.indicators import IndicatorQuery, IndicatorService, catalog, collect_reports
 from app.web.kitchen_heatmap import AccountingDate, KitchenHeatmap, heatmap_enabled, kitchen_heatmap
@@ -44,7 +45,9 @@ from app.web.live_sales import LiveSales
 from app.web.password_policy import require_personal_password
 from app.web.password_recovery import create_recovery_router
 from app.web.permissions import (
+    FINANCE_SECTIONS,
     IIKO_SECTIONS,
+    finance_level,
     require_admin,
     require_section,
     require_warehouse_section,
@@ -190,7 +193,7 @@ def create_portal(
         CORSMiddleware,
         allow_origins=[web.origin],
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT"],
+        allow_methods=["GET", "POST", "PUT", "PATCH"],
         allow_headers=["Content-Type"],
         expose_headers=["X-Request-ID"],
     )
@@ -329,6 +332,7 @@ def create_portal(
         return scope
 
     app.include_router(create_deposits_router(deposit_access, repo))
+    app.include_router(create_finance_router(access, repo, live_sales))
     app.include_router(create_documents_router(portal_access))
     app.include_router(create_commercial_invoices_router(portal_access))
     app.include_router(create_admin_router(portal_access, repo, web))
@@ -429,6 +433,7 @@ def create_portal(
                 "modules": [],
                 "can_manage": False,
                 "documents_enabled": False,
+                "profit_loss_access": None,
                 "live_sales_enabled": False,
                 "kitchen_heatmap_enabled": False,
                 "today": datetime.now(ZONE).date().isoformat(),
@@ -441,10 +446,11 @@ def create_portal(
             },
             "warehouse_capabilities": warehouse_capabilities(scope),
             "today": datetime.now(ZONE).date().isoformat(),
+            "profit_loss_access": finance_level(scope.user),
             "live_sales_enabled": (
                 bool(live_sales) or (scope.warehouse_restricted and bool(scope.store_ids))
             )
-            and bool(IIKO_SECTIONS.intersection(sections_for(scope.user))),
+            and bool((IIKO_SECTIONS - FINANCE_SECTIONS).intersection(sections_for(scope.user))),
             "kitchen_heatmap_enabled": (
                 heatmap_enabled(settings)
                 and "sales" in sections_for(scope.user)

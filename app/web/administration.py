@@ -20,7 +20,7 @@ from app.web.operation_settings import (
     read_venue_settings,
     save_operation_settings,
 )
-from app.web.permissions import ANALYTICS_SECTIONS, SECTIONS, require_admin
+from app.web.permissions import ANALYTICS_SECTIONS, FINANCE_SECTIONS, SECTIONS, require_admin
 from app.web.repository import Scope, serial
 
 
@@ -36,7 +36,7 @@ class DepositGrant(Input):
 class Account(Input):
     display_name: str = Field(min_length=1, max_length=150)
     active: bool = True
-    sections: list[str] = Field(max_length=16)
+    sections: list[str] = Field(max_length=len(SECTIONS))
     warehouse_scope_mode: Literal["all", "selected"] | None = None
     warehouse_ids: list[UUID] | None = Field(default=None, max_length=500)
     all_departments: bool = False
@@ -238,6 +238,8 @@ class Administration:
             warehouse_mode = payload.warehouse_scope_mode or (
                 current.get("warehouse_scope_mode", "all") if current else "all"
             )
+            if FINANCE_SECTIONS.intersection(payload.sections) and warehouse_mode == "selected":
+                raise HTTPException(422, "Для журнала расходов выберите доступ к целым заведениям.")
             if (ANALYTICS_SECTIONS - {"invoices", "outgoing"}).intersection(payload.sections) and (
                 warehouse_mode != "selected"
                 and not (payload.all_departments or payload.department_ids)
@@ -303,12 +305,18 @@ class Administration:
             if {row["id"] for row in stores} != set(payload.warehouse_ids):
                 raise HTTPException(422, "Выбран неизвестный склад iiko.")
         departments = db.execute(
-            "SELECT id FROM chaika.corporate_nodes WHERE source_id='primary' AND type IN "
+            "SELECT id,type FROM chaika.corporate_nodes WHERE source_id='primary' AND type IN "
             "('DEPARTMENT','CENTRALSTORE','MANUFACTURE') AND id=ANY(%s::uuid[])",
             (payload.department_ids,),
         ).fetchall()
         if {r["id"] for r in departments} != set(payload.department_ids):
             raise HTTPException(422, "Выбрано неизвестное заведение iiko.")
+        if (
+            FINANCE_SECTIONS.intersection(payload.sections)
+            and not payload.all_departments
+            and not any(row["type"] == "DEPARTMENT" for row in departments)
+        ):
+            raise HTTPException(422, "Выберите хотя бы одно заведение для журнала расходов.")
         venues = db.execute(
             "SELECT name FROM chaika_deposits.qr_enterprises UNION SELECT DISTINCT venue "
             "AS name FROM chaika_deposits.deposits WHERE venue IS NOT NULL"

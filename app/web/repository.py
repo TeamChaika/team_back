@@ -14,10 +14,11 @@ from app.core.config import Settings
 from app.core.postgres_pool import RecoveringConnectionPool
 from app.sync_indicator_filters import read_filters
 from app.web.balances import product_suggestions, read_balances
-from app.web.coverage import partial_days
+from app.web.coverage import financial_scope_gaps, partial_days
 from app.web.overview import read_overview
 from app.web.permissions import (
     ANALYTICS_SECTIONS,
+    FINANCE_SECTIONS,
     IIKO_SECTIONS,
     require_warehouse_section,
     sections_for,
@@ -211,8 +212,8 @@ class Repository:
         # On analytics requests the active profile and topology share a pipeline.
         users = self._active_profile(db, user_id) if user is None else None
         node_rows = db.execute(
-            "SELECT id,parent_id,name,code,type FROM chaika.corporate_nodes WHERE "
-            "source_id='primary'"
+            "SELECT id,parent_id,name,code,type,present_in_latest FROM chaika.corporate_nodes "
+            "WHERE source_id='primary'"
         )
         grants = db.execute(
             "SELECT department_id FROM chaika.web_department_access WHERE user_id=%s "
@@ -322,7 +323,9 @@ class Repository:
                 return Scope(user, (), None, (), ())
             if (
                 user.get("warehouse_scope_mode", "all") != "selected"
-                and not (ANALYTICS_SECTIONS - {"invoices", "outgoing"}).intersection(sections)
+                and not (
+                    ANALYTICS_SECTIONS - {"invoices", "outgoing"} - FINANCE_SECTIONS
+                ).intersection(sections)
                 and not user.get("all_departments", user["role"] == "owner")
             ):
                 analytics_grant = db.execute(
@@ -358,6 +361,10 @@ class Repository:
 
     def metadata(self, scope):
         departments = []
+        assigned = set(sections_for(scope.user))
+        finance_only = bool(assigned & FINANCE_SECTIONS) and not assigned.intersection(
+            IIKO_SECTIONS - FINANCE_SECTIONS
+        )
         if scope.departments:
             policy = self.sync_policy()
             departments = [
@@ -367,8 +374,9 @@ class Repository:
                     "sync_enabled": policy.permits([department["id"]]),
                 }
                 for department in scope.departments
+                if not finance_only or department["type"] == "DEPARTMENT"
             ]
-        if not departments or scope.warehouse_restricted:
+        if not departments or scope.warehouse_restricted or finance_only:
             return serial(
                 {
                     "user": scope.user,
@@ -420,6 +428,7 @@ class Repository:
         dish_id=None,
         dish_name=None,
         live_bundle=None,
+        with_scope_coverage=False,
     ):
         require_warehouse_section(scope, "sales")
         if kind not in {"daily", "dishes", "payments", "discounts", "returns", "waiters", "hours"}:
@@ -433,7 +442,9 @@ class Repository:
         else:
             with self.connection() as db:
                 coverage = db.execute(
-                    "SELECT d.business_date,s.checks,r.observed_at FROM chaika.sales_report_days d "
+                    "SELECT d.business_date,s.checks,r.observed_at,"
+                    "r.request->'filters'->'Department.Id' AS department_filter "
+                    "FROM chaika.sales_report_days d "
                     "JOIN chaika.sales_report_sets s ON s.id=d.current_set_id "
                     "JOIN chaika.sales_reports r ON r.set_id=d.current_set_id "
                     "WHERE d.source_id='primary' AND d.business_date BETWEEN %s AND %s "
@@ -572,23 +583,24 @@ class Repository:
                         **totals([r for r in result if r["dimensions"]["HourOpen"] == hour]),
                     }
                 )
-        return serial(
-            {
-                "kind": kind,
-                "reconciliation_issues": reconciliation_issues,
-                "rows": result,
-                "totals": totals(result if complete else []),
-                "hourly": hourly,
-                "payment_groups": payment_groups,
-                "discount_groups": discount_groups,
-                "loaded_dates": loaded_dates,
-                "partial_days": partial_days(coverage, scope.ids),
-                "missing_dates": missing_dates,
-                "complete": complete,
-                "start": start,
-                "end": end,
-            }
-        )
+        report = {
+            "kind": kind,
+            "reconciliation_issues": reconciliation_issues,
+            "rows": result,
+            "totals": totals(result if complete else []),
+            "hourly": hourly,
+            "payment_groups": payment_groups,
+            "discount_groups": discount_groups,
+            "loaded_dates": loaded_dates,
+            "partial_days": partial_days(coverage, scope.ids),
+            "missing_dates": missing_dates,
+            "complete": complete,
+            "start": start,
+            "end": end,
+        }
+        if with_scope_coverage:
+            report["incomplete_scope_dates"] = financial_scope_gaps(coverage, result, scope.ids)
+        return serial(report)
 
     def purchase_prices(
         self,

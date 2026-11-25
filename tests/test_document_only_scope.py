@@ -69,7 +69,10 @@ def test_document_user_enters_shell_without_any_analytics_grant():
     assert failure.value.status_code == 403
 
 
-@pytest.mark.parametrize("sections", [[], ["deposits"], ["transfers"], ["writeoffs"]])
+@pytest.mark.parametrize(
+    "sections",
+    [[], ["deposits"], ["transfers"], ["writeoffs"], ["deposits", "profit-loss-accounting"]],
+)
 def test_shell_does_not_grant_missing_restaurant_access(sections):
     repo, db = repository()
     db.sections = sections

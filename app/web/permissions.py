@@ -19,17 +19,41 @@ SECTIONS = {
     "employees": "Сотрудники iiko",
     "events": "События заказов",
     "status": "Статус данных",
+    "profit-loss": "Прибыли и убытки · ввод расходов",
+    "profit-loss-accounting": "Прибыли и убытки · бухгалтерия",
 }
+FINANCE_SECTIONS = {"profit-loss", "profit-loss-accounting"}
 IIKO_SECTIONS = set(SECTIONS) - {"deposits"}
 DOCUMENT_SECTIONS = {"transfers", "writeoffs"}
 ANALYTICS_SECTIONS = IIKO_SECTIONS - DOCUMENT_SECTIONS
 
 
+def finance_level(user):
+    if user.get("warehouse_scope_mode") == "selected":
+        return None
+    if user.get("role") == "owner":
+        return "owner"
+    grants = user.get("sections", ())
+    if "profit-loss-accounting" in grants:
+        return "accountant"
+    if "profit-loss" in grants:
+        return "manager"
+    return None
+
+
 def sections_for(user):
     # Older in-process integrations may still supply the legacy profile shape.
     if "sections" not in user:
-        return ["deposits"] if user["role"] == "deposits" else list(SECTIONS)
-    return [key for key in user["sections"] if key in SECTIONS]
+        sections = (
+            ["deposits"]
+            if user["role"] == "deposits"
+            else [key for key in SECTIONS if key not in FINANCE_SECTIONS]
+        )
+    else:
+        sections = [key for key in user["sections"] if key in SECTIONS]
+    if finance_level(user) and "profit-loss" not in sections:
+        sections.append("profit-loss")
+    return sections
 
 
 def require_section(user, section):
@@ -66,6 +90,7 @@ WAREHOUSE_UNSUPPORTED_SECTIONS = frozenset(
         "events",
         "status",
         "deposits",
+        *FINANCE_SECTIONS,
     }
 )
 
