@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
+from app.web import purchase_digest
 from app.web.low_markup_reports import DestinationWrite, read_settings, save_destination
 from app.web.operation_settings import (
     OperationSettingsWrite,
@@ -443,6 +444,14 @@ def create_admin_router(access, repo, web, store=None):
     @router.post("/low-markup-reports/{department_id}")
     def update_low_markup_reports(department_id: UUID, payload: DestinationWrite, actor: Admin):
         return save_destination(store, actor, department_id, payload)
+
+    @router.get("/purchase-digest")
+    def purchase_digest_settings(actor: Admin):
+        return purchase_digest.read_settings(store)
+
+    @router.put("/purchase-digest/{department_id}")
+    def update_purchase_digest(department_id: UUID, payload: DestinationWrite, actor: Admin):
+        return purchase_digest.save_destination(store, actor, department_id, payload)
 
     @router.get("/operation-settings")
     def operation_settings(actor: Admin):

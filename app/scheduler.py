@@ -338,6 +338,9 @@ def main():
         ],
         cwd=BACKEND_DIR,
     )
+    from app.purchase_digest_delivery import start_worker as start_purchase_digest
+
+    purchase_digest = start_purchase_digest(settings, stop)
     try:
         for _ in range(30):
             if stop.is_set() or collector.poll() is not None:
@@ -384,6 +387,8 @@ def main():
             if collector.poll() is not None:
                 raise SyncError("scheduler_collector_stopped")
     finally:
+        stop.set()
+        purchase_digest.join(timeout=25)
         close_primary(support)
         collector.terminate()
         try:

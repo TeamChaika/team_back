@@ -175,7 +175,7 @@ def create_portal(
         CORSMiddleware,
         allow_origins=[web.origin],
         allow_credentials=True,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PUT"],
         allow_headers=["Content-Type"],
         expose_headers=["X-Request-ID"],
     )
@@ -438,6 +438,7 @@ def create_portal(
             "sections": sections_for(scope.user),
             "can_manage": bool(scope.user.get("is_portal_admin")),
             "low_markup_reports_enabled": bool(scope.user.get("is_portal_admin")),
+            "purchase_digest_enabled": bool(scope.user.get("is_portal_admin")),
             "documents_enabled": web.documents_enabled,
             "modules": (["iiko"] if IIKO_SECTIONS.intersection(sections_for(scope.user)) else [])
             + (["deposits"] if "deposits" in sections_for(scope.user) else []),
