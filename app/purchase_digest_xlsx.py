@@ -21,12 +21,27 @@ DETAIL_HEADERS = (
     "Количество",
     "Сумма, ₽",
     "Поставщик",
-    "Накладная",
+    "Приходная заведения",
     "Дата поставки",
     "Загружена, МСК",
     "Объём сравнения",
     "Сумма сравнения, ₽",
     "Склад",
+)
+REVIEW_HEADERS = (
+    "Товар",
+    "Причина",
+    "Склад заведения",
+    "Через склад",
+    "Поставщик",
+    "Приходная заведения",
+    "Накладная поставщика",
+    "Количество",
+    "Ед.",
+    "Цена передачи, ₽/ед.",
+    "Сумма передачи, ₽",
+    "Дата поставки",
+    "Загружена, МСК",
 )
 SUMMARY_HEADERS = (
     "Склад",
@@ -106,15 +121,27 @@ def _highlight(sheet, cell_range, formats):
         )
 
 
+def _invoice_link(sheet, index, col, document_id, number):
+    doc = UUID(str(document_id))
+    sheet.write_url(
+        index, col, f"https://dashboard.chaika.team/invoices/{doc}", string=f"№{number or '—'}"
+    )
+
+
 def _detail(book, formats, group, title, subtitle, records):
     sheet = book.add_worksheet(group)
+    headers = DETAIL_HEADERS
+    widths = (37, 17, 16, 16, 18, 7, 15, 17, 29, 21, 21, 21, 17, 19, 28)
+    if any(line.get("via") for line in records):
+        headers += ("Через склад", "Накладная поставщика")
+        widths += (28, 24)
     _frame(
         sheet,
         formats,
         title,
         subtitle,
-        DETAIL_HEADERS,
-        (37, 17, 16, 16, 18, 7, 15, 17, 29, 17, 21, 21, 17, 19, 28),
+        headers,
+        widths,
     )
     sheet.freeze_panes(5, 1)
     if not records:
@@ -148,23 +175,50 @@ def _detail(book, formats, group, title, subtitle, records):
         sheet.write_number(index, 6, float(qty), formats["qty"])
         sheet.write_number(index, 7, float(cost), formats["money"])
         sheet.write_string(index, 8, line["supplier"] or "Не указан")
-        doc = str(UUID(str(line["doc"])))
-        sheet.write_url(
-            index,
-            9,
-            f"https://dashboard.chaika.team/invoices/{doc}",
-            string=f"№{line['number'] or '—'}",
-        )
+        _invoice_link(sheet, index, 9, line["doc"], line["number"])
         sheet.write_datetime(index, 10, datetime.fromisoformat(line["stamp"]), formats["date"])
         sheet.write_datetime(index, 11, datetime.fromisoformat(line["noticed"]), formats["date"])
         sheet.write_number(index, 12, float(prev_qty), formats["qty"])
         sheet.write_number(index, 13, float(prev_cost), formats["money"])
         sheet.write_string(index, 14, line["store"])
+        if line.get("via"):
+            sheet.write_string(index, 15, line["via"])
+            _invoice_link(sheet, index, 16, line["origin_doc"], line["origin_number"])
 
     end = 5 + len(records)
-    sheet.autofilter(f"A5:O{end}")
+    sheet.autofilter(4, 0, end - 1, len(headers) - 1)
     _highlight(sheet, f"B6:C{end}", formats)
     return spend, base, higher, lower, spend - base
+
+
+def _review(book, formats, venue, date_label, records):
+    sheet = book.add_worksheet("На сверку")
+    _frame(
+        sheet, formats, "Поступления на сверку", f"{venue} · {date_label}", REVIEW_HEADERS,
+        (37, 46, 28, 26, 30, 22, 24, 14, 7, 19, 19, 21, 21),
+    )
+    sheet.freeze_panes(5, 1)
+    for index, line in enumerate(records, start=5):
+        sheet.write_string(index, 0, line["product"])
+        sheet.write_string(index, 1, line["reason"])
+        sheet.write_string(index, 2, line["store"])
+        sheet.write_string(index, 3, line["via"])
+        sheet.write_string(index, 4, line.get("supplier") or "Требует сверки")
+        _invoice_link(sheet, index, 5, line["doc"], line["number"])
+        if line.get("origin_doc"):
+            _invoice_link(sheet, index, 6, line["origin_doc"], line.get("origin_number"))
+        qty = Decimal(line["qty"]) if line.get("qty") is not None else None
+        cost = Decimal(line["cost"]) if line.get("cost") is not None else None
+        if qty is not None:
+            sheet.write_number(index, 7, float(qty), formats["qty"])
+        sheet.write_string(index, 8, line["unit"])
+        if cost is not None:
+            if qty is not None and qty > 0 and cost >= 0:
+                sheet.write_number(index, 9, float(cost / qty), formats["money"])
+            sheet.write_number(index, 10, float(cost), formats["money"])
+        sheet.write_datetime(index, 11, datetime.fromisoformat(line["stamp"]), formats["date"])
+        sheet.write_datetime(index, 12, datetime.fromisoformat(line["noticed"]), formats["date"])
+    sheet.autofilter(4, 0, 4 + len(records), len(REVIEW_HEADERS) - 1)
 
 
 def render_workbook(source, day):
@@ -235,10 +289,17 @@ def render_workbook(source, day):
                 footer, col, f"=SUM({letter}6:{letter}{footer})", formats[style], float(total)
             )
         _highlight(summary, f"H6:H{footer + 1}", formats)
-        if not source["rows"]:
+        review_rows = source.get("review_rows", [])
+        if review_rows:
+            _review(book, formats, venue, date_label, review_rows)
+            summary.write_url(
+                footer + 2, 0, "internal:'На сверку'!A1",
+                string=f"Позиций на сверку · {len(review_rows)}",
+            )
+        elif not source["rows"]:
             text = (
                 "В новых накладных нет сопоставимых позиций."
-                if source["direct_invoices"]
+                if source["direct_invoices"] or source.get("routed_invoices")
                 else "Новых приходных накладных поставщиков нет."
             )
             summary.write_string(footer + 2, 0, text)
