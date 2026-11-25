@@ -3,6 +3,7 @@ import io
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from app.documents.auto_receipt_deadlines import add_waybill_deadlines
 from app.documents.catalog import product_suggestions, products
 from app.documents.costs import (
     displayed_estimate,
@@ -157,6 +158,7 @@ def serialize(kind, doc, *, product_names=None):
             counteragent_id=str(doc["counteragent_id"]),
             counteragent=doc["counteragent"],
             iiko_document_type="outgoingInvoice",
+            auto_receipt_due_at=doc.get("auto_receipt_due_at"),
         )
     else:
         result.update(
@@ -225,6 +227,8 @@ def listing(db, user, kind, params, *, export=False):
         + f" WHERE {where} ORDER BY d.id DESC LIMIT %s OFFSET %s",
         [*values, size, (page - 1) * size],
     ).fetchall()
+    if kind == "waybill":
+        add_waybill_deadlines(db, rows)
     return {
         "rows": [serialize(kind, row) for row in rows],
         "total": total,
@@ -281,6 +285,8 @@ def detail(db, user, kind, document_id, params):
     ).fetchone()
     if not doc:
         fail(404, "Документ не найден.")
+    if kind == "waybill":
+        add_waybill_deadlines(db, [doc])
     history = db.execute(
         "SELECT e.action,e.version,e.created_at,e.data, "
         "coalesce(nullif(trim(u.first_name || ' ' || u.last_name),''),"
