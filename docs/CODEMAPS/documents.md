@@ -9,6 +9,7 @@
 | Создать/изменить/копировать | `DocumentService.dispatch` → [app/documents/workflow.py](../../app/documents/workflow.py) `mutate` → [app/documents/catalog.py](../../app/documents/catalog.py), [app/documents/policy.py](../../app/documents/policy.py); `request_id` и `version` защищают от повторов/гонок |
 | Согласовать/отклонить | `mutate` проверяет профиль, склад, действие, версию, состояние; `confirm` сохраняет операцию и задачу отправки в одной транзакции. Ответ сайта означает сохранение согласования, не проведение в iiko |
 | Отправить | [app/documents/dispatch.py](../../app/documents/dispatch.py) → [app/documents/transport.py](../../app/documents/transport.py); `queued`, `sending`, `sent`, `unknown` различаются. Неопределённый POST не повторяется автоматически; сверка — [app/documents/reconcile.py](../../app/documents/reconcile.py) |
+| Проверить фактический статус списания | [writeoff_reconciliation.py](../../app/documents/writeoff_reconciliation.py) → GET iiko `v2/documents/writeoff/byNumber` → `writeoff_reconciliation`. Список и карточка читают результат с правами сотрудника на склад. |
 | Telegram | [app/documents/worker.py](../../app/documents/worker.py) → [app/documents/telegram.py](../../app/documents/telegram.py) и [app/documents/messages.py](../../app/documents/messages.py); callback согласования возвращается в `workflow.mutate` с проверкой прав и версии |
 | Доступ склада | [app/documents/policy.py](../../app/documents/policy.py): `portal_access` → `portal_documents_userlink` → `authentication_user` → `portal_documents_grant`; администратор портала не получает автоматически согласование всех складов |
 | Восстановление пароля | [password_recovery.py](../../app/documents/password_recovery.py): `/start recover` + подтверждение только в private chat; существующая активная уникальная привязка; миграция [0003](../../migrations/documents/0003_password_recovery.sql), [сценарий](../telegram-password-recovery.md) |
@@ -20,6 +21,14 @@
 Схема: [0001_native_runtime.sql](../../migrations/documents/0001_native_runtime.sql) добавляет runtime-таблицы существующей закрытой схемы; [documents_schema.sql](../../tests/fixtures/documents_schema.sql) — тестовая копия, не production-миграция. Тесты: [test_native_documents.py](../../tests/test_native_documents.py), [test_document_transport.py](../../tests/test_document_transport.py), [test_document_only_scope.py](../../tests/test_document_only_scope.py).
 
 Миграция [0002_telegram_link.sql](../../migrations/documents/0002_telegram_link.sql) добавляет только таблицу одноразовых токенов и явные права runtime. Регрессии привязки: [test_telegram_link.py](../../tests/test_telegram_link.py), отдельная loopback БД `telegram_profile_tests`.
+
+## Фактический статус списания в iiko
+
+При согласовании `dateIncoming` берётся из времени создания заявки в часовом поясе `Europe/Simferopol`. Время подтверждения остаётся в истории действий. Сверка ищет номер DJ на складе заявки по всем датам. Для найденного акта она сохраняет статус iiko, учётную дату и разницу количеств по каждому товару. Строки одного товара суммируются. Для документов с журналом отправки исходные количества берутся из отправленного акта, для более старых — из сохранённых строк заявки.
+
+Перед выпуском API и обработчика применяется [миграция 0013](../../migrations/documents/0013_writeoff_reconciliation.sql) от владельца схемы `chaika_iiko_migrator`. Обработчик автоматически заполняет результаты для уже отправленных списаний и для отправок с неизвестным исходом. Недавние подтверждения проверяются чаще, архив проходит по очереди. Одна проверка может вернуть ровно один акт, отсутствие совпадений или несколько совпадений. При ошибке связи карточка сохраняет последний результат с временем успешной проверки.
+
+Автоматическая сверка записывает только собственную очередь и результаты. Ручная утилита [reconcile.py](../../app/documents/reconcile.py) для оператора запускается отдельно.
 
 ## Приёмка с расхождениями (миграция 0004)
 

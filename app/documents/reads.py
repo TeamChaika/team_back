@@ -94,7 +94,7 @@ def filters(db, user, kind, params):
     return " AND ".join(conditions), values
 
 
-def joined(kind):
+def joined(kind, *, reconciliation=None):
     parent, _ = table(kind)
     extra = ", t.name AS counteragent" if kind == "waybill" else ", r.id AS reason_pk"
     relation = (
@@ -102,6 +102,19 @@ def joined(kind):
         if kind == "waybill"
         else "LEFT JOIN writeoffs_reasons r ON r.name=d.reason_id"
     )
+    if kind == "writeoff" and reconciliation:
+        # The list only needs a count. Product-level quantities belong in the card.
+        fields = (
+            "rj.result" if reconciliation == "detail" else "(rj.result - 'quantity_differences')"
+        )
+        extra += (
+            f", {fields} AS reconciliation_result, rj.checked_at AS reconciliation_checked_at, "
+            "jsonb_array_length(rj.result->'quantity_differences') AS quantity_difference_count"
+        )
+        relation += (
+            " LEFT JOIN writeoff_reconciliation rj ON rj.document_id=d.id AND rj.version=d.version "
+            "AND (d.status='Sent' OR d.submission_state='unknown')"
+        )
     return (
         f"SELECT d.*, s.name AS store, "
         "coalesce(nullif(trim(c.first_name || ' ' || c.last_name),''),c.username) AS creator, "
@@ -112,7 +125,23 @@ def joined(kind):
     )
 
 
-def serialize(kind, doc):
+def reconciliation_view(doc, product_names):
+    evidence = doc["reconciliation_result"]
+    if evidence is None or doc["reconciliation_checked_at"] is None:
+        return None
+    fields = ("state", "iiko_status", "expected_date", "actual_date", "date_differs")
+    result = {key: evidence.get(key) for key in fields}
+    result["checked_at"] = doc["reconciliation_checked_at"].isoformat()
+    result["quantity_difference_count"] = doc["quantity_difference_count"] or 0
+    if product_names is not None:
+        result["quantity_differences"] = [
+            {**line, "name": product_names.get(line["product_id"], line["product_id"])}
+            for line in evidence.get("quantity_differences", [])
+        ]
+    return result
+
+
+def serialize(kind, doc, *, product_names=None):
     result = {
         **summary(kind, doc),
         "store_id": str(doc["store_id"]),
@@ -136,6 +165,8 @@ def serialize(kind, doc):
             iiko_document_type="writeoff",
             cost_estimate=displayed_estimate(doc.get("cost_estimate")),
         )
+        if "reconciliation_result" in doc:
+            result["iiko_reconciliation"] = reconciliation_view(doc, product_names)
     return result
 
 
@@ -190,7 +221,8 @@ def listing(db, user, kind, params, *, export=False):
     page = integer(params.get("page"), 1, 10000000)
     size = integer(params.get("page_size"), 30, 100)
     rows = db.execute(
-        joined(kind) + f" WHERE {where} ORDER BY d.id DESC LIMIT %s OFFSET %s",
+        joined(kind, reconciliation="summary")
+        + f" WHERE {where} ORDER BY d.id DESC LIMIT %s OFFSET %s",
         [*values, size, (page - 1) * size],
     ).fetchall()
     return {
@@ -244,7 +276,8 @@ def available_actions(db, user, kind, doc):
 def detail(db, user, kind, document_id, params):
     where, values = filters(db, user, kind, params)
     doc = db.execute(
-        joined(kind) + f" WHERE {where} AND d.id=%s", [*values, document_id]
+        joined(kind, reconciliation="detail") + f" WHERE {where} AND d.id=%s",
+        [*values, document_id],
     ).fetchone()
     if not doc:
         fail(404, "Документ не найден.")
@@ -256,8 +289,9 @@ def detail(db, user, kind, document_id, params):
         "WHERE kind=%s AND document_id=%s ORDER BY e.id DESC LIMIT 100",
         (kind, document_id),
     ).fetchall()
-    lines = items(db, kind, document_id)
-    result = serialize(kind, doc)
+    names = products(db, require_fresh=False)
+    lines = items(db, kind, document_id, names=names)
+    result = serialize(kind, doc, product_names=names)
     if kind == "writeoff" and result["cost_estimate"] is None:
         result["cost_estimate"] = estimate(db, doc["store_id"], lines, at=doc["created_at"])
     elif kind == "writeoff" and needs_current_estimate(doc):

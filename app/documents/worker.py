@@ -21,6 +21,7 @@ from app.documents.service import DocumentService
 from app.documents.telegram import Telegram, deliver_notification, handle_update
 from app.documents.telegram_cleanup import deliver_cleanup
 from app.documents.telegram_link import queued_update
+from app.documents.writeoff_reconciliation import run_reconciliation
 
 log = logging.getLogger(__name__)
 LEADER_LOCK = 7623011102049
@@ -243,6 +244,7 @@ def main():
     )
     next_catalog_check = datetime.min.replace(tzinfo=UTC)
     consecutive_pool_failures = 0
+    next_reconciliation = 0
     try:
         while not stop.is_set():
             if support:
@@ -271,6 +273,9 @@ def main():
                                 "Document catalog refresh failed (%s)", type(error).__name__
                             )
                     healthy = process_jobs(service, bot, leader, commercial)
+                    if not stop.is_set() and monotonic() >= next_reconciliation:
+                        run_reconciliation(service)
+                        next_reconciliation = monotonic() + 5
                 consecutive_pool_failures = 0
                 if not healthy:
                     stop.wait(5)
