@@ -29,7 +29,7 @@ def record(number, store, cost):
         "cost": cost,
         "prev_qty": "4",
         "prev_cost": "12",
-        "stamp": "2026-01-01T09:00:00",
+        "stamp": "2026-01-01T09:00:00+03:00",
         "noticed": "2026-01-06T10:00:00",
     }
 

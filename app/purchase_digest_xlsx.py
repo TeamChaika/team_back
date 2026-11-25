@@ -178,7 +178,13 @@ def render_workbook(source, day):
     date_label = f"{day.day} {MONTHS[day.month - 1]} {day.year}"
     buffer = BytesIO()
     with Workbook(
-        buffer, {"in_memory": True, "strings_to_formulas": False, "strings_to_urls": False}
+        buffer,
+        {
+            "in_memory": True,
+            "strings_to_formulas": False,
+            "strings_to_urls": False,
+            "remove_timezone": True,
+        },
     ) as book:
         formats = _formats(book)
         summary = book.add_worksheet("Сводка")
