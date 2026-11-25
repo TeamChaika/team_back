@@ -232,6 +232,9 @@ def report_coverage(bundle, kinds):
             "kind": kind,
             "reviewed": False,
             "checks": bundle["checks"],
+            "department_filter": (
+                bundle["reports"][kind]["info"]["request"].get("filters", {}).get("Department.Id")
+            ),
             "observed_at": datetime.fromisoformat(bundle["reports"][kind]["info"]["received_at"]),
         }
         for kind in kinds

@@ -108,6 +108,10 @@ def test_partial_days_respect_selected_coverage(ids, observed_day, scope_metadat
     repo = object.__new__(Repository)
     repo.connection = lambda: nullcontext(SalesDatabase())
     assert bool(repo.sales(selection, "daily", day, day)["partial_days"]) is preliminary
+    financial = repo.sales(selection, "daily", day, day, with_scope_coverage=True)
+    refreshed = scope_metadata.get("sync_department_ids", [])
+    all_venues_refreshed = set(map(str, ids)).issubset(refreshed)
+    assert financial["incomplete_scope_dates"] == ([] if all_venues_refreshed else [str(day)])
 
 
 def test_weighted_averages_and_precise_changes():

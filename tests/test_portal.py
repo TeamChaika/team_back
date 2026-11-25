@@ -12,7 +12,7 @@ from app.core.config import Settings
 from app.portal import create_portal
 from app.web.auth import ACCESS_COOKIE
 from app.web.coverage import ZONE
-from app.web.permissions import SECTIONS
+from app.web.permissions import FINANCE_SECTIONS, SECTIONS
 from app.web.repository import Scope, has_store_scope
 from app.web.settings import WebSettings
 
@@ -248,17 +248,18 @@ def test_login_uses_database_role_and_safe_cookies(client):
     assert client.get("/api/me").json() == {
         "role": "manager",
         "modules": ["iiko", "deposits"],
-        "sections": list(SECTIONS),
+        "sections": [section for section in SECTIONS if section not in FINANCE_SECTIONS],
         "can_manage": False,
         "low_markup_reports_enabled": False,
         "purchase_digest_enabled": False,
+        "profit_loss_access": None,
         "documents_enabled": False,
         "live_sales_enabled": False,
         "kitchen_heatmap_enabled": False,
         "today": datetime.now(ZONE).date().isoformat(),
         "warehouse_scope": {"mode": "all", "warehouse_ids": [str(UUID(int=4))]},
         "warehouse_capabilities": {
-            "supported_sections": list(SECTIONS),
+            "supported_sections": [s for s in SECTIONS if s not in FINANCE_SECTIONS],
             "unsupported_sections": [],
         },
     }
@@ -318,10 +319,10 @@ def split_domain_client():
         yield client
 
 
-@pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.parametrize("method", ["GET", "POST", "PATCH"])
 def test_dashboard_preflight_allows_credentialed_api_calls(split_domain_client, method):
     response = split_domain_client.options(
-        "/api/auth/login",
+        "/api/profit-loss/expenses/test" if method == "PATCH" else "/api/auth/login",
         headers={
             "Origin": "https://dashboard.chaika.team",
             "Access-Control-Request-Method": method,
@@ -352,17 +353,18 @@ def test_dashboard_login_refresh_and_logout_across_domains(split_domain_client):
     assert client.get("/api/me", headers=headers).json() == {
         "role": "manager",
         "modules": ["iiko", "deposits"],
-        "sections": list(SECTIONS),
+        "sections": [section for section in SECTIONS if section not in FINANCE_SECTIONS],
         "can_manage": False,
         "low_markup_reports_enabled": False,
         "purchase_digest_enabled": False,
+        "profit_loss_access": None,
         "documents_enabled": False,
         "live_sales_enabled": False,
         "kitchen_heatmap_enabled": False,
         "today": datetime.now(ZONE).date().isoformat(),
         "warehouse_scope": {"mode": "all", "warehouse_ids": [str(UUID(int=4))]},
         "warehouse_capabilities": {
-            "supported_sections": list(SECTIONS),
+            "supported_sections": [s for s in SECTIONS if s not in FINANCE_SECTIONS],
             "unsupported_sections": [],
         },
     }
