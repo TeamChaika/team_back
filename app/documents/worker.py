@@ -21,6 +21,7 @@ from app.documents.service import DocumentService
 from app.documents.telegram import Telegram, deliver_notification, handle_update
 from app.documents.telegram_cleanup import deliver_cleanup
 from app.documents.telegram_link import queued_update
+from app.documents.waybill_reminders import deliver_reminder
 from app.documents.writeoff_reconciliation import run_reconciliation
 
 log = logging.getLogger(__name__)
@@ -245,6 +246,7 @@ def main():
     next_catalog_check = datetime.min.replace(tzinfo=UTC)
     consecutive_pool_failures = 0
     next_reconciliation = 0
+    next_waybill_reminder = 0
     try:
         while not stop.is_set():
             if support:
@@ -273,6 +275,13 @@ def main():
                                 "Document catalog refresh failed (%s)", type(error).__name__
                             )
                     healthy = process_jobs(service, bot, leader, commercial)
+                    if bot and not stop.is_set() and monotonic() >= next_waybill_reminder:
+                        next_waybill_reminder = monotonic() + 60
+                        try:
+                            if deliver_reminder(service, bot):
+                                next_waybill_reminder = monotonic()
+                        except Exception as error:
+                            log.warning("Waybill reminder unavailable (%s)", type(error).__name__)
                     if not stop.is_set() and monotonic() >= next_reconciliation:
                         run_reconciliation(service)
                         next_reconciliation = monotonic() + 5

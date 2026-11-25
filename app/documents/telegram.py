@@ -24,11 +24,11 @@ class Telegram:
             transport=transport,
         )
 
-    def call(self, method, *, photo=None, document=None, **payload):
+    def call(self, method, *, photo=None, document=None, request_timeout=25, **payload):
         if photo is not None and document is not None:
             raise ValueError("Only one Telegram attachment is supported")
         if photo is None and document is None:
-            response = self.client.post(method, json=payload)
+            response = self.client.post(method, json=payload, timeout=request_timeout)
         else:
             fields = {
                 key: json.dumps(value, ensure_ascii=False)
@@ -39,6 +39,7 @@ class Telegram:
             response = self.client.post(
                 method,
                 data=fields,
+                timeout=request_timeout,
                 files={"document": document}
                 if document is not None
                 else {"photo": ("document.png", photo, "image/png")},

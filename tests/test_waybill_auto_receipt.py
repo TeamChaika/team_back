@@ -9,13 +9,15 @@ from xml.etree.ElementTree import fromstring
 import pytest
 from fastapi import HTTPException
 
-from app.documents import auto_receipt
+from app.documents import auto_receipt_deadlines
 from app.documents.auto_receipt import queue_due_one
 from app.documents.dispatch import deliver_one
 from app.documents.reads import ZONE
 from app.documents.reconcile import reconcile
 from tests.test_native_documents import (
+    FOREIGN,
     PRODUCT,
+    RECEIVER,
     SENDER,
     SOURCE,
     TARGET,
@@ -27,6 +29,55 @@ from tests.test_native_documents import (
     service,  # noqa: F401
 )
 from tests.test_receipt_discrepancies import receive
+
+
+def shown_deadline(service, doc):
+    card = detail(service, doc)
+    rows = service.dispatch(RECEIVER, "GET", "waybill", params={"query": doc["number"]})["rows"]
+    assert len(rows) == 1
+    assert rows[0]["auto_receipt_due_at"] == card["auto_receipt_due_at"]
+    return card["auto_receipt_due_at"]
+
+
+def test_deadline_matches_the_item_edit_clock_and_disappears_on_dispute(service, enabled):
+    doc = create(service)
+    created = age_waybill(service, doc, timedelta(days=4))
+    assert shown_deadline(service, doc) == (created + timedelta(hours=72)).isoformat()
+    assert service.dispatch(FOREIGN, "GET", "waybill")["rows"] == []
+    with pytest.raises(HTTPException) as forbidden:
+        service.dispatch(FOREIGN, "GET", f"waybill/{doc['id']}")
+    assert forbidden.value.status_code == 404
+    edited = act(service, doc, "edit", SENDER, body(version=1, comment="Details"))
+    assert shown_deadline(service, edited) == (created + timedelta(hours=72)).isoformat()
+    edited = act(
+        service, edited, "edit", SENDER,
+        body(version=edited["version"], items=[{"product_id": str(PRODUCT), "amount": 5}]),
+    )
+    with service.database.connection(readonly=True) as db:
+        changed = db.execute(
+            "SELECT max(created_at) AS at FROM portal_documents_event WHERE kind='waybill' "
+            "AND document_id=%s AND action='edit' AND data->>'items_changed'='true'", (doc["id"],),
+        ).fetchone()["at"]
+    assert shown_deadline(service, edited) == (changed + timedelta(hours=72)).isoformat()
+    assert not queue_due_one(service)
+    received = receive(service, edited)
+    assert shown_deadline(service, received) is None
+
+
+def test_deadline_is_absent_for_legacy_disabled_and_finished_waybills(service):
+    doc = create(service)
+    assert shown_deadline(service, doc) is None
+    with service.database.connection() as db:
+        db.execute("UPDATE waybill_auto_receipt_policy SET enabled_at=now()")
+    try:
+        assert shown_deadline(service, doc) is None
+        eligible = create(service)
+        assert shown_deadline(service, eligible) is not None
+        act(service, eligible, "deny")
+        assert shown_deadline(service, eligible) is None
+    finally:
+        with service.database.connection() as db:
+            db.execute("UPDATE waybill_auto_receipt_policy SET enabled_at=NULL")
 
 
 @pytest.fixture
@@ -77,6 +128,7 @@ def test_system_receives_exact_quantity_once_with_original_document_date(service
     assert not queue_due_one(service)
     assert not service.provider.sends
     queued = detail(service, doc)
+    assert shown_deadline(service, doc) is None
     assert queued["receipt_state"] == "accepted"
     assert queued["items"][0]["received_amount"] == queued["items"][0]["amount"] == 1.25
     assert queued["history"][0]["action"] == "auto_receive"
@@ -107,11 +159,13 @@ def test_both_warehouses_must_be_enabled_at_acceptance_time(service, enabled, mo
     doc = create(service)
     age_waybill(service, doc, timedelta(days=4))
     selection = {"mode": "selected", "store_ids": []}
-    monkeypatch.setattr(auto_receipt, "load_settings", lambda db: {"waybill": selection})
+    monkeypatch.setattr(auto_receipt_deadlines, "load_settings", lambda db: {"waybill": selection})
     for single_store in (SOURCE, TARGET):
         selection["store_ids"] = [str(single_store)]
+        assert shown_deadline(service, doc) is None
         assert not queue_due_one(service)
     selection["store_ids"] = [str(SOURCE), str(TARGET)]
+    assert shown_deadline(service, doc) is not None
     assert queue_due_one(service)
 
 
