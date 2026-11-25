@@ -63,10 +63,11 @@ def queue_due_one(service):
             "submission_state='queued',processed_by_id=NULL WHERE id=%s RETURNING *",
             (doc["id"],),
         ).fetchone()
-        db.execute(
-            "UPDATE waybills_items SET received_amount=amount WHERE waybill_id=%s",
+        items = db.execute(
+            "UPDATE waybills_items SET received_amount=amount WHERE waybill_id=%s "
+            "RETURNING product_id::text,amount,received_amount",
             (doc["id"],),
-        )
+        ).fetchall()
         # This operation is internal only; the public mutation API does not accept it.
         db.execute(
             "INSERT INTO portal_documents_operation "
@@ -74,6 +75,6 @@ def queue_due_one(service):
             "VALUES (%s,NULL,'waybill','auto_receive',%s,%s,'queued',%s,now())",
             (key, doc["id"], fingerprint.hexdigest(), Jsonb(summary("waybill", doc))),
         )
-        event(db, "waybill", doc, None, "auto_receive")
+        event(db, "waybill", doc, None, "auto_receive", {"items": items})
         queue_submission(db, service.provider, key, "waybill", doc, receiver=None)
         return True

@@ -81,6 +81,9 @@ def test_system_receives_exact_quantity_once_with_original_document_date(service
     assert queued["items"][0]["received_amount"] == queued["items"][0]["amount"] == 1.25
     assert queued["history"][0]["action"] == "auto_receive"
     assert queued["history"][0]["actor"] == "Система"
+    assert queued["history"][0]["data"]["items"] == [
+        {"product_id": str(PRODUCT), "amount": 1.25, "received_amount": 1.25}
+    ]
     with service.database.connection() as db:
         doc_row = db.execute("SELECT processed_by_id FROM waybills").fetchone()
         assert doc_row["processed_by_id"] is None
