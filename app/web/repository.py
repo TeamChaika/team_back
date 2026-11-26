@@ -1,7 +1,7 @@
 """Explicit, parameterized read queries with a shared scope for lists and details."""
 
 import json
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal, localcontext
@@ -429,6 +429,7 @@ class Repository:
         dish_name=None,
         live_bundle=None,
         with_scope_coverage=False,
+        db=None,
     ):
         require_warehouse_section(scope, "sales")
         if kind not in {"daily", "dishes", "payments", "discounts", "returns", "waiters", "hours"}:
@@ -440,7 +441,9 @@ class Repository:
             loaded_dates = sorted({row["business_date"] for row in coverage})
             live_bundle = None
         else:
-            with self.connection() as db:
+            # Allocation writes already hold actor/venue locks in this transaction.
+            # Reuse it instead of waiting for another connection from the same pool.
+            with (nullcontext(db) if db is not None else self.connection()) as db:
                 coverage = db.execute(
                     "SELECT d.business_date,s.checks,r.observed_at,"
                     "r.request->'filters'->'Department.Id' AS department_filter "

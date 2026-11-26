@@ -11,7 +11,7 @@
 | Обязательная смена временного пароля | [Порядок выпуска и маркировка пользователей](password-change.md) | [app/web/password_policy.py](../app/web/password_policy.py), зависимости доступа в [app/portal.py](../app/portal.py) |
 | Единый предел по выбранным складам | [Контракт, миграции и выпуск](warehouse-access.md) | `app/web/repository.py::Scope`, `administration.py`, `permissions.py`, `app/documents/policy.py` |
 | Права пользователей dashboard | [API и доступ](CODEMAPS/api-access.md) | [app/web/administration.py](../app/web/administration.py) |
-| Прибыли и убытки заведений | [Права и маршруты](CODEMAPS/api-access.md) | [Отчёт владельца](../app/web/finance_routes.py), [журнал расходов](../app/web/finance_ledger.py) |
+| Прибыли и убытки заведений | [Права и маршруты](CODEMAPS/api-access.md) | [Отчёт владельца](../app/web/finance_routes.py), [журнал расходов](../app/web/finance_ledger.py), [общие счета сети и распределение](../app/web/finance_allocations.py) |
 | Рассылка закупок в Telegram | [Запуск и хранение квитанций](CODEMAPS/operations.md) | [Настройки каналов](../app/web/purchase_digest.py), [отправка](../app/purchase_digest_delivery.py), [отбор накладных и Excel](../app/purchase_digest_report.py) |
 | Сотрудники iiko, создание и сверка | [API и доступ](CODEMAPS/api-access.md) | [app/web/employees.py](../app/web/employees.py) |
 | Депозиты и права заведений | [API и доступ](CODEMAPS/api-access.md) | [app/web/deposits.py](../app/web/deposits.py) |

@@ -66,7 +66,7 @@ class Access:
         condition = "e.department_id=ANY(%s::uuid[])"
         params = [list(self.venues)]
         if self.level == "manager":
-            condition += " AND e.author_id=%s"
+            condition += " AND e.author_id=%s AND e.allocation_id IS NULL"
             params.append(self.actor)
         return condition, params
 
@@ -75,7 +75,8 @@ class Access:
 FIELDS = ",".join(ExpenseFields.model_fields)
 VISIBLE = (
     "SELECT e.id,e.department_id,e.author_id,u.display_name AS author,e.expense_date,"
-    "e.paid_date,e.category,e.amount,e.payment_method,e.comment,e.revision,e.cancelled "
+    "e.paid_date,e.category,e.amount,e.payment_method,e.comment,e.revision,e.cancelled,"
+    "e.allocation_id "
     "FROM chaika.finance_expenses e JOIN chaika.web_users u ON u.id=e.author_id WHERE "
 )
 
@@ -98,15 +99,18 @@ def public_row(row, access):
         "department": access.venues[row["department_id"]]["name"],
         "author": row["author"],
         "revision": row["revision"],
+        "allocation_id": str(row["allocation_id"]) if row.get("allocation_id") else None,
+        "can_view_allocation": bool(row.get("allocation_can_view", False)),
         "can_edit": bool(
             not row["cancelled"]
             and access.venues[row["department_id"]]["writable"]
             and (access.level != "manager" or row["paid_date"] is None)
+            and (not row.get("allocation_id") or row.get("allocation_can_edit", False))
         ),
     }
 
 
-def _access(db, scope, *, writing):
+def _access(db, scope, *, writing, all_venues=False):
     # Account edits lock the same user before replacing their department grants.
     profile = db.execute(
         "SELECT id,role,sections,all_departments,warehouse_scope_mode,password_change_required "
@@ -129,11 +133,12 @@ def _access(db, scope, *, writing):
         "SELECT n.id,n.name,n.present_in_latest AND NOT (coalesce((SELECT settings "
         "#> '{analytics,archived_department_ids}' FROM chaika.operation_settings WHERE singleton),"
         "'[]'::jsonb) ? n.id::text) AS writable FROM chaika.corporate_nodes n "
-        "WHERE n.source_id='primary' AND n.type='DEPARTMENT' AND n.id=ANY(%s::uuid[]) "
+        "WHERE n.source_id='primary' AND n.type='DEPARTMENT' "
+        "AND (%s OR n.id=ANY(%s::uuid[])) "
         "AND (%s OR EXISTS (SELECT FROM chaika.web_department_access a WHERE "
         "a.source_id=n.source_id AND a.department_id=n.id AND a.user_id=%s))"
         + (" ORDER BY n.id FOR SHARE OF n" if writing else ""),
-        (list(scope.ids), profile["all_departments"], profile["id"]),
+        (all_venues, list(scope.ids), profile["all_departments"], profile["id"]),
     ).fetchall()
     return Access(profile["id"], level, {r["id"]: r for r in venues})
 
@@ -169,11 +174,11 @@ class FinanceLedger:
         self.repo = repo
 
     @contextmanager
-    def _write(self, scope):
+    def _write(self, scope, *, all_venues=False):
         self.repo._pool.open()
         with self.repo._pool.connection() as db, db.transaction():
             db.execute("SET LOCAL statement_timeout='15000ms'")
-            yield db, _access(db, scope, writing=True)
+            yield db, _access(db, scope, writing=True, all_venues=all_venues)
 
     def list(self, scope, start, end, *, limit, offset):
         with self.repo.connection(repeatable=True) as db:
@@ -189,6 +194,26 @@ class FinanceLedger:
                 "LIMIT %s OFFSET %s",
                 [*params, limit, offset],
             ).fetchall()
+            allocation_ids = list({r["allocation_id"] for r in rows if r["allocation_id"]})
+            if allocation_ids and access.level != "manager":
+                group_access = _access(db, scope, writing=False, all_venues=True)
+                groups = db.execute(
+                    "SELECT id,access_department_ids,parts,cancelled "
+                    "FROM chaika.finance_allocations WHERE id=ANY(%s::uuid[])",
+                    (allocation_ids,),
+                ).fetchall()
+                editable = {
+                    group["id"] for group in groups
+                    if not group["cancelled"]
+                    and set(group["access_department_ids"]).issubset(group_access.venues)
+                    and all(group_access.venues.get(UUID(part["department_id"]), {}).get("writable")
+                            for part in group["parts"])
+                }
+                viewable = {group["id"] for group in groups
+                            if set(group["access_department_ids"]).issubset(group_access.venues)}
+                for row in rows:
+                    row["allocation_can_edit"] = row["allocation_id"] in editable
+                    row["allocation_can_view"] = row["allocation_id"] in viewable
             return {"rows": [public_row(r, access) for r in rows], "total": total}
 
     def totals(self, scope, start, end):
@@ -200,21 +225,60 @@ class FinanceLedger:
                 raise HTTPException(403, "Изменился доступ к выбранным заведениям. Обновите отчёт.")
             condition, params = access.visibility
             groups = db.execute(
-                "SELECT category,payment_method,sum(amount) AS amount "
+                "SELECT category,payment_method,(allocation_id IS NOT NULL) AS allocated,"
+                "sum(amount) AS amount "
                 "FROM chaika.finance_expenses e WHERE "
                 + condition
                 + " AND NOT cancelled AND expense_date BETWEEN %s AND %s "
-                "GROUP BY category,payment_method ORDER BY category",
+                "GROUP BY category,payment_method,(allocation_id IS NOT NULL) ORDER BY category",
                 [*params, start, end],
             ).fetchall()
+            # A network report is determined from the authoritative directory, not
+            # from the user's visible subset or the presence of query parameters.
+            network = db.execute(
+                "SELECT id FROM chaika.corporate_nodes n WHERE source_id='primary' "
+                "AND type='DEPARTMENT' AND present_in_latest AND NOT (coalesce((SELECT "
+                "settings #> '{analytics,archived_department_ids}' FROM chaika.operation_settings "
+                "WHERE singleton),'[]'::jsonb) ? n.id::text)"
+            ).fetchall()
+            network_ids = {row["id"] for row in network}
+            pending_groups = []
+            if network_ids and network_ids.issubset(access.venues):
+                pending_groups = db.execute(
+                    "SELECT a.category,a.payment_method,sum(a.amount) AS amount "
+                    "FROM chaika.finance_allocations a WHERE a.method='pending' "
+                    "AND NOT a.cancelled AND a.expense_date BETWEEN %s AND %s "
+                    "AND NOT EXISTS (SELECT FROM unnest(a.access_department_ids) AS d(id) "
+                    "WHERE NOT EXISTS (SELECT FROM chaika.corporate_nodes n "
+                    "JOIN chaika.web_users u ON u.id=%s WHERE n.source_id='primary' "
+                    "AND n.type='DEPARTMENT' AND n.id=d.id AND (u.all_departments OR EXISTS "
+                    "(SELECT FROM chaika.web_department_access p WHERE p.user_id=u.id "
+                    "AND p.source_id=n.source_id AND p.department_id=n.id)))) "
+                    "GROUP BY a.category,a.payment_method ORDER BY a.category",
+                    (start, end, access.actor),
+                ).fetchall()
         amounts = {"cash": Decimal(0), "bank": Decimal(0)}
         categories = {}
+        direct = allocated = Decimal(0)
         for row in groups:
+            if row["allocated"]:
+                allocated += row["amount"]
+            else:
+                direct += row["amount"]
+            amounts[row["payment_method"]] += row["amount"]
+            key = row["category"]
+            categories[key] = categories.get(key, Decimal(0)) + row["amount"]
+        pending = Decimal(0)
+        for row in pending_groups:
+            pending += row["amount"]
             amounts[row["payment_method"]] += row["amount"]
             key = row["category"]
             categories[key] = categories.get(key, Decimal(0)) + row["amount"]
         return {
             "expenses": format(sum(amounts.values()), ".2f"),
+            "direct_expenses": format(direct, ".2f"),
+            "allocated_expenses": format(allocated, ".2f"),
+            "pending_expenses": format(pending, ".2f"),
             **{key: format(value, ".2f") for key, value in amounts.items()},
             "by_category": [
                 {"category": key, "amount": format(value, ".2f")}
@@ -270,6 +334,8 @@ class FinanceLedger:
     def _change(self, scope, expense_id, payload, action):
         with self._write(scope) as (db, access):
             before = _read_one(db, access, expense_id, lock=True)
+            if before["allocation_id"] is not None:
+                raise HTTPException(403, "Долю общего расхода изменяют через распределение.")
             access.require_writable(before["department_id"])
             if before["paid_date"] and access.level == "manager":
                 raise HTTPException(
