@@ -333,3 +333,41 @@ def test_allocation_tables_have_rls_and_no_public_access(ledger_db):
         (["finance_allocations", "finance_allocation_history"],),
     ).fetchall()
     assert len(rows) == 2 and all(row["relrowsecurity"] and row["private"] for row in rows)
+
+
+def test_manual_amounts_are_receipted_and_legacy_group_can_change_methods(ledger_db):
+    ledger, _, (_, _, _, owner), venues = ledger_db
+    allocation = FinanceAllocations(ledger.repo)
+
+    def parts(field, values):
+        return [{"department_id": venue, field: value}
+                for venue, value in zip(venues, values, strict=True)]
+
+    fields = command(venues).model_dump()
+    amounts = parts("amount", ("12.31", "87.70"))
+    payload = AllocationCreate(**(fields | {"method": "amount", "parts": amounts}))
+    created = allocation.create(owner, payload, calculate(owner))
+    # Replaying different entered amounts with the same total is a different request.
+    altered = AllocationCreate(**(payload.model_dump() | {"parts": parts("amount", (
+        "12.32", "87.69"))}))
+    with pytest.raises(HTTPException, match="409"):
+        allocation.create(owner, altered, no_calculation)
+    assert allocation.create(owner, payload, no_calculation)["id"] == created["id"]
+    saved = allocation.get(owner, created["id"])
+    assert {p["department_id"]: p["amount"] for p in saved["parts"]} == {
+        str(venues[0]): "12.31", str(venues[1]): "87.70",
+    }
+    # Existing weight-based allocations can be switched to either new method.
+    legacy = AllocationCreate(**(fields | {"request_id": uuid4(), "method": "weights",
+                                            "parts": parts("weight", ("1", "2"))}))
+    group = allocation.create(owner, legacy, calculate(owner))
+    percent = edited(legacy, method="percent", parts=parts("weight", ("25", "75")))
+    changed = allocation.update(owner, group["id"], percent, calculate(owner))
+    assert changed["method"] == "percent"
+    assert {p["amount"] for p in changed["parts"]} == {"25.00", "75.01"}
+    exact = edited(legacy, revision=2, method="amount", parts=amounts)
+    allocation.update(owner, group["id"], exact, calculate(owner))
+    assert ledger.totals(owner, DAY, DAY)["expenses"] == "200.02"
+    assert [r["after"]["method"] for r in allocation.history(owner, group["id"])["rows"]] == [
+        "amount", "percent", "weights",
+    ]

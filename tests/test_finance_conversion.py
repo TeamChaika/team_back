@@ -111,6 +111,26 @@ def test_conversion_closed_source_scope_survives_source_exclusion(ledger_db):
             operation()
 
 
+def test_conversion_to_manual_amounts_rejects_same_request_with_different_split(ledger_db):
+    ledger, _, (manager, _, _, owner), venues = ledger_db
+    source = ledger.create(manager, expense(venues[0]))
+    groups = FinanceAllocations(ledger.repo)
+    parts = [{"department_id": venues[0], "amount": "20.50"},
+             {"department_id": venues[1], "amount": "100.00"}]
+    payload = conversion(source, venues, method="amount", parts=parts)
+    created = groups.convert(owner, source["id"], payload, calculate(owner))
+    reissued = conversion(source, venues, method="amount", parts=list(reversed(parts)),
+                          request_id=payload.request_id)
+    assert groups.convert(owner, source["id"], reissued, no_calculation)["id"] == created["id"]
+    swapped = [{**part, "amount": other["amount"]}
+               for part, other in zip(parts, reversed(parts), strict=True)]
+    different = conversion(source, venues, method="amount", parts=swapped,
+                           request_id=payload.request_id)
+    with pytest.raises(HTTPException, match="409"):
+        groups.convert(owner, source["id"], different, no_calculation)
+    assert ledger.totals(owner, DAY, DAY)["expenses"] == "120.50"
+
+
 def test_conversion_correction_and_rollback(ledger_db, monkeypatch):
     ledger, db, (manager, _, _, owner), venues = ledger_db
     source = ledger.create(manager, expense(venues[0]))

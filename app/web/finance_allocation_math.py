@@ -14,7 +14,7 @@ from pydantic import Field, model_validator
 from app.web.coverage import ZONE
 from app.web.finance_ledger import ExpenseCancel, ExpenseFields, Input
 
-Method = Literal["equal", "weights", "revenue", "pending"]
+Method = Literal["equal", "percent", "amount", "weights", "revenue", "pending"]
 Money = Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=2)]
 Weight = Annotated[Decimal, Field(gt=0, max_digits=24, decimal_places=12)]
 
@@ -26,6 +26,7 @@ class AllocationPart(Input):
 
 
 class Distribution(Input):
+    amount: Money
     method: Method
     parts: list[AllocationPart] = Field(min_length=2, max_length=100)
 
@@ -35,6 +36,16 @@ class Distribution(Input):
             raise ValueError("Выберите разные заведения.")
         if self.method == "weights" and any(p.weight is None for p in self.parts):
             raise ValueError("Укажите положительный вес каждого заведения.")
+        if self.method == "percent":
+            if any(p.weight is None for p in self.parts):
+                raise ValueError("Укажите процент для каждого заведения.")
+            if sum(p.weight for p in self.parts) != 100:
+                raise ValueError("Сумма процентов должна составлять 100%.")
+        if self.method == "amount":
+            if any(p.amount is None or p.amount <= 0 for p in self.parts):
+                raise ValueError("Укажите положительную сумму для каждого заведения.")
+            if sum(p.amount for p in self.parts) != self.amount:
+                raise ValueError("Суммы по заведениям должны совпадать с суммой расхода.")
         amounts = [p.amount is not None for p in self.parts]
         if any(amounts) and not all(amounts):
             raise ValueError("Подтвердите суммы для всех заведений.")
@@ -47,7 +58,6 @@ class Distribution(Input):
 
 class AllocationPreview(Distribution):
     expense_date: date
-    amount: Money
 
 
 class AllocationFields(ExpenseFields, Distribution):
@@ -116,9 +126,12 @@ def calculate_parts(scope, repo, payload, *, db=None):
         raise HTTPException(403, "Нет доступа ко всем заведениям распределения.")
     if payload.method == "pending":
         raise HTTPException(422, "Отложенный расход сохраняется без расчёта долей.")
+    if payload.method == "amount":
+        return [{"department_id": part.department_id, "weight": part.amount, "amount": part.amount}
+                for part in payload.parts]
     if payload.method == "revenue":
         weights = _revenue_weights(scope, repo, payload, db=db)
-    elif payload.method == "weights":
+    elif payload.method in {"weights", "percent"}:
         weights = [part.weight for part in payload.parts]
     else:
         weights = [Decimal(1)] * len(payload.parts)
@@ -154,6 +167,6 @@ def calculate_parts(scope, repo, payload, *, db=None):
 def public_preview(method, parts):
     return {"method": method, "parts": [{
         "department_id": str(part["department_id"]),
-        "weight": str(part["weight"]),
+        "weight": format(part["weight"], "f"),
         "amount": format(part["amount"], ".2f"),
     } for part in parts]}

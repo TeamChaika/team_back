@@ -36,6 +36,11 @@ def _request(payload):
     result["amount"] = format(payload.amount, ".2f")
     result["parts"] = sorted(result["parts"], key=lambda part: part["department_id"])
     for part in result["parts"]:
+        if payload.method == "amount":
+            # The individual amounts are the user's request in this mode.
+            part["amount"] = format(Decimal(part["amount"]), ".2f")
+            part.pop("weight", None)
+            continue
         if part.get("weight") is not None:
             part["weight"] = str(Decimal(part["weight"]).normalize())
         part.pop("amount", None)  # Preview confirmation is not the expense's identity.
@@ -57,7 +62,7 @@ def _calculated(payload, calculate, db):
                 or not weight.is_finite() or weight < 0):
             raise ValueError("Allocation calculator returned invalid amounts or weights")
         normalized.append({"department_id": str(part["department_id"]),
-                           "weight": str(weight), "amount": format(amount, ".2f")})
+                           "weight": format(weight, "f"), "amount": format(amount, ".2f")})
     if sum(Decimal(part["amount"]) for part in normalized) != payload.amount:
         raise ValueError("Allocation calculator did not preserve total")
     return sorted(normalized, key=lambda part: part["department_id"])

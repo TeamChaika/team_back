@@ -134,6 +134,49 @@ def test_decimal_weights_and_tiny_positive_parts(api):
     assert client.post(BASE + "/preview", json=data, headers=ORIGIN).status_code == 422
 
 
+def test_percentages_and_explicit_amounts_preview_and_save(api):
+    state, client = api
+    data = full_payload(method="percent", amount="99.99")
+    data["parts"][0]["weight"], data["parts"][1]["weight"] = "66.67", "33.33"
+    preview = client.post(BASE + "/preview", headers=ORIGIN, json={
+        key: data[key] for key in ("amount", "expense_date", "method", "parts")
+    })
+    assert preview.status_code == 200, preview.text
+    assert [p["amount"] for p in preview.json()["parts"]] == ["66.66", "33.33"]
+    data["parts"] = preview.json()["parts"]
+    assert client.post(BASE, headers=ORIGIN, json=data).status_code == 200
+    data.update(method="amount", parts=[{"department_id": str(A), "amount": "95.01"},
+                                       {"department_id": str(B), "amount": "4.98"}])
+    parts = client.post(BASE, headers=ORIGIN, json=data).json()["parts"]
+    assert [Decimal(str(p["amount"])) for p in parts] == [Decimal("95.01"), Decimal("4.98")]
+    assert state.calls == 0
+
+
+def test_percent_preview_uses_decimal_notation_for_editable_weights(api):
+    _, client = api
+    data = payload("percent", "100000000.00")
+    data["parts"][0]["weight"], data["parts"][1]["weight"] = "0.00000001", "99.99999999"
+    result = client.post(BASE + "/preview", headers=ORIGIN, json=data)
+    assert result.status_code == 200, result.text
+    assert result.json()["parts"][0]["weight"] == "0.00000001"
+    assert result.json()["parts"][0]["amount"] == "0.01"
+
+
+@pytest.mark.parametrize(("method", "values"), [
+    ("percent", ("44.99", "55")), ("percent", ("45.01", "55")),
+    ("percent", (None, "100")), ("percent", ("0", "100")),
+    ("amount", ("4.99", "5")), ("amount", ("5.01", "5")),
+    ("amount", ("0", "10")), ("amount", ("10", None)), ("amount", ("4.999", "5.001")),
+])
+def test_invalid_manual_distribution_never_posts(api, method, values):
+    state, client = api
+    data = full_payload(method=method)
+    for part, value in zip(data["parts"], values, strict=True):
+        part["weight" if method == "percent" else "amount"] = value
+    assert client.post(BASE, headers=ORIGIN, json=data).status_code == 422
+    assert state.writes == 0
+
+
 @pytest.mark.parametrize("mutation", [
     lambda p: p.update(parts=p["parts"][:1]),
     lambda p: p["parts"][1].update(department_id=str(A)),
