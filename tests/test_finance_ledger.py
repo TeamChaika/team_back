@@ -64,21 +64,9 @@ def ledger_db():
     assert conninfo_to_dict(dsn).get("host") in {"127.0.0.1", "localhost"}
     schema = "finance_test_" + uuid4().hex
     # Same SQL and grants as production, in a fresh private schema.
-    migration = next(
-        (Path(__file__).resolve().parents[1] / "supabase/migrations").glob(
-            "*_finance_expense_ledger.sql"
-        )
-    ).read_text(encoding="utf-8")
-    migration += next(
-        (Path(__file__).resolve().parents[1] / "supabase/migrations").glob(
-            "*_finance_allocations.sql"
-        )
-    ).read_text(encoding="utf-8")
-    migration += next(
-        (Path(__file__).resolve().parents[1] / "supabase/migrations").glob(
-            "*_finance_expense_conversion.sql"
-        )
-    ).read_text(encoding="utf-8")
+    migrations = Path(__file__).resolve().parents[1] / "supabase/migrations"
+    migration = "\n".join(path.read_text(encoding="utf-8")
+                          for path in sorted(migrations.glob("*_finance_*.sql")))
     migration = (
         migration.replace("chaika.", schema + ".")
         .replace("PUBLIC, anon, authenticated", "PUBLIC")
