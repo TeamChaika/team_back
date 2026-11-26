@@ -56,6 +56,10 @@ def api():
         def update(self, scope, allocation_id, payload, calculate):
             return self.create(scope, payload, calculate)
 
+        def convert(self, scope, expense_id, payload, calculate):
+            state.conversion = (expense_id, payload.revision, payload.request_id)
+            return self.create(scope, payload, calculate)
+
         def get(self, scope, allocation_id):
             return {"id": str(allocation_id)}
 
@@ -100,6 +104,24 @@ def test_equal_split_preserves_cents_and_ties_are_independent_of_input_order(api
         assert result.status_code == 200, result.text
         amounts = {p["department_id"]: p["amount"] for p in result.json()["parts"]}
         assert amounts == {str(A): "3.34", str(B): "3.33", str(C): "3.33"}
+
+
+def test_convert_existing_expense_requires_accounting_origin_and_source_revision(api):
+    state, client = api
+    path = f"/api/profit-loss/expenses/{C}/allocate"
+    data = {**full_payload(), "revision": 3}
+    assert client.post(path, json=data).status_code == 403
+    state.scope.user["sections"] = ["profit-loss"]
+    assert client.post(path, json=data, headers=ORIGIN).status_code == 403
+    state.scope.user["sections"] = ["profit-loss-accounting"]
+    assert client.post(path, json=full_payload(), headers=ORIGIN).status_code == 422
+    assert state.writes == 0
+    for role in ("manager", "owner"):
+        state.scope.user["role"] = role
+        result = client.post(path, json=data, headers=ORIGIN)
+        assert result.status_code == 200, result.text
+        assert state.conversion == (C, 3, UUID(data["request_id"]))
+        assert sum(Decimal(p["amount"]) for p in result.json()["parts"]) == Decimal("10.00")
 
 
 def test_decimal_weights_and_tiny_positive_parts(api):

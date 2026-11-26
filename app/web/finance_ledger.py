@@ -76,7 +76,7 @@ FIELDS = ",".join(ExpenseFields.model_fields)
 VISIBLE = (
     "SELECT e.id,e.department_id,e.author_id,u.display_name AS author,e.expense_date,"
     "e.paid_date,e.category,e.amount,e.payment_method,e.comment,e.revision,e.cancelled,"
-    "e.allocation_id "
+    "e.allocation_id,e.converted_allocation_id "
     "FROM chaika.finance_expenses e JOIN chaika.web_users u ON u.id=e.author_id WHERE "
 )
 
@@ -88,6 +88,8 @@ def state(row):
         result["paid_date"] = result["paid_date"].isoformat()
     result["amount"] = format(result["amount"], ".2f")
     result["cancelled"] = row["cancelled"]
+    if row.get("converted_allocation_id"):
+        result["status"] = "converted"
     return result
 
 
@@ -100,6 +102,15 @@ def public_row(row, access):
         "author": row["author"],
         "revision": row["revision"],
         "allocation_id": str(row["allocation_id"]) if row.get("allocation_id") else None,
+        "status": "converted" if row.get("converted_allocation_id") else (
+            "cancelled" if row["cancelled"] else "active"),
+        "converted_allocation_id": (
+            str(row["converted_allocation_id"])
+            if row.get("converted_allocation_id") and row.get("allocation_can_view") else None
+        ),
+        "can_allocate": bool(access.level in {"accountant", "owner"} and not row["cancelled"]
+                             and not row.get("allocation_id")
+                             and not row.get("converted_allocation_id")),
         "can_view_allocation": bool(row.get("allocation_can_view", False)),
         "can_edit": bool(
             not row["cancelled"]
@@ -194,7 +205,8 @@ class FinanceLedger:
                 "LIMIT %s OFFSET %s",
                 [*params, limit, offset],
             ).fetchall()
-            allocation_ids = list({r["allocation_id"] for r in rows if r["allocation_id"]})
+            allocation_ids = list({r["allocation_id"] or r["converted_allocation_id"] for r in rows
+                                   if r["allocation_id"] or r["converted_allocation_id"]})
             if allocation_ids and access.level != "manager":
                 group_access = _access(db, scope, writing=False, all_venues=True)
                 groups = db.execute(
@@ -213,7 +225,9 @@ class FinanceLedger:
                             if set(group["access_department_ids"]).issubset(group_access.venues)}
                 for row in rows:
                     row["allocation_can_edit"] = row["allocation_id"] in editable
-                    row["allocation_can_view"] = row["allocation_id"] in viewable
+                    row["allocation_can_view"] = (
+                        row["allocation_id"] or row["converted_allocation_id"]
+                    ) in viewable
             return {"rows": [public_row(r, access) for r in rows], "total": total}
 
     def totals(self, scope, start, end):
@@ -334,6 +348,8 @@ class FinanceLedger:
     def _change(self, scope, expense_id, payload, action):
         with self._write(scope) as (db, access):
             before = _read_one(db, access, expense_id, lock=True)
+            if before.get("converted_allocation_id"):
+                raise HTTPException(409, "Расход уже распределён. Откройте распределение.")
             if before["allocation_id"] is not None:
                 raise HTTPException(403, "Долю общего расхода изменяют через распределение.")
             access.require_writable(before["department_id"])

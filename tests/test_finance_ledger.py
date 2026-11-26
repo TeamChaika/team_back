@@ -74,6 +74,11 @@ def ledger_db():
             "*_finance_allocations.sql"
         )
     ).read_text(encoding="utf-8")
+    migration += next(
+        (Path(__file__).resolve().parents[1] / "supabase/migrations").glob(
+            "*_finance_expense_conversion.sql"
+        )
+    ).read_text(encoding="utf-8")
     migration = (
         migration.replace("chaika.", schema + ".")
         .replace("PUBLIC, anon, authenticated", "PUBLIC")

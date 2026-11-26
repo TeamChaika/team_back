@@ -25,11 +25,13 @@ def test_expense_accrues_once_and_paid_amount_locks_for_manager(db, bundle, monk
     # The OLAP fixture shares its primary source with the restaurant directory.
     sources, snapshots = bundle
     sources[0] = Source("primary", "Test", "https://test.example/api", "a" * 64)
+    departments = snapshots["primary", "departments"]["payload"]
+    venue = departments["items"][0]["id"]
+    second_venue = str(uuid4())
+    departments["items"].append({**departments["items"][0], "id": second_venue, "name": "Second"})
+    departments["total"] = len(departments["items"])
     stage(db, bundle)
     publish(db, sources, snapshots)
-    venue = db.execute(
-        "SELECT id FROM chaika.corporate_nodes WHERE type='DEPARTMENT' AND source_id='primary'"
-    ).fetchone()[0]
     october = date(2026, 10, 31)
     november = date(2026, 11, 5)
     for day in (october, november):
@@ -54,7 +56,16 @@ def test_expense_accrues_once_and_paid_amount_locks_for_manager(db, bundle, monk
             (uid, person, role, sections),
         )
         db.execute("INSERT INTO chaika.web_department_access VALUES(%s,'primary',%s)", (uid, venue))
+        if person in {"accountant", "owner"}:
+            db.execute(
+                "INSERT INTO chaika.web_department_access VALUES(%s,'primary',%s)",
+                (uid, second_venue),
+            )
     db.execute("SET LOCAL ROLE chaika_backend")
+    # publish() checks all constraints immediately in its own production transaction.
+    # The API gets a fresh transaction with deferred allocation constraints in production.
+    db.execute("SET CONSTRAINTS chaika.finance_allocation_balanced, "
+               "chaika.finance_allocation_share_balanced DEFERRED")
     db.row_factory = dict_row
 
     # Share the outer test transaction between HTTP requests. Its fixture rolls it back.
@@ -129,3 +140,32 @@ def test_expense_accrues_once_and_paid_amount_locks_for_manager(db, bundle, monk
         report = client.get(base + "/report", params=payment_period).json()
         assert Decimal(report["expenses"]) == 0
         assert Decimal(report["operating_profit"]) == 600
+
+        allocation = {
+            **paid,
+            "request_id": str(uuid4()),
+            "method": "equal",
+            "parts": [{"department_id": venue}, {"department_id": second_venue}],
+        }
+        client.cookies.set(ACCESS_COOKIE, "manager")
+        assert client.post(url + "/allocate", json=allocation).status_code == 403
+        client.cookies.set(ACCESS_COOKIE, "accountant")
+        response = client.post(url + "/allocate", json=allocation)
+        assert response.is_success, response.text
+        group = response.json()
+        db.execute("SET CONSTRAINTS ALL IMMEDIATE")
+        assert group["source_expense_id"] == expense["id"]
+        assert group["author_id"] == identities["Bearer manager"]
+        assert sorted(part["amount"] for part in group["parts"]) == ["90.12", "90.13"]
+        assert client.post(url + "/allocate", json=allocation).json()["id"] == group["id"]
+        client.cookies.set(ACCESS_COOKIE, "manager")
+        original = client.get(ledger, params=period).json()["rows"]
+        assert len(original) == 1 and original[0]["status"] == "converted"
+        assert client.get(url + "/history").json()["rows"][0]["actor"] == "accountant"
+        client.cookies.set(ACCESS_COOKIE, "owner")
+        report = client.get(
+            base + "/report", params={**period, "department_id": [venue, second_venue]},
+        ).json()
+        assert Decimal(report["expenses"]) == Decimal("180.25")
+        assert report["allocated_expenses"] == report["expenses"]
+        assert Decimal(report["direct_expenses"]) == 0

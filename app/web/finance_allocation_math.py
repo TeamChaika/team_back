@@ -58,6 +58,10 @@ class AllocationCreate(AllocationFields):
     request_id: UUID
 
 
+class AllocationConvert(AllocationCreate):
+    revision: int = Field(ge=1)
+
+
 class AllocationEdit(AllocationFields):
     revision: int = Field(ge=1)
 

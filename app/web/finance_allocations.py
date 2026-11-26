@@ -6,7 +6,15 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException
 from psycopg.types.json import Jsonb
 
-from app.web.finance_ledger import FIELDS, ExpenseFields, FinanceLedger, _access, _record, state
+from app.web.finance_ledger import (
+    FIELDS,
+    ExpenseFields,
+    FinanceLedger,
+    _access,
+    _read_one,
+    _record,
+    state,
+)
 
 
 def _require_accounting(access):
@@ -56,7 +64,9 @@ def _calculated(payload, calculate, db):
 
 
 def _snapshot(row):
-    return {**state(row), "method": row["method"], "parts": row["parts"]}
+    return {**state(row), "method": row["method"], "parts": row["parts"],
+            "source_expense_id": (str(row["source_expense_id"])
+                                  if row.get("source_expense_id") else None)}
 
 
 def _read(db, access, allocation_id, *, lock=False):
@@ -74,6 +84,7 @@ def _read(db, access, allocation_id, *, lock=False):
 def _public(row, access):
     return {
         **_snapshot(row), "id": str(row["id"]), "revision": row["revision"],
+        "author_id": str(row["author_id"]),
         "parts": [{**part, "department": access.venues[UUID(part["department_id"])]["name"]}
                   for part in row["parts"]],
         "can_edit": not row["cancelled"] and (row["method"] == "pending" or all(
@@ -176,6 +187,61 @@ class FinanceAllocations(FinanceLedger):
                  Jsonb(parts), [UUID(part["department_id"]) for part in parts],
                  *(getattr(payload, field) for field in ExpenseFields.model_fields)),
             ).fetchone()
+            _sync_expenses(db, access, row)
+            _history(db, access, "create", row)
+            return _public(row, access)
+
+    def convert(self, scope, expense_id, payload, calculate):
+        """Retire an original receipt and post its allocation in one transaction."""
+        with self._write(scope, all_venues=True) as (db, access):
+            _require_accounting(access)
+            db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                       (f"finance-allocation:{access.actor}:{payload.request_id}",))
+            reused = db.execute(
+                "SELECT source_expense_id FROM chaika.finance_allocations "
+                "WHERE source_expense_id IS NOT NULL "
+                "AND request_payload->>'conversion_actor_id'=%s "
+                "AND request_payload->>'conversion_request_id'=%s",
+                (str(access.actor), str(payload.request_id)),
+            ).fetchone()
+            if reused and reused["source_expense_id"] != UUID(str(expense_id)):
+                raise HTTPException(409, "Номер запроса уже использован для другого расхода.")
+            before = _read_one(db, access, expense_id, lock=True)
+            submitted = {**_request(payload), "source_expense_id": str(expense_id),
+                         "conversion_actor_id": str(access.actor),
+                         "conversion_request_id": str(payload.request_id),
+                         "source_revision": payload.revision}
+            if before.get("converted_allocation_id"):
+                row = _read(db, access, before["converted_allocation_id"])
+                if row["request_payload"] != submitted:
+                    raise HTTPException(409, "Расход уже распределён. Обновите журнал.")
+                return _public(row, access)
+            if (before["allocation_id"] or before["cancelled"]
+                    or before["revision"] != payload.revision):
+                raise HTTPException(409, "Расход уже изменён. Обновите журнал.")
+            # A closed source may be moved, but its historical fields may not be corrected.
+            if not access.venues[before["department_id"]]["writable"] and any(
+                before[field] != getattr(payload, field) for field in ExpenseFields.model_fields
+            ):
+                raise HTTPException(403, "Нельзя исправлять поля расхода закрытого заведения.")
+            _require_parts(access, submitted["parts"])
+            parts = _calculated(payload, calculate, db)
+            participants = sorted({before["department_id"]} |
+                                  {UUID(part["department_id"]) for part in parts}, key=str)
+            row = db.execute(
+                "INSERT INTO chaika.finance_allocations "
+                "(author_id,request_id,request_payload,source_expense_id,method,parts,"
+                "access_department_ids," + FIELDS + ") "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                (before["author_id"], uuid4(), Jsonb(submitted), expense_id, payload.method,
+                 Jsonb(parts), participants,
+                 *(getattr(payload, field) for field in ExpenseFields.model_fields)),
+            ).fetchone()
+            retired = db.execute(
+                "UPDATE chaika.finance_expenses SET cancelled=true,converted_allocation_id=%s,"
+                "revision=revision+1 WHERE id=%s RETURNING *", (row["id"], expense_id),
+            ).fetchone()
+            _record(db, access, "convert", retired, before)
             _sync_expenses(db, access, row)
             _history(db, access, "create", row)
             return _public(row, access)

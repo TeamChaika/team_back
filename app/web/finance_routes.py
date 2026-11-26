@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from app.web.coverage import ZONE
 from app.web.finance_allocation_math import (
     AllocationCancel,
+    AllocationConvert,
     AllocationCreate,
     AllocationEdit,
     AllocationPreview,
@@ -184,6 +185,16 @@ def create_finance_router(access, repo, live_sales, *, ledger=None, allocations=
     def cancel(scope: Access, expense_id: UUID, payload: ExpenseCancel, request: Request):
         request.app.state.auth.check_origin(request)
         return ledger.cancel(scope, expense_id, payload)
+
+    @router.post("/expenses/{expense_id}/allocate")
+    def allocate_expense(
+        scope: AllocationAccess, expense_id: UUID, payload: AllocationConvert, request: Request,
+    ):
+        request.app.state.auth.check_origin(request)
+        return allocations.convert(
+            scope, expense_id, payload,
+            lambda value, db=None: calculate_parts(scope, repo, value, db=db),
+        )
 
     @router.get("/expenses/{expense_id}/history")
     def history(scope: Access, expense_id: UUID):
