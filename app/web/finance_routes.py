@@ -9,6 +9,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.web.coverage import ZONE
+from app.web.finance_allocation_math import (
+    AllocationCancel,
+    AllocationCreate,
+    AllocationEdit,
+    AllocationPreview,
+    calculate_parts,
+    public_preview,
+)
 from app.web.finance_ledger import ExpenseCancel, ExpenseCreate, ExpenseEdit, FinanceLedger
 from app.web.permissions import finance_level
 from app.web.repository import Scope
@@ -64,25 +72,92 @@ def _report(scope, repo, ledger, live_sales, start, end):
         ctx.prec = 70
         gross = Decimal(revenue) - Decimal(cost) if complete else None
         profit = gross - Decimal(expenses["expenses"]) if complete else None
+        before_allocation = (
+            gross - Decimal(expenses.get("direct_expenses", expenses["expenses"]))
+            if complete else None
+        )
     return {
         **expenses,
         "revenue": revenue,
         "cost": cost,
         "gross_profit": str(gross) if gross is not None else None,
         "operating_profit": str(profit) if profit is not None else None,
+        "operating_profit_before_allocation": (
+            str(before_allocation) if before_allocation is not None else None
+        ),
         "complete": complete,
         "provisional": complete and end == today,
     }
 
 
-def create_finance_router(access, repo, live_sales, *, ledger=None):
+def create_finance_router(access, repo, live_sales, *, ledger=None, allocations=None):
+    from app.web.finance_allocations import FinanceAllocations
+
     router = APIRouter(prefix="/api/profit-loss")
     ledger = ledger if ledger is not None else FinanceLedger(repo)
+    allocations = allocations if allocations is not None else FinanceAllocations(repo)
 
     def resolve(scope: Annotated[Scope, Depends(access)]):
         return _finance_scope(scope)
 
     Access = Annotated[Scope, Depends(resolve)]
+
+    def resolve_allocations(scope: Access):
+        if finance_level(scope.user) not in {"accountant", "owner"}:
+            raise HTTPException(403, "Распределение доступно бухгалтерии и владельцу.")
+        # Repository._read_scope keeps all granted departments in this inventory;
+        # the journal's selected venue is a display filter, not a grant boundary.
+        return replace(scope, selected=None)
+
+    AllocationAccess = Annotated[Scope, Depends(resolve_allocations)]
+
+    @router.post("/allocations/preview")
+    def preview(scope: AllocationAccess, payload: AllocationPreview, request: Request):
+        request.app.state.auth.check_origin(request)
+        return public_preview(payload.method, calculate_parts(scope, repo, payload))
+
+    @router.post("/allocations")
+    def allocation_create(scope: AllocationAccess, payload: AllocationCreate, request: Request):
+        request.app.state.auth.check_origin(request)
+        return allocations.create(
+            scope, payload, lambda value, db=None: calculate_parts(scope, repo, value, db=db),
+        )
+
+    @router.get("/allocations/pending")
+    def allocation_pending(
+        scope: AllocationAccess,
+        start: date,
+        end: date,
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ):
+        _check_period(start, end)
+        return allocations.pending(scope, start, end, limit=limit, offset=offset)
+
+    @router.get("/allocations/{allocation_id}")
+    def allocation_get(scope: AllocationAccess, allocation_id: UUID):
+        return allocations.get(scope, allocation_id)
+
+    @router.get("/allocations/{allocation_id}/history")
+    def allocation_history(scope: AllocationAccess, allocation_id: UUID):
+        return allocations.history(scope, allocation_id)
+
+    @router.patch("/allocations/{allocation_id}")
+    def allocation_update(
+        scope: AllocationAccess, allocation_id: UUID, payload: AllocationEdit, request: Request,
+    ):
+        request.app.state.auth.check_origin(request)
+        return allocations.update(
+            scope, allocation_id, payload,
+            lambda value, db=None: calculate_parts(scope, repo, value, db=db),
+        )
+
+    @router.post("/allocations/{allocation_id}/cancel")
+    def allocation_cancel(
+        scope: AllocationAccess, allocation_id: UUID, payload: AllocationCancel, request: Request,
+    ):
+        request.app.state.auth.check_origin(request)
+        return allocations.cancel(scope, allocation_id, payload)
 
     @router.get("/expenses")
     def expenses(
