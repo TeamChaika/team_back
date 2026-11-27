@@ -41,10 +41,12 @@ class ExpenseFields(Input):
 class ExpenseCreate(ExpenseFields):
     request_id: UUID
     department_id: UUID
+    approver_id: UUID | None = None
 
 
 class ExpenseEdit(ExpenseFields):
     revision: int = Field(ge=1)
+    approver_id: UUID | None = None
 
 
 class ExpenseCancel(Input):
@@ -76,7 +78,7 @@ FIELDS = ",".join(ExpenseFields.model_fields)
 VISIBLE = (
     "SELECT e.id,e.department_id,e.author_id,u.display_name AS author,e.expense_date,"
     "e.paid_date,e.category,e.amount,e.payment_method,e.comment,e.revision,e.cancelled,"
-    "e.allocation_id,e.converted_allocation_id "
+    "e.allocation_id,e.converted_allocation_id,e.approver_id,e.approver_name "
     "FROM chaika.finance_expenses e JOIN chaika.web_users u ON u.id=e.author_id WHERE "
 )
 
@@ -88,6 +90,9 @@ def state(row):
         result["paid_date"] = result["paid_date"].isoformat()
     result["amount"] = format(result["amount"], ".2f")
     result["cancelled"] = row["cancelled"]
+    if "approver_id" in row:
+        result["approver_id"] = str(row["approver_id"]) if row["approver_id"] else None
+        result["approver_name"] = row.get("approver_name")
     if row.get("converted_allocation_id"):
         result["status"] = "converted"
     return result
@@ -165,6 +170,33 @@ def _read_one(db, access, expense_id, *, lock=False):
     return row
 
 
+def _approvers(db, venues):
+    return db.execute(
+        "SELECT v.department_id,p.id,p.name,p.available_to_all "
+        "FROM unnest(%s::uuid[]) v(department_id) CROSS JOIN chaika.finance_approvers p "
+        "WHERE p.available_to_all OR EXISTS (SELECT FROM chaika.finance_department_approvers d "
+        "WHERE d.source_id='primary' AND d.department_id=v.department_id AND d.approver_id=p.id) "
+        "ORDER BY v.department_id,p.available_to_all,p.name,p.id", (list(venues),),
+    ).fetchall()
+
+
+def approval_for(choices, venue, payload, before=None):
+    saved_id = before.get("approver_id") if before else None
+    if saved_id and (
+        "approver_id" not in payload.model_fields_set or str(payload.approver_id) == str(saved_id)
+    ):
+        # Keep the original name even when this person has been renamed or unassigned.
+        return UUID(str(saved_id)), before["approver_name"]
+    available = {row["id"]: row["name"] for row in choices if row["department_id"] == venue}
+    if payload.approver_id is None:
+        if available:
+            raise HTTPException(422, "Укажите, кто согласовал расход.")
+        return None, None
+    if payload.approver_id not in available:
+        raise HTTPException(422, "Выбранный согласующий недоступен для этого расхода.")
+    return payload.approver_id, available[payload.approver_id]
+
+
 def _record(db, access, action, row, before=None):
     db.execute(
         "INSERT INTO chaika.finance_expense_history "
@@ -190,6 +222,11 @@ class FinanceLedger:
         with self.repo._pool.connection() as db, db.transaction():
             db.execute("SET LOCAL statement_timeout='15000ms'")
             yield db, _access(db, scope, writing=True, all_venues=all_venues)
+
+    def approvers(self, scope):
+        with self.repo.connection(repeatable=True) as db:
+            access = _access(db, scope, writing=False, all_venues=True)
+            return {"rows": _approvers(db, access.venues)}
 
     def list(self, scope, start, end, *, limit, offset):
         with self.repo.connection(repeatable=True) as db:
@@ -305,38 +342,35 @@ class FinanceLedger:
             venue = access.venues.get(payload.department_id)
             if venue is None:
                 raise HTTPException(403, "Нет доступа к этому заведению.")
-            added = db.execute(
-                "INSERT INTO chaika.finance_expenses (department_id,author_id,request_id,"
-                + FIELDS
-                + ") SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s WHERE %s "
-                "ON CONFLICT (author_id,request_id) DO NOTHING RETURNING id",
-                (
-                    payload.department_id,
-                    access.actor,
-                    payload.request_id,
-                    *(getattr(payload, field) for field in ExpenseFields.model_fields),
-                    venue["writable"],
-                ),
+            db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                       (f"finance-expense:{access.actor}:{payload.request_id}",))
+            original = db.execute(
+                "SELECT e.id,e.department_id,h.after_state FROM chaika.finance_expenses e "
+                "JOIN chaika.finance_expense_history h ON h.expense_id=e.id AND h.revision=1 "
+                "WHERE e.author_id=%s AND e.request_id=%s",
+                (access.actor, payload.request_id),
             ).fetchone()
-            if added:
-                row = _read_one(db, access, added["id"])
-                _record(db, access, "create", row)
-            else:
-                original = db.execute(
-                    "SELECT e.id,e.department_id,h.after_state FROM chaika.finance_expenses e "
-                    "JOIN chaika.finance_expense_history h ON h.expense_id=e.id AND h.revision=1 "
-                    "WHERE e.author_id=%s AND e.request_id=%s",
-                    (access.actor, payload.request_id),
-                ).fetchone()
+            if original:
                 submitted = state({**payload.model_dump(), "cancelled": False})
-                if original is None:
-                    raise HTTPException(403, "Ввод расходов недоступен для этого заведения.")
                 if (
                     original["department_id"] != payload.department_id
-                    or original["after_state"] != submitted
+                    or any(original["after_state"].get(key) != value for key, value
+                           in submitted.items() if key != "approver_name")
                 ):
                     raise HTTPException(409, "Номер запроса уже использован для другого расхода.")
-                row = _read_one(db, access, original["id"])
+                return public_row(_read_one(db, access, original["id"]), access)
+            access.require_writable(payload.department_id)
+            approval = approval_for(_approvers(db, [payload.department_id]),
+                                    payload.department_id, payload)
+            added = db.execute(
+                "INSERT INTO chaika.finance_expenses "
+                "(department_id,author_id,request_id,approver_id,approver_name," + FIELDS
+                + ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                (payload.department_id, access.actor, payload.request_id, *approval,
+                 *(getattr(payload, field) for field in ExpenseFields.model_fields)),
+            ).fetchone()
+            row = _read_one(db, access, added["id"])
+            _record(db, access, "create", row)
             return public_row(row, access)
 
     def update(self, scope, expense_id, payload):
@@ -366,11 +400,15 @@ class FinanceLedger:
                     (expense_id,),
                 )
             else:
+                venue = before["department_id"]
+                approval = approval_for(_approvers(db, [venue]), venue, payload, before)
                 db.execute(
                     "UPDATE chaika.finance_expenses SET (" + FIELDS + ")="
-                    "(%s,%s,%s,%s,%s,%s), revision=revision+1 WHERE id=%s",
+                    "(%s,%s,%s,%s,%s,%s),approver_id=%s,approver_name=%s,"
+                    "revision=revision+1 WHERE id=%s",
                     (
                         *(getattr(payload, field) for field in ExpenseFields.model_fields),
+                        *approval,
                         expense_id,
                     ),
                 )

@@ -11,8 +11,10 @@ from app.web.finance_ledger import (
     ExpenseFields,
     FinanceLedger,
     _access,
+    _approvers,
     _read_one,
     _record,
+    approval_for,
     state,
 )
 
@@ -36,6 +38,8 @@ def _request(payload):
     result["amount"] = format(payload.amount, ".2f")
     result["parts"] = sorted(result["parts"], key=lambda part: part["department_id"])
     for part in result["parts"]:
+        if part["approver_id"] is None:
+            part.pop("approver_id")  # Retried requests predating the directory.
         if payload.method == "amount":
             # The individual amounts are the user's request in this mode.
             part["amount"] = format(Decimal(part["amount"]), ".2f")
@@ -66,6 +70,20 @@ def _calculated(payload, calculate, db):
     if sum(Decimal(part["amount"]) for part in normalized) != payload.amount:
         raise ValueError("Allocation calculator did not preserve total")
     return sorted(normalized, key=lambda part: part["department_id"])
+
+
+def _approved_parts(payload, calculate, db, previous=()):
+    saved = {str(part["department_id"]): part for part in previous}
+    submitted = {str(part.department_id): part for part in payload.parts}
+    choices = _approvers(db, [part.department_id for part in payload.parts])
+    result = _calculated(payload, calculate, db)
+    for part in result:
+        member = submitted[part["department_id"]]
+        approver_id, name = approval_for(choices, member.department_id, member,
+                                         saved.get(part["department_id"]))
+        part["approver_id"] = str(approver_id) if approver_id else None
+        part["approver_name"] = name
+    return result
 
 
 def _snapshot(row):
@@ -115,33 +133,33 @@ def _sync_expenses(db, access, row):
         "FOR UPDATE", (row["id"],),
     ).fetchall()
     by_venue = {expense["department_id"]: expense for expense in existing}
-    active = {UUID(part["department_id"]): Decimal(part["amount"])
+    active = {UUID(part["department_id"]): part
               for part in row["parts"] if Decimal(part.get("amount", "0")) > 0}
     for venue in sorted(set(active) | set(by_venue), key=str):
         before = by_venue.get(venue)
         cancelled = row["cancelled"] or venue not in active
+        if cancelled and (before is None or before["cancelled"]):
+            continue
+        # Removed shares retain their own historical fields and approval.
+        part = before if cancelled else active[venue]
+        common = before if cancelled else row
+        values = [Decimal(part["amount"]) if field == "amount" else common[field]
+                  for field in ExpenseFields.model_fields]
+        approval = part.get("approver_id"), part.get("approver_name")
         if before is None:
-            if cancelled:
-                continue
-            values = [active[venue] if field == "amount" else row[field]
-                      for field in ExpenseFields.model_fields]
             child = db.execute(
                 "INSERT INTO chaika.finance_expenses "
-                "(department_id,author_id,request_id,allocation_id," + FIELDS + ") "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
-                (venue, row["author_id"], uuid4(), row["id"], *values),
+                "(department_id,author_id,request_id,allocation_id,approver_id,approver_name,"
+                + FIELDS + ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                (venue, row["author_id"], uuid4(), row["id"], *approval, *values),
             ).fetchone()
             _record(db, access, "create", child)
-        elif not before["cancelled"] or not cancelled:
-            # Removed shares retain their own historical value/date, without copying
-            # the new group's fields from venues they no longer participate in.
-            values = [active[venue] if field == "amount" else row[field]
-                      for field in ExpenseFields.model_fields] if not cancelled else [
-                          before[field] for field in ExpenseFields.model_fields]
+        else:
             child = db.execute(
                 "UPDATE chaika.finance_expenses SET (" + FIELDS + ")="
-                "(%s,%s,%s,%s,%s,%s),cancelled=%s,revision=revision+1 WHERE id=%s RETURNING *",
-                (*values, cancelled, before["id"]),
+                "(%s,%s,%s,%s,%s,%s),approver_id=%s,approver_name=%s,"
+                "cancelled=%s,revision=revision+1 WHERE id=%s RETURNING *",
+                (*values, *approval, cancelled, before["id"]),
             ).fetchone()
             _record(db, access, "cancel" if cancelled else "update", child, before)
 
@@ -183,7 +201,7 @@ class FinanceAllocations(FinanceLedger):
                     raise HTTPException(409, "Номер запроса уже использован для другого расхода.")
                 return _public(row, access)
             _require_parts(access, submitted["parts"])
-            parts = _calculated(payload, calculate, db)
+            parts = _approved_parts(payload, calculate, db)
             row = db.execute(
                 "INSERT INTO chaika.finance_allocations "
                 "(author_id,request_id,request_payload,method,parts,access_department_ids,"
@@ -230,7 +248,7 @@ class FinanceAllocations(FinanceLedger):
             ):
                 raise HTTPException(403, "Нельзя исправлять поля расхода закрытого заведения.")
             _require_parts(access, submitted["parts"])
-            parts = _calculated(payload, calculate, db)
+            parts = _approved_parts(payload, calculate, db, [before])
             participants = sorted({before["department_id"]} |
                                   {UUID(part["department_id"]) for part in parts}, key=str)
             row = db.execute(
@@ -272,7 +290,7 @@ class FinanceAllocations(FinanceLedger):
                 action = "cancel"
             else:
                 _require_parts(access, _request(payload)["parts"])
-                parts = _calculated(payload, calculate, db)
+                parts = _approved_parts(payload, calculate, db, before["parts"])
                 participants = sorted(set(before["access_department_ids"]) |
                                       {UUID(part["department_id"]) for part in parts}, key=str)
                 row = db.execute(

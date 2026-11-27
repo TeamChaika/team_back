@@ -112,6 +112,10 @@ def create_finance_router(access, repo, live_sales, *, ledger=None, allocations=
 
     AllocationAccess = Annotated[Scope, Depends(resolve_allocations)]
 
+    @router.get("/approvers")
+    def approvers(scope: Access):
+        return ledger.approvers(scope)
+
     @router.post("/allocations/preview")
     def preview(scope: AllocationAccess, payload: AllocationPreview, request: Request):
         request.app.state.auth.check_origin(request)
