@@ -21,6 +21,7 @@ Weight = Annotated[Decimal, Field(gt=0, max_digits=24, decimal_places=12)]
 
 class AllocationPart(Input):
     department_id: UUID
+    approver_id: UUID | None = None
     weight: Weight | None = None
     amount: Annotated[Decimal, Field(ge=0, max_digits=14, decimal_places=2)] | None = None
 

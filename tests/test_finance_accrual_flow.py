@@ -40,6 +40,16 @@ def test_expense_accrues_once_and_paid_amount_locks_for_manager(db, bundle, monk
         )
 
     db.execute("SET LOCAL ROLE postgres")
+    first_approver, second_approver = str(uuid4()), str(uuid4())
+    for department, approver, name in (
+        (venue, first_approver, "First venue supervisor"),
+        (second_venue, second_approver, "Second venue partner"),
+    ):
+        db.execute("INSERT INTO chaika.finance_approvers(id,name) VALUES(%s,%s)", (approver, name))
+        db.execute(
+            "INSERT INTO chaika.finance_department_approvers(department_id,approver_id) "
+            "VALUES(%s,%s)", (department, approver),
+        )
     identities = {}
     for person, role, sections in (
         ("manager", "manager", ["profit-loss"]),
@@ -109,12 +119,20 @@ def test_expense_accrues_once_and_paid_amount_locks_for_manager(db, bundle, monk
         "payment_method": "bank",
         "comment": "Октябрьская аренда",
     }
-    payload = {"request_id": str(uuid4()), "department_id": str(venue), **charge}
+    payload = {"request_id": str(uuid4()), "department_id": str(venue),
+               "approver_id": first_approver, **charge}
     with TestClient(app, base_url=origin, headers={"Origin": origin}) as client:
         client.cookies.set(ACCESS_COOKIE, "manager")
+        assert client.get(base + "/approvers").json()["rows"] == [
+            {"department_id": str(venue), "id": first_approver, "name": "First venue supervisor",
+             "available_to_all": False}
+        ]
+        wrong_venue = {**payload, "approver_id": second_approver}
+        assert client.post(ledger, json=wrong_venue).status_code == 422
         response = client.post(ledger, json=payload)
         assert response.is_success, response.text
         expense = response.json()
+        assert expense["approver_name"] == "First venue supervisor"
         assert client.post(ledger, json=payload).json()["id"] == expense["id"]
         url = ledger + "/" + expense["id"]
         paid = {**charge, "paid_date": str(november), "revision": expense["revision"]}
@@ -141,11 +159,18 @@ def test_expense_accrues_once_and_paid_amount_locks_for_manager(db, bundle, monk
         assert Decimal(report["expenses"]) == 0
         assert Decimal(report["operating_profit"]) == 600
 
+        # The person who approved the original charge has since left this restaurant.
+        db.execute("SET LOCAL ROLE postgres")
+        db.execute("DELETE FROM chaika.finance_department_approvers WHERE approver_id=%s",
+                   (first_approver,))
+        db.execute("SET LOCAL ROLE chaika_backend")
         allocation = {
             **paid,
             "request_id": str(uuid4()),
             "method": "equal",
-            "parts": [{"department_id": venue}, {"department_id": second_venue}],
+            # Omit the source venue's approver: preserve the manager's original approval.
+            "parts": [{"department_id": venue},
+                      {"department_id": second_venue, "approver_id": second_approver}],
         }
         client.cookies.set(ACCESS_COOKIE, "manager")
         assert client.post(url + "/allocate", json=allocation).status_code == 403
@@ -156,11 +181,15 @@ def test_expense_accrues_once_and_paid_amount_locks_for_manager(db, bundle, monk
         db.execute("SET CONSTRAINTS ALL IMMEDIATE")
         assert group["source_expense_id"] == expense["id"]
         assert group["author_id"] == identities["Bearer manager"]
+        assert {p["department_id"]: p["approver_name"] for p in group["parts"]} == {
+            str(venue): "First venue supervisor", str(second_venue): "Second venue partner",
+        }
         assert sorted(part["amount"] for part in group["parts"]) == ["90.12", "90.13"]
         assert client.post(url + "/allocate", json=allocation).json()["id"] == group["id"]
         client.cookies.set(ACCESS_COOKIE, "manager")
         original = client.get(ledger, params=period).json()["rows"]
         assert len(original) == 1 and original[0]["status"] == "converted"
+        assert original[0]["approver_id"] == first_approver
         assert client.get(url + "/history").json()["rows"][0]["actor"] == "accountant"
         client.cookies.set(ACCESS_COOKIE, "owner")
         report = client.get(
