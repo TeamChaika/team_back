@@ -77,7 +77,15 @@ def test_document_batch_prepares_once_after_all_days(monkeypatch, tmp_path, job_
 
 
 def test_preparation_failure_keeps_source_sync_success_but_retry_job_fails(monkeypatch, caplog):
-    from app import purchase_impact_precompute, purchase_prices_precompute
+    from app import (
+        purchase_impact_precompute,
+        purchase_prices_precompute,
+        purchase_receipts_precompute,
+    )
+
+    monkeypatch.setattr(
+        purchase_receipts_precompute, "ensure_prepared", lambda *a, **kw: {"status": "ready"}
+    )
 
     monkeypatch.setattr(
         purchase_prices_precompute, "ensure_prepared", lambda *a, **kw: {"status": "ready"}
@@ -94,7 +102,15 @@ def test_preparation_failure_keeps_source_sync_success_but_retry_job_fails(monke
 
 
 def test_stopped_preparation_does_not_start_and_busy_job_retries(monkeypatch):
-    from app import purchase_impact_precompute, purchase_prices_precompute
+    from app import (
+        purchase_impact_precompute,
+        purchase_prices_precompute,
+        purchase_receipts_precompute,
+    )
+
+    monkeypatch.setattr(
+        purchase_receipts_precompute, "ensure_prepared", lambda *a, **kw: {"status": "ready"}
+    )
 
     monkeypatch.setattr(
         purchase_prices_precompute, "ensure_prepared", lambda *a, **kw: {"status": "ready"}
@@ -117,7 +133,15 @@ def test_stopped_preparation_does_not_start_and_busy_job_retries(monkeypatch):
 
 @pytest.mark.parametrize("strict", [False, True])
 def test_price_preparation_failure_still_attempts_weekly_impact(monkeypatch, strict, caplog):
-    from app import purchase_impact_precompute, purchase_prices_precompute
+    from app import (
+        purchase_impact_precompute,
+        purchase_prices_precompute,
+        purchase_receipts_precompute,
+    )
+
+    monkeypatch.setattr(
+        purchase_receipts_precompute, "ensure_prepared", lambda *a, **kw: {"status": "ready"}
+    )
 
     calls = []
 

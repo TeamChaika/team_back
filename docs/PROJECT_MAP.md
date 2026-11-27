@@ -20,7 +20,7 @@
 | Home Assistant: агрегаты отображаемого дня одного ресторана | [Контракт и включение](home-assistant-bridge.md) | [app/web/ha_bridge.py](../app/web/ha_bridge.py); до09:00вчера, с09:00сегодня; отдельный M2M GET |
 | Тепловая карта кухни | [Аналитика](CODEMAPS/analytics.md#тепловая-карта-кухни) | [app/web/kitchen_heatmap.py](../app/web/kitchen_heatmap.py), `GET /api/sales/kitchen/heatmap` |
 | Показатели и их фильтры | [Аналитика](CODEMAPS/analytics.md), [фоновый кэш](indicator-cache.md) | [app/web/indicators.py](../app/web/indicators.py), [app/web/indicator_cache.py](../app/web/indicator_cache.py) |
-| Закупочная цена и недельное влияние | [Аналитика](CODEMAPS/analytics.md) | [app/web/purchase_impact.py](../app/web/purchase_impact.py) |
+| Закупочная цена, поставки через юрлица и недельное влияние | [Аналитика](CODEMAPS/analytics.md) | [Закупочные цены](../app/web/purchase_prices.py), [общая сверка с Excel](../app/purchase_receipt_matching.sql), [недельное влияние](../app/web/purchase_impact.py) |
 | Аналитические списки документов/остатков/событий | [Аналитика](CODEMAPS/analytics.md) | [app/web/repository.py](../app/web/repository.py) |
 | Приход в iiko, реализация и счёт PDF | [Контракт и запуск](commercial-invoices.md) | `app/commercial_invoices/`, `app/web/commercial_invoices.py`; отдельные права, миграция documents/0008 |
 | Создать внешнего покупателя/поставщика | [Контракт создания](commercial-invoices.md#создание-внешнего-контрагента) | `counterparties.py`, `counterparty_dispatch.py`, `counterparty_transport.py` в `app/commercial_invoices/`; миграция documents/0009, отдельное право и флаг, неизвестный результат проверяется только GET |

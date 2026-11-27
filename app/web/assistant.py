@@ -61,7 +61,7 @@ class Selection(BaseModel):
 class Context(BaseModel):
     model_config = ConfigDict(extra="forbid")
     product: Selection | None = None
-    kind: Literal["all", "unlinked", "linked"] = "unlinked"
+    kind: Literal["all", "unlinked", "linked", "receipts"] = "unlinked"
     exclude_household: bool = True
     recent_only: bool = True
     recent_period: Literal["month"] | None = None
@@ -237,7 +237,7 @@ class DataTools:
                 {
                     "kind": "history",
                     "label": row["product"],
-                    "selection": selection.model_dump(mode="json"),
+                    "selection": selection.model_dump(mode="json") | {"kind": self.context.kind},
                 }
             )
         return {
@@ -252,7 +252,7 @@ class DataTools:
         report = await run_in_threadpool(
             self.repo.purchase_prices,
             self.scope,
-            "all",
+            "receipts" if self.context.kind == "receipts" else "all",
             False,
             selection.key(),
             recent_only=False,
@@ -264,7 +264,7 @@ class DataTools:
             {
                 "kind": "history",
                 "label": row["product"] + " · динамика цены",
-                "selection": selection.model_dump(mode="json"),
+                "selection": selection.model_dump(mode="json") | {"kind": self.context.kind},
             }
         )
         receipts = []
@@ -295,12 +295,13 @@ class DataTools:
             selection.key(),
             None,
             True,
+            **({"kind": "receipts"} if self.context.kind == "receipts" else {}),
         )
         self.source(
             {
                 "kind": "impact",
                 "label": result["price"]["product"] + " · блюда и влияние",
-                "selection": selection.model_dump(mode="json"),
+                "selection": selection.model_dump(mode="json") | {"kind": self.context.kind},
             }
         )
         keys = (

@@ -9,6 +9,7 @@ from uuid import UUID
 
 from app.web.coverage import ZONE
 from app.web.purchase_prices_prepared import prepared_receipts_query
+from app.web.purchase_receipts import receipt_lines_query
 
 # Confirmed Chain group "ХОЗНУЖДЫ". Match its identity, including renamed/deleted
 # descendants, rather than guessing a product's purpose from its name.
@@ -152,6 +153,7 @@ def read_purchase_prices(
     recent_period=None,
     as_of: date | None = None,
     top_increases=False,
+    require_prepared=False,
 ):
     """Latest price per product/unit/link across all accessible warehouses.
 
@@ -159,12 +161,34 @@ def read_purchase_prices(
     latest receipt timestamps are loaded when opening a single product's history.
     Recency limits the list's latest receipts, never the comparison history.
     """
+    join_sql, fields_sql, linked_sql = JOIN, FIELDS, LINKED
+    receipt_prepared = None
+    source_params = []
+    if kind == "receipts":
+        if require_prepared:
+            from app.web.purchase_receipts_prepared import prepared_queries
+
+            receipt_prepared = prepared_queries(db, scope)
+            if receipt_prepared is None:
+                raise ValueError("receipt_preparation_pending")
+        source_sql, source_params = (
+            receipt_prepared[0] if receipt_prepared else receipt_lines_query(scope, spec)
+        )
+        join_sql = (
+            "(" + source_sql + ") i JOIN chaika.incoming_invoices t "
+            "ON (t.source_id,t.id)=(i.source_id,i.document_id)"
+        )
+        linked_sql = "false"
+        fields_sql = (
+            FIELDS.replace("t.supplier_id", "i.supplier_id").replace(LINKED, "false")
+            + ",i.receipt_route"
+        )
     today = as_of or datetime.now(ZONE).date()
     recent_since = recent_start(today, recent_period)
     clauses = [ELIGIBLE, "(" + spec["guard"] + ")"]
-    params = list(spec["params"])
-    if kind != "all":
-        clauses.append(LINKED + "=%s")
+    params = [*source_params, *spec["params"]]
+    if kind not in {"all", "receipts"}:
+        clauses.append(linked_sql + "=%s")
         params.append(kind == "linked")
     excluded_products = household_product_ids(db) if exclude_household else None
     if exclude_household:
@@ -172,7 +196,7 @@ def read_purchase_prices(
         params.append(excluded_products)
     if selection:
         product_id, store_id, unit_id, linked = selection
-        clauses.extend(["i.product_id=%s", "i.amount_unit_id=%s", LINKED + "=%s"])
+        clauses.extend(["i.product_id=%s", "i.amount_unit_id=%s", linked_sql + "=%s"])
         params.extend([product_id, unit_id, linked])
         # Explicit warehouse detail URLs remain usable; the network UI omits store_id.
         if store_id is not None:
@@ -185,11 +209,11 @@ def read_purchase_prices(
         ctx.prec = 70
         if selection:
             rows = db.execute(
-                "WITH history AS (SELECT " + FIELDS + "," + STAMP + " AS stamp,"
+                "WITH history AS (SELECT " + fields_sql + "," + STAMP + " AS stamp,"
                 "dense_rank() OVER (ORDER BY "
                 + STAMP
                 + " DESC) AS position FROM "
-                + JOIN
+                + join_sql
                 + " WHERE "
                 + where
                 + ") SELECT * FROM history WHERE position<=%s "
@@ -208,16 +232,29 @@ def read_purchase_prices(
                 if item:
                     changes.append(item)
         else:
-            prepared = prepared_receipts_query(db, scope, kind, excluded_products)
+            prepared = (
+                None
+                if kind == "receipts"
+                else prepared_receipts_query(db, scope, kind, excluded_products)
+            )
+            if receipt_prepared:
+                prepared_sql, prepared_params = receipt_prepared[1]
+                if excluded_products is not None:
+                    prepared_sql = (
+                        "SELECT * FROM (" + prepared_sql + ") observations "
+                        "WHERE NOT (product_id=ANY(%s::uuid[]))"
+                    )
+                    prepared_params = [*prepared_params, excluded_products]
+                prepared = prepared_sql, prepared_params
             receipts_sql, receipt_params = prepared or (
                 "SELECT i.product_id,NULL::uuid AS store_id,i.amount_unit_id AS unit_id,"
-                + LINKED
+                + linked_sql
                 + " AS linked,"
                 + STAMP
                 + " AS date,"
                 "sum(i.amount) AS amount,sum(i.sum) AS sum,"
                 "bool_and(i.amount IS NOT NULL AND i.amount>0 AND i.sum>=0) AS valid FROM "
-                + JOIN
+                + join_sql
                 + " WHERE "
                 + where
                 + " GROUP BY 1,2,3,4,5",
