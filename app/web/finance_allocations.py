@@ -15,6 +15,7 @@ from app.web.finance_ledger import (
     _read_one,
     _record,
     approval_for,
+    category_name_for,
     state,
 )
 
@@ -75,7 +76,7 @@ def _calculated(payload, calculate, db):
 def _approved_parts(payload, calculate, db, previous=()):
     saved = {str(part["department_id"]): part for part in previous}
     submitted = {str(part.department_id): part for part in payload.parts}
-    choices = _approvers(db, [part.department_id for part in payload.parts])
+    choices = _approvers(db, [part.department_id for part in payload.parts], writing=True)
     result = _calculated(payload, calculate, db)
     for part in result:
         member = submitted[part["department_id"]]
@@ -149,17 +150,18 @@ def _sync_expenses(db, access, row):
         if before is None:
             child = db.execute(
                 "INSERT INTO chaika.finance_expenses "
-                "(department_id,author_id,request_id,allocation_id,approver_id,approver_name,"
-                + FIELDS + ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
-                (venue, row["author_id"], uuid4(), row["id"], *approval, *values),
+                "(department_id,author_id,request_id,allocation_id,approver_id,approver_name,category_name,"
+                + FIELDS + ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                (venue, row["author_id"], uuid4(), row["id"], *approval,
+                 common["category_name"], *values),
             ).fetchone()
             _record(db, access, "create", child)
         else:
             child = db.execute(
                 "UPDATE chaika.finance_expenses SET (" + FIELDS + ")="
-                "(%s,%s,%s,%s,%s,%s),approver_id=%s,approver_name=%s,"
+                "(%s,%s,%s,%s,%s,%s),approver_id=%s,approver_name=%s,category_name=%s,"
                 "cancelled=%s,revision=revision+1 WHERE id=%s RETURNING *",
-                (*values, *approval, cancelled, before["id"]),
+                (*values, *approval, common["category_name"], cancelled, before["id"]),
             ).fetchone()
             _record(db, access, "cancel" if cancelled else "update", child, before)
 
@@ -202,12 +204,13 @@ class FinanceAllocations(FinanceLedger):
                 return _public(row, access)
             _require_parts(access, submitted["parts"])
             parts = _approved_parts(payload, calculate, db)
+            category_name = category_name_for(db, payload.category)
             row = db.execute(
                 "INSERT INTO chaika.finance_allocations "
-                "(author_id,request_id,request_payload,method,parts,access_department_ids,"
-                + FIELDS + ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                "(author_id,request_id,request_payload,method,parts,access_department_ids,category_name,"
+                + FIELDS + ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                 (access.actor, payload.request_id, Jsonb(submitted), payload.method,
-                 Jsonb(parts), [UUID(part["department_id"]) for part in parts],
+                 Jsonb(parts), [UUID(part["department_id"]) for part in parts], category_name,
                  *(getattr(payload, field) for field in ExpenseFields.model_fields)),
             ).fetchone()
             _sync_expenses(db, access, row)
@@ -249,15 +252,16 @@ class FinanceAllocations(FinanceLedger):
                 raise HTTPException(403, "Нельзя исправлять поля расхода закрытого заведения.")
             _require_parts(access, submitted["parts"])
             parts = _approved_parts(payload, calculate, db, [before])
+            category_name = category_name_for(db, payload.category, before)
             participants = sorted({before["department_id"]} |
                                   {UUID(part["department_id"]) for part in parts}, key=str)
             row = db.execute(
                 "INSERT INTO chaika.finance_allocations "
                 "(author_id,request_id,request_payload,source_expense_id,method,parts,"
-                "access_department_ids," + FIELDS + ") "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                "access_department_ids,category_name," + FIELDS + ") "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                 (before["author_id"], uuid4(), Jsonb(submitted), expense_id, payload.method,
-                 Jsonb(parts), participants,
+                 Jsonb(parts), participants, category_name,
                  *(getattr(payload, field) for field in ExpenseFields.model_fields)),
             ).fetchone()
             retired = db.execute(
@@ -291,14 +295,15 @@ class FinanceAllocations(FinanceLedger):
             else:
                 _require_parts(access, _request(payload)["parts"])
                 parts = _approved_parts(payload, calculate, db, before["parts"])
+                category_name = category_name_for(db, payload.category, before)
                 participants = sorted(set(before["access_department_ids"]) |
                                       {UUID(part["department_id"]) for part in parts}, key=str)
                 row = db.execute(
                     "UPDATE chaika.finance_allocations SET (" + FIELDS + ")="
-                    "(%s,%s,%s,%s,%s,%s),method=%s,parts=%s,access_department_ids=%s,"
+                    "(%s,%s,%s,%s,%s,%s),category_name=%s,method=%s,parts=%s,access_department_ids=%s,"
                     "revision=revision+1 WHERE id=%s RETURNING *",
                     (*(getattr(payload, field) for field in ExpenseFields.model_fields),
-                     payload.method, Jsonb(parts), participants, allocation_id),
+                     category_name, payload.method, Jsonb(parts), participants, allocation_id),
                 ).fetchone()
                 action = "update"
             _sync_expenses(db, access, row)

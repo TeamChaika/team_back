@@ -15,8 +15,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.web.password_policy import require_personal_password
 from app.web.permissions import finance_level
 
-Category = Literal["rent", "payroll", "utilities", "repairs", "marketing", "services", "other"]
-
 
 class Input(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, hide_input_in_errors=True)
@@ -25,7 +23,7 @@ class Input(BaseModel):
 class ExpenseFields(Input):
     expense_date: date
     paid_date: date | None = None
-    category: Category
+    category: Annotated[str, Field(min_length=1, max_length=64)]
     amount: Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=2)]
     payment_method: Literal["cash", "bank"]
     comment: str = Field(default="", max_length=500)
@@ -77,7 +75,7 @@ class Access:
 FIELDS = ",".join(ExpenseFields.model_fields)
 VISIBLE = (
     "SELECT e.id,e.department_id,e.author_id,u.display_name AS author,e.expense_date,"
-    "e.paid_date,e.category,e.amount,e.payment_method,e.comment,e.revision,e.cancelled,"
+    "e.paid_date,e.category,e.category_name,e.amount,e.payment_method,e.comment,e.revision,e.cancelled,"
     "e.allocation_id,e.converted_allocation_id,e.approver_id,e.approver_name "
     "FROM chaika.finance_expenses e JOIN chaika.web_users u ON u.id=e.author_id WHERE "
 )
@@ -90,6 +88,8 @@ def state(row):
         result["paid_date"] = result["paid_date"].isoformat()
     result["amount"] = format(result["amount"], ".2f")
     result["cancelled"] = row["cancelled"]
+    if "category_name" in row:
+        result["category_name"] = row["category_name"]
     if "approver_id" in row:
         result["approver_id"] = str(row["approver_id"]) if row["approver_id"] else None
         result["approver_name"] = row.get("approver_name")
@@ -170,14 +170,23 @@ def _read_one(db, access, expense_id, *, lock=False):
     return row
 
 
-def _approvers(db, venues):
-    return db.execute(
+def _approvers(db, venues, *, writing=False):
+    if writing:
+        db.execute("SELECT pg_advisory_xact_lock_shared(hashtextextended(%s,0))",
+                   ("chaika:finance-catalog",))
+    rows = db.execute(
         "SELECT v.department_id,p.id,p.name,p.available_to_all "
         "FROM unnest(%s::uuid[]) v(department_id) CROSS JOIN chaika.finance_approvers p "
-        "WHERE p.available_to_all OR EXISTS (SELECT FROM chaika.finance_department_approvers d "
-        "WHERE d.source_id='primary' AND d.department_id=v.department_id AND d.approver_id=p.id) "
+        "WHERE NOT p.archived AND (p.available_to_all OR EXISTS ("
+        "SELECT FROM chaika.finance_department_approvers d "
+        "WHERE d.source_id='primary' AND d.department_id=v.department_id AND d.approver_id=p.id)) "
         "ORDER BY v.department_id,p.available_to_all,p.name,p.id", (list(venues),),
     ).fetchall()
+    # Archiving all assignments must not silently make recorded approval optional.
+    required = bool(rows) or db.execute(
+        "SELECT EXISTS(SELECT FROM chaika.finance_approvers) AS required"
+    ).fetchone()["required"]
+    return {"rows": rows, "required": required}
 
 
 def approval_for(choices, venue, payload, before=None):
@@ -187,14 +196,25 @@ def approval_for(choices, venue, payload, before=None):
     ):
         # Keep the original name even when this person has been renamed or unassigned.
         return UUID(str(saved_id)), before["approver_name"]
-    available = {row["id"]: row["name"] for row in choices if row["department_id"] == venue}
+    available = {row["id"]: row["name"] for row in choices["rows"] if row["department_id"] == venue}
     if payload.approver_id is None:
-        if available:
+        if choices["required"]:
             raise HTTPException(422, "Укажите, кто согласовал расход.")
         return None, None
     if payload.approver_id not in available:
         raise HTTPException(422, "Выбранный согласующий недоступен для этого расхода.")
     return payload.approver_id, available[payload.approver_id]
+
+
+def category_name_for(db, code, before=None):
+    if before and before["category"] == code:
+        return before["category_name"]
+    category = db.execute(
+        "SELECT name FROM chaika.finance_categories WHERE code=%s AND NOT archived", (code,),
+    ).fetchone()
+    if category is None:
+        raise HTTPException(422, "Выберите действующую статью расходов.")
+    return category["name"]
 
 
 def _record(db, access, action, row, before=None):
@@ -226,7 +246,7 @@ class FinanceLedger:
     def approvers(self, scope):
         with self.repo.connection(repeatable=True) as db:
             access = _access(db, scope, writing=False, all_venues=True)
-            return {"rows": _approvers(db, access.venues)}
+            return _approvers(db, access.venues)
 
     def list(self, scope, start, end, *, limit, offset):
         with self.repo.connection(repeatable=True) as db:
@@ -308,6 +328,11 @@ class FinanceLedger:
                     "GROUP BY a.category,a.payment_method ORDER BY a.category",
                     (start, end, access.actor),
                 ).fetchall()
+            codes = {row["category"] for row in groups + pending_groups}
+            category_names = {row["code"]: row["name"] for row in db.execute(
+                "SELECT code,name FROM chaika.finance_categories WHERE code=ANY(%s::text[])",
+                (list(codes),),
+            ).fetchall()}
         amounts = {"cash": Decimal(0), "bank": Decimal(0)}
         categories = {}
         direct = allocated = Decimal(0)
@@ -332,7 +357,8 @@ class FinanceLedger:
             "pending_expenses": format(pending, ".2f"),
             **{key: format(value, ".2f") for key, value in amounts.items()},
             "by_category": [
-                {"category": key, "amount": format(value, ".2f")}
+                {"category": key, "category_name": category_names[key],
+                 "amount": format(value, ".2f")}
                 for key, value in categories.items()
             ],
         }
@@ -360,13 +386,14 @@ class FinanceLedger:
                     raise HTTPException(409, "Номер запроса уже использован для другого расхода.")
                 return public_row(_read_one(db, access, original["id"]), access)
             access.require_writable(payload.department_id)
-            approval = approval_for(_approvers(db, [payload.department_id]),
+            approval = approval_for(_approvers(db, [payload.department_id], writing=True),
                                     payload.department_id, payload)
+            category_name = category_name_for(db, payload.category)
             added = db.execute(
                 "INSERT INTO chaika.finance_expenses "
-                "(department_id,author_id,request_id,approver_id,approver_name," + FIELDS
-                + ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-                (payload.department_id, access.actor, payload.request_id, *approval,
+                "(department_id,author_id,request_id,approver_id,approver_name,category_name,"
+                + FIELDS + ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                (payload.department_id, access.actor, payload.request_id, *approval, category_name,
                  *(getattr(payload, field) for field in ExpenseFields.model_fields)),
             ).fetchone()
             row = _read_one(db, access, added["id"])
@@ -401,14 +428,16 @@ class FinanceLedger:
                 )
             else:
                 venue = before["department_id"]
-                approval = approval_for(_approvers(db, [venue]), venue, payload, before)
+                choices = _approvers(db, [venue], writing=True)
+                approval = approval_for(choices, venue, payload, before)
+                category_name = category_name_for(db, payload.category, before)
                 db.execute(
                     "UPDATE chaika.finance_expenses SET (" + FIELDS + ")="
-                    "(%s,%s,%s,%s,%s,%s),approver_id=%s,approver_name=%s,"
+                    "(%s,%s,%s,%s,%s,%s),approver_id=%s,approver_name=%s,category_name=%s,"
                     "revision=revision+1 WHERE id=%s",
                     (
                         *(getattr(payload, field) for field in ExpenseFields.model_fields),
-                        *approval,
+                        *approval, category_name,
                         expense_id,
                     ),
                 )

@@ -18,6 +18,13 @@ from app.web.finance_allocation_math import (
     calculate_parts,
     public_preview,
 )
+from app.web.finance_catalog import (
+    ApproverCreate,
+    ApproverEdit,
+    CategoryCreate,
+    CategoryEdit,
+    FinanceCatalog,
+)
 from app.web.finance_ledger import ExpenseCancel, ExpenseCreate, ExpenseEdit, FinanceLedger
 from app.web.permissions import finance_level
 from app.web.repository import Scope
@@ -91,12 +98,13 @@ def _report(scope, repo, ledger, live_sales, start, end):
     }
 
 
-def create_finance_router(access, repo, live_sales, *, ledger=None, allocations=None):
+def create_finance_router(access, repo, live_sales, *, ledger=None, allocations=None, catalog=None):
     from app.web.finance_allocations import FinanceAllocations
 
     router = APIRouter(prefix="/api/profit-loss")
     ledger = ledger if ledger is not None else FinanceLedger(repo)
     allocations = allocations if allocations is not None else FinanceAllocations(repo)
+    catalog = catalog if catalog is not None else FinanceCatalog(repo)
 
     def resolve(scope: Annotated[Scope, Depends(access)]):
         return _finance_scope(scope)
@@ -111,6 +119,43 @@ def create_finance_router(access, repo, live_sales, *, ledger=None, allocations=
         return replace(scope, selected=None)
 
     AllocationAccess = Annotated[Scope, Depends(resolve_allocations)]
+
+    def catalog_access(scope: Access):
+        if finance_level(scope.user) not in {"owner", "accountant"}:
+            raise HTTPException(403, "Справочники доступны бухгалтерии и владельцу.")
+        return replace(scope, selected=None)
+
+    CatalogAccess = Annotated[Scope, Depends(catalog_access)]
+
+    @router.get("/categories")
+    def active_categories(scope: Access):
+        return catalog.categories(scope)
+
+    @router.get("/catalog")
+    def finance_catalog(scope: CatalogAccess):
+        return catalog.catalog(scope)
+
+    @router.post("/catalog/categories")
+    def create_category(scope: CatalogAccess, payload: CategoryCreate, request: Request):
+        request.app.state.auth.check_origin(request)
+        return catalog.create_category(scope, payload)
+
+    @router.patch("/catalog/categories/{code}")
+    def edit_category(scope: CatalogAccess, code: str, payload: CategoryEdit, request: Request):
+        request.app.state.auth.check_origin(request)
+        return catalog.edit_category(scope, code, payload)
+
+    @router.post("/catalog/approvers")
+    def create_approver(scope: CatalogAccess, payload: ApproverCreate, request: Request):
+        request.app.state.auth.check_origin(request)
+        return catalog.save_approver(scope, payload)
+
+    @router.patch("/catalog/approvers/{person_id}")
+    def edit_approver(
+        scope: CatalogAccess, person_id: UUID, payload: ApproverEdit, request: Request,
+    ):
+        request.app.state.auth.check_origin(request)
+        return catalog.save_approver(scope, payload, person_id)
 
     @router.get("/approvers")
     def approvers(scope: Access):
