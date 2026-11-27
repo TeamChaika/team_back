@@ -186,7 +186,7 @@ def test_posting_payment_history_and_isolation(ledger_db):
         "pending_expenses": "0.00",
         "bank": "120.50",
         "cash": "0.00",
-        "by_category": [{"category": "rent", "amount": "120.50"}],
+        "by_category": [{"category": "rent", "category_name": "Аренда", "amount": "120.50"}],
     }
     assert ledger.totals(owner, start, end) == expected
     assert ledger.totals(owner, date(2025, 12, 1), date(2025, 12, 31))["expenses"] == "0.00"
