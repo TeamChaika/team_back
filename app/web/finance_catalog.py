@@ -109,6 +109,10 @@ class FinanceCatalog(FinanceLedger):
             _admin(access)
             global_access = _global_access(db, access)
             people = db.execute(APPROVERS + " ORDER BY p.archived,p.name,p.id").fetchall()
+            venues = [
+                {**venue, "name": venue["name"] or str(venue["id"])}
+                for venue in access.venues.values()
+            ]
             return {
                 "categories": db.execute(
                     "SELECT " + CATEGORY_FIELDS + " FROM chaika.finance_categories "
@@ -119,9 +123,7 @@ class FinanceCatalog(FinanceLedger):
                     for row in people
                     if (person := _visible(row, access.venues, global_access)) is not None
                 ],
-                "venues": sorted(
-                    access.venues.values(), key=lambda venue: (venue["name"], venue["id"])
-                ),
+                "venues": sorted(venues, key=lambda venue: (venue["name"], venue["id"])),
                 "can_manage_global_approvers": global_access,
             }
 
