@@ -56,21 +56,31 @@ def test_input():
     assert expense(venue, paid_date="2025-11-01").paid_date == date(2025, 11, 1)
 
 
+FINANCE_MIGRATIONS = Path(__file__).resolve().parents[1] / "supabase/migrations"
+
+
+def finance_migration_for_schema(path, schema):
+    return (
+        path.read_text(encoding="utf-8")
+        .replace("chaika.", schema + ".")
+        .replace("PUBLIC, anon, authenticated", "PUBLIC")
+        .replace("TO chaika_backend", "TO CURRENT_USER")
+    )
+
+
 @pytest.fixture()
-def ledger_db():
+def ledger_db(request):
     dsn = os.environ.get("LOW_MARKUP_TEST_DSN")
     if not dsn:
         pytest.skip("loopback PostgreSQL fixture required")
     assert conninfo_to_dict(dsn).get("host") in {"127.0.0.1", "localhost"}
     schema = "finance_test_" + uuid4().hex
     # Same SQL and grants as production, in a fresh private schema.
-    migrations = Path(__file__).resolve().parents[1] / "supabase/migrations"
-    migration = "\n".join(path.read_text(encoding="utf-8")
-                          for path in sorted(migrations.glob("*_finance_*.sql")))
-    migration = (
-        migration.replace("chaika.", schema + ".")
-        .replace("PUBLIC, anon, authenticated", "PUBLIC")
-        .replace("TO chaika_backend", "TO CURRENT_USER")
+    before = getattr(request, "param", None)
+    migration = "\n".join(
+        finance_migration_for_schema(path, schema)
+        for path in sorted(FINANCE_MIGRATIONS.glob("*_finance_*.sql"))
+        if before is None or path.name < before
     )
 
     def connection():

@@ -26,6 +26,9 @@ UPDATE chaika.finance_expenses e SET category_name=c.name FROM chaika.finance_ca
     WHERE e.category=c.code;
 UPDATE chaika.finance_allocations a SET category_name=c.name FROM chaika.finance_categories c
     WHERE a.category=c.code;
+-- Both backfills queue deferred balance checks. Run them after both tables are
+-- populated so PostgreSQL permits the following DDL in this same transaction.
+SET CONSTRAINTS ALL IMMEDIATE;
 ALTER TABLE chaika.finance_expenses ALTER COLUMN category_name SET NOT NULL;
 ALTER TABLE chaika.finance_allocations ALTER COLUMN category_name SET NOT NULL;
 
