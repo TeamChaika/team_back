@@ -28,6 +28,14 @@ from app.web.purchase_impact_prepared import add_prepared_impacts
 from app.web.purchase_prices import read_purchase_prices
 
 
+def receipt_preparation_pending():
+    return HTTPException(
+        503,
+        "Обновляем закупочные цены. Повторите через несколько секунд.",
+        headers={"Retry-After": "15"},
+    )
+
+
 def serial(value):
     return json.loads(json.dumps(value, default=str, ensure_ascii=False))
 
@@ -617,34 +625,49 @@ class Repository:
         include_impact=False,
         top_increases=False,
     ):
-        with self.connection(repeatable=True) as db:
-            report = read_purchase_prices(
-                db,
-                scope,
-                self.resource_query(scope, "invoices"),
-                kind,
-                exclude_household,
-                selection,
-                recent_only=recent_only,
-                recent_period=recent_period,
-                top_increases=top_increases,
-            )
-            if selection is None and include_impact:
-                add_prepared_impacts(db, scope, report)
-        return serial(report)
-
-    def purchase_impact(self, scope, selection, analysis_department_id=None, all_departments=False):
-        with self.connection(repeatable=True) as db:
-            return serial(
-                read_purchase_impact(
+        try:
+            with self.connection(repeatable=True) as db:
+                report = read_purchase_prices(
                     db,
                     scope,
                     self.resource_query(scope, "invoices"),
+                    kind,
+                    exclude_household,
                     selection,
-                    analysis_department_id,
-                    all_departments,
+                    recent_only=recent_only,
+                    recent_period=recent_period,
+                    top_increases=top_increases,
+                    require_prepared=kind == "receipts",
                 )
-            )
+                if selection is None and include_impact:
+                    add_prepared_impacts(db, scope, report)
+            return serial(report)
+        except ValueError as exc:
+            if str(exc) == "receipt_preparation_pending":
+                raise receipt_preparation_pending() from exc
+            raise
+
+    def purchase_impact(
+        self, scope, selection, analysis_department_id=None, all_departments=False, kind="all"
+    ):
+        try:
+            with self.connection(repeatable=True) as db:
+                return serial(
+                    read_purchase_impact(
+                        db,
+                        scope,
+                        self.resource_query(scope, "invoices"),
+                        selection,
+                        analysis_department_id,
+                        all_departments,
+                        kind=kind,
+                        require_prepared=kind == "receipts",
+                    )
+                )
+        except ValueError as exc:
+            if str(exc) == "receipt_preparation_pending":
+                raise receipt_preparation_pending() from exc
+            raise
 
     def resource_query(self, scope, resource):
         """All expressions below are fixed code; external values are bound parameters."""

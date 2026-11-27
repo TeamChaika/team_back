@@ -576,7 +576,7 @@ def create_portal(
     @app.get("/api/purchase-prices")
     def purchase_prices(
         scope: ReportAccess,
-        kind: Literal["unlinked", "linked", "all"] = "unlinked",
+        kind: Literal["unlinked", "linked", "all", "receipts"] = "unlinked",
         exclude_household: bool = True,
         recent_only: bool = True,
         recent_period: Literal["month"] | None = None,
@@ -598,11 +598,12 @@ def create_portal(
         scope: ReportAccess,
         product_id: UUID,
         unit_id: UUID,
+        kind: Literal["all", "unlinked", "linked", "receipts"] = "all",
         linked: bool = False,
         store_id: UUID | None = None,
     ):
         report = repo.purchase_prices(
-            scope, "all", False, (product_id, store_id, unit_id, linked), recent_only=False
+            scope, kind, False, (product_id, store_id, unit_id, linked), recent_only=False
         )
         if not report["rows"]:
             raise HTTPException(404, "История цены не найдена или недоступна.")
@@ -617,9 +618,11 @@ def create_portal(
         linked: bool = False,
         analysis_department_id: UUID | None = None,
         all_departments: bool = False,
+        kind: Literal["all", "unlinked", "linked", "receipts"] = "all",
     ):
         return repo.purchase_impact(
-            scope, (product_id, store_id, unit_id, linked), analysis_department_id, all_departments
+            scope, (product_id, store_id, unit_id, linked),
+            analysis_department_id, all_departments, **({"kind": kind} if kind != "all" else {})
         )
 
     @app.get("/api/assistant/status")

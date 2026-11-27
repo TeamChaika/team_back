@@ -86,10 +86,15 @@ def prepare_purchase_impact(settings, stop, *, strict=False):
         return
     from app.purchase_impact_precompute import ensure_prepared as prepare_impact
     from app.purchase_prices_precompute import ensure_prepared as prepare_prices
+    from app.purchase_receipts_precompute import ensure_prepared as prepare_receipts
     from app.sync_sales_history import error_code
 
     failure = None
-    for name, prepare in (("purchase_prices", prepare_prices), ("purchase_impact", prepare_impact)):
+    for name, prepare in (
+        ("purchase_receipts", prepare_receipts),
+        ("purchase_prices", prepare_prices),
+        ("purchase_impact", prepare_impact),
+    ):
         if stop.is_set():
             break
         try:

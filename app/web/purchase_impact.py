@@ -381,7 +381,8 @@ def analysis_scope(scope, price_department, selling_ids, selected=None, all_depa
 
 
 def read_purchase_impact(
-    db, scope, spec, selection, analysis_department_id=None, all_departments=False
+    db, scope, spec, selection, analysis_department_id=None, all_departments=False, *,
+    kind="all", require_prepared=False
 ):
     from app.web.purchase_impact_prepared import prepared_window
     from app.web.warehouse_analytics import require_department_report
@@ -392,7 +393,10 @@ def read_purchase_impact(
         raise HTTPException(404, "Товар или склад недоступен.")
     # Validate the independently selected sales venue before doing expensive reads.
     analysis_scope(scope, None, [], analysis_department_id, all_departments)
-    history = read_purchase_prices(db, scope, spec, "all", False, selection, recent_only=False)
+    history = read_purchase_prices(
+        db, scope, spec, kind, False, selection, recent_only=False,
+        require_prepared=require_prepared,
+    )
     if not history["rows"]:
         raise HTTPException(404, "История цены не найдена или недоступна.")
     price = history["rows"][0]

@@ -9,9 +9,14 @@ from psycopg import sql
 
 from app.operation_settings import settings_schema
 from app.purchase_digest_xlsx import render_workbook
+from app.purchase_receipt_matching import routing_ctes
 from app.web.purchase_prices import HISTORY_SIZE, HOUSEHOLD_GROUP_ID
 
-QUERY = sql.SQL(Path(__file__).with_suffix(".sql").read_text(encoding="utf-8"))
+QUERY = sql.SQL(Path(__file__).with_suffix(".sql").read_text(encoding="utf-8").replace(
+    "{receipt_routing}", routing_ctes(schema="{schema}",
+        day_pair_window="p.observed >= %(start)s", destination_guard="true",
+        receipt_end="%(end)s", procurement_group="%(procurement_group)s")
+))
 MOSCOW = ZoneInfo("Europe/Moscow")
 # The primary iiko directory owns this stable UUID even if the department is renamed.
 PROCUREMENT_GROUP = UUID("231a6b55-3b64-4b80-ad84-b97881bda814")
